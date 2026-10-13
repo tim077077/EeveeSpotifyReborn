@@ -1,0 +1,32 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Slidemill</title>
+  <link rel="stylesheet" href="/static/styles.css" />
+</head>
+<body>
+  <aside class="sidebar">
+    <div class="brand">Slidemill</div>
+    <nav>
+      <a href="#home" data-view="home">Dashboard</a>
+      <a href="#create" data-view="create">Create slideshow</a>
+      <a href="#automations" data-view="automations">Automations</a>
+      <a href="#slideshows" data-view="slideshows">Slideshows</a>
+      <a href="#collections" data-view="collections">Image collections</a>
+      <a href="#products" data-view="products">Products</a>
+      <a href="#accounts" data-view="accounts">TikTok accounts</a>
+      <a href="#analytics" data-view="analytics">Analytics</a>
+    </nav>
+    <div class="sidebar-foot" id="status-pills"></div>
+  </aside>
+
+  <main id="view"></main>
+  <div id="toast" class="toast" hidden></div>
+
+  <dialog id="dialog"><form method="dialog" id="dialog-body"></form></dialog>
+
+  <script src="/static/app.js" type="module"></script>
+</body>
+</html>
