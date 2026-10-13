@@ -40,11 +40,8 @@ class Settings:
     api_key: str = os.environ.get("SLIDEMILL_API_KEY", "")
     timezone: str = os.environ.get("SLIDEMILL_TIMEZONE", "America/Los_Angeles")
 
-    anthropic_model: str = os.environ.get("ANTHROPIC_MODEL", "claude-opus-5-5")
+    # Thinking effort for Claude models that support it: low | medium | high.
     anthropic_effort: str = os.environ.get("ANTHROPIC_EFFORT", "medium")
-
-    pexels_api_key: str = os.environ.get("PEXELS_API_KEY", "")
-    unsplash_access_key: str = os.environ.get("UNSPLASH_ACCESS_KEY", "")
 
     tiktok_client_key: str = os.environ.get("TIKTOK_CLIENT_KEY", "")
     tiktok_client_secret: str = os.environ.get("TIKTOK_CLIENT_SECRET", "")

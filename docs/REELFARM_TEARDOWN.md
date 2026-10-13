@@ -39,7 +39,9 @@ You set up an "automation" once: a TikTok account, a list of hook ideas, a style
 
 | reel.farm | Slidemill |
 |---|---|
-| LLM (Anthropic) writes slides | Claude via structured output (`SlideshowPlan`), with a server-side refusal fallback |
+| LLM (Anthropic) writes slides | Any provider. Claude uses structured output; others use OpenAI-compatible JSON mode with validation. |
+| Pinterest images only | Stock photos, uploaded collections, or AI-generated images in a consistent visual style per series |
+| Quick-start templates | Studio: a one-line brief becomes a planned format, finished slideshows and optionally an automation |
 | Pillow renderer, overlays, grids, fonts, CJK | Same approach (`app/renderer.py`), using open-licence fonts |
 | Pinterest auto-images | Pexels / Unsplash official APIs, plus uploaded collections. Pinterest has no public search API, so pulling from it means scraping and breaks Pinterest's terms. |
 | Cron automations, hook rotation, pause | Same (`app/scheduler.py`, `pipeline.pick_hook`) |
@@ -48,6 +50,6 @@ You set up an "automation" once: a TikTok account, a list of hook ideas, a style
 | Analytics | Publish-status polling plus the Display API `video/query` metrics |
 | MP4 export | ffmpeg |
 | REST API | `/api/v1/*` with similar shapes |
-| Slideshow library (scraped) | Not built. It needs a TikTok scraping operation. |
+| Slideshow library (scraped) | Built. Post pages are scraped over HTTP, profile post lists with headless Chromium, and discovery uses Apify. Niche and product type are classified by AI, slide text is read by a vision model, and any post can be remixed. |
 | AI UGC selfies/videos | Not built. It's a separate product, and an image/video-generation provider could be plugged in. |
 | Credits / billing / teams | Not built. This is a self-hosted, single-workspace tool. |

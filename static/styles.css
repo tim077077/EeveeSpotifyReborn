@@ -106,3 +106,4 @@ dialog::backdrop { background: rgba(0, 0, 0, 0.6); }
   main { padding: 20px 16px; }
   .form-grid, .text-item { grid-template-columns: 1fr; }
 }
+[hidden] { display: none !important; }

@@ -99,8 +99,7 @@ views.home = async () => {
     api("/status"), api("/automations"), api("/slideshows?limit=8"), api("/posts?days=30"), api("/tiktok/accounts"),
   ]);
   const steps = [
-    [st.anthropic, "Set ANTHROPIC_API_KEY so Claude can write slideshows"],
-    [st.image_providers.length > 0, "Add PEXELS_API_KEY or UNSPLASH_ACCESS_KEY for automatic backgrounds (or upload a collection)"],
+    [st.ai, "Add an AI key in Settings (Claude, OpenAI, Gemini, OpenRouter, Groq, …)"],
     [st.tiktok, "Set TIKTOK_CLIENT_KEY / TIKTOK_CLIENT_SECRET"],
     [accounts.accounts.length > 0, "Connect a TikTok account"],
     [autos.automations.length > 0, "Create your first automation"],
@@ -150,6 +149,7 @@ views.create = async () => {
         <div><label>Use automation's style & images (optional)</label>
           <select id="automation"><option value="">None</option>${autos.automations
             .map((a) => `<option value="${a.id}">${esc(a.title)}</option>`).join("")}</select></div>
+        <div><label>Backgrounds</label>${select("imgsrc", ["auto", "ai", "stock"], "auto", 'id="imgsrc"')}</div>
         <div><label>Background image URLs, comma-separated (optional, by slide order)</label><input id="images"></div>
       </div>
       <div class="row" style="margin-top:16px"><button class="primary" id="go">Generate</button><span class="muted small">Takes ~30-60s.</span></div>
@@ -162,6 +162,7 @@ views.create = async () => {
         aspect_ratio: $("#aspect").value,
         language: $("#language").value || "English",
         automation_id: $("#automation").value || null,
+        image_source: $("#imgsrc").value,
         images: $("#images").value.split(",").map((s) => s.trim()).filter(Boolean),
       };
       if (!body.prompt) throw new Error("Write a prompt first.");
@@ -410,13 +411,15 @@ async function automationDialog(a) {
     <label class="check"><input type="checkbox" name="disclose_ai_content" ${ps.disclose_ai_content ?? true ? "checked" : ""}> Label as AI-generated</label>
     <h3 style="margin-top:18px">Images</h3>
     <div class="form-grid">
-      <div><label>Source</label>${select("source", ["auto", "collection"], is.source ?? "auto")}</div>
+      <div><label>Source</label>${select("source", ["auto", "ai", "stock", "collection"], is.source ?? "auto")}</div>
       <div><label>Body collection</label><select name="collection_id">${opt(collections.collections, is.collection_id, "— none —")}</select></div>
       <div><label>Hook (first slide) collection</label><select name="hook_collection_id">${opt(collections.collections, is.hook_collection_id, "— same as body —")}</select></div>
       <div><label>CTA collection</label><select name="cta_collection_id">${opt(collections.collections, is.cta_collection_id, "— none —")}</select></div>
       <div><label>Aspect ratio</label>${select("aspect_ratio", ["4:5", "9:16", "1:1", "16:9"], is.aspect_ratio ?? "4:5")}</div>
       <div><label>Overlay opacity %</label><input type="number" name="background_opacity" min="0" max="100" value="${is.background_opacity ?? 30}"></div>
     </div>
+    <label>Visual style for backgrounds (used by AI images)</label>
+    <input name="visual_style" value="${esc(is.visual_style ?? "")}" placeholder="moody film photos, warm tungsten light, cozy apartment details">
     <label class="check"><input type="checkbox" name="overlay_hook" ${is.overlay_hook ? "checked" : ""}> Darken hook image</label>
     <label class="check"><input type="checkbox" name="overlay_body" ${is.overlay_body ? "checked" : ""}> Darken body images</label>
     <label class="check"><input type="checkbox" name="text_on_first_slide_only" ${is.text_on_first_slide_only ? "checked" : ""}> Text on first slide only</label>
@@ -450,7 +453,7 @@ async function automationDialog(a) {
           disclose_ai_content: chk("disclose_ai_content"),
         },
         image_settings: {
-          source: val("source"), collection_id: val("collection_id") || null,
+          source: val("source"), visual_style: val("visual_style"), collection_id: val("collection_id") || null,
           hook_collection_id: val("hook_collection_id") || null, cta_collection_id: val("cta_collection_id") || null,
           aspect_ratio: val("aspect_ratio"), background_opacity: +val("background_opacity"),
           overlay_hook: chk("overlay_hook"), overlay_body: chk("overlay_body"),
@@ -607,6 +610,224 @@ views.analytics = async () => {
     });
 };
 
+views.studio = async () => {
+  const [st, accounts, products] = await Promise.all([api("/status"), api("/tiktok/accounts"), api("/products")]);
+  view.innerHTML = `
+    <h1>Studio</h1>
+    <p class="sub">Describe the kind of slideshows you want. It plans the format, writes every slide, makes the images and renders them.</p>
+    ${st.ai ? "" : `<div class="card" style="border-color:var(--accent)">Add an AI key in <a href="#settings">Settings</a> first — any provider works.</div>`}
+    <div class="card">
+      <label>What do you want to make?</label>
+      <textarea id="brief" style="min-height:120px" placeholder="Glow-up slideshows for girls 16-22: realistic self-care habits, aesthetic soft pink vibes, first person, 6 slides each, text in white boxes at the top."></textarea>
+      <div class="form-grid">
+        <div><label>How many slideshows</label><input id="count" type="number" min="1" max="10" value="3"></div>
+        <div><label>Backgrounds</label>${select("src", ["auto", "ai", "stock"], "auto", 'id="src"')}
+          <div class="small muted">Image engine: ${esc(st.image_generation)}</div></div>
+        <div><label>Aspect ratio</label>${select("ar", ["auto", "4:5", "9:16", "1:1"], "auto", 'id="ar"')}</div>
+        <div><label>Product to mention (optional)</label><select id="product"><option value="">None</option>${products.products
+          .map((p) => `<option value="${p.id}">${esc(p.name)}</option>`).join("")}</select></div>
+      </div>
+      <label class="check" style="margin-top:14px"><input type="checkbox" id="auto"> Keep it going: save as an automation that makes and posts new ones on a schedule</label>
+      <div class="form-grid" id="auto-opts" hidden>
+        <div><label>TikTok account</label><select id="acct"><option value="">— none (drafts only) —</option>${accounts.accounts
+          .map((a) => `<option value="${a.id}">@${esc(a.username)}</option>`).join("")}</select></div>
+        <div><label>Posting times (HH:MM, comma-separated)</label><input id="times" value="09:00, 18:00"></div>
+      </div>
+      <div class="row" style="margin-top:16px"><button class="primary" id="make">Make slideshows</button>
+        <span class="muted small">About a minute per slideshow, three at a time.</span></div>
+    </div>
+    <div id="studio-out"></div>`;
+  $("#auto").onchange = () => ($("#auto-opts").hidden = !$("#auto").checked);
+  $("#make").onclick = (e) =>
+    busy(e.currentTarget, async () => {
+      const brief = $("#brief").value.trim();
+      if (!brief) throw new Error("Describe what you want first.");
+      const ar = $("#ar").value;
+      const { job_id } = await api("/studio", {
+        method: "POST",
+        body: {
+          brief, count: +$("#count").value, image_source: $("#src").value, aspect_ratio: ar === "auto" ? null : ar,
+          product_id: $("#product").value || null, save_as_automation: $("#auto").checked,
+          tiktok_account_id: $("#acct").value || null, schedule: $("#auto").checked ? timesToCron($("#times").value, "*") : [],
+        },
+      });
+      await pollJob(job_id, (job) => {
+        const c = job.result?.campaign;
+        $("#studio-out").innerHTML = `
+          <h2>${esc(c?.name || "Planning…")}</h2>
+          <p class="muted">${esc(job.message)}${c ? ` · ${esc(c.format_summary)}` : ""}</p>
+          ${job.result?.automation_id ? `<p><a href="#automations">Saved as an automation →</a></p>` : ""}
+          ${job.slideshows ? showGrid(job.slideshows) : ""}`;
+      });
+    });
+};
+
+async function pollJob(jobId, onUpdate) {
+  for (;;) {
+    const job = await api(`/jobs/${jobId}`);
+    onUpdate(job);
+    if (job.status === "failed") throw new Error(job.message || "Job failed");
+    const pending = (job.slideshows || []).some((s) => !["completed", "failed"].includes(s.status));
+    if (job.status === "completed" && !pending) return job;
+    await sleep(3000);
+  }
+}
+
+views.library = async () => {
+  const params = new URLSearchParams(location.hash.split("?")[1] || "");
+  const qs = new URLSearchParams({ q: params.get("q") || "", niche: params.get("niche") || "", sort: params.get("sort") || "followers", limit: "48" });
+  const [data, niches, st] = await Promise.all([api(`/library?${qs}`), api("/library/niches"), api("/status")]);
+  view.innerHTML = `
+    <h1>Slideshow library</h1>
+    <p class="sub">Real TikTok slideshow accounts and their best posts, scraped into your own database. Remix any post into your own slideshows.</p>
+    <div class="form-grid">
+      <div class="card"><h3>Add accounts or posts</h3>
+        <textarea id="items" placeholder="@username&#10;https://www.tiktok.com/@user/photo/123…"></textarea>
+        <div class="row" style="margin-top:8px"><button class="primary" id="import">Scrape</button><span class="small muted">Profiles list posts via a headless browser${st.apify ? " or Apify" : ""}.</span></div></div>
+      <div class="card"><h3>Discover by keyword or #hashtag</h3>
+        <input id="disc" placeholder="#studytok or 'morning routine slideshow'">
+        <div class="row" style="margin-top:8px"><button class="primary" id="discover" ${st.apify ? "" : "disabled"}>Discover</button>
+        ${st.apify ? "" : `<span class="small muted">Needs an Apify token in <a href="#settings">Settings</a>.</span>`}</div></div>
+    </div>
+    <div id="lib-job"></div>
+    <div class="row" style="margin:16px 0 8px">
+      <input id="q" class="grow" placeholder="Search accounts, bios, captions" value="${esc(params.get("q") || "")}">
+      ${select("sort", ["followers", "likes", "recent"], params.get("sort") || "followers", 'id="sort" style="width:140px"')}
+      <button id="search">Search</button>
+    </div>
+    <div class="row small">${[{ niche: "", profile_count: data.total }, ...niches.niches]
+      .map((n) => `<a class="pill ${n.niche === (params.get("niche") || "") ? "live" : ""}" href="#library?niche=${encodeURIComponent(n.niche)}">${esc(n.niche || "all")} (${n.profile_count})</a>`).join("")}</div>
+    <div class="grid" style="margin-top:14px;grid-template-columns:repeat(auto-fill,minmax(300px,1fr))">${data.profiles
+      .map((p) => `<a class="card" href="#libprofile/${p.id}" style="color:inherit;text-decoration:none">
+        <div class="row">${p.avatar ? `<img src="${esc(p.avatar)}" width="40" height="40" style="border-radius:50%">` : ""}
+          <div class="grow"><b>@${esc(p.username)}</b> ${p.verified ? "✔" : ""}<div class="small muted">${fmt(p.followers)} followers · ${p.slideshow_count} slideshows</div></div>
+          ${p.niche ? `<span class="pill">${esc(p.niche)}</span>` : ""}</div>
+        <div class="row" style="margin-top:10px;gap:6px;flex-wrap:nowrap">${p.top_slideshows
+          .map((x) => `<img src="${esc(x.cover)}" style="width:24%;aspect-ratio:3/4;object-fit:cover;border-radius:6px">`).join("")}</div>
+      </a>`).join("") || `<p class="muted">Empty. Paste some TikTok slideshow accounts above.</p>`}</div>`;
+  const go = () => {
+    location.hash = `#library?q=${encodeURIComponent($("#q").value)}&sort=${$("#sort").value}&niche=${encodeURIComponent(params.get("niche") || "")}`;
+  };
+  $("#search").onclick = go;
+  $("#q").onkeydown = (e) => e.key === "Enter" && go();
+  const runJob = (btn, path, body) =>
+    busy(btn, async () => {
+      const { job_id } = await api(path, { method: "POST", body });
+      await pollJob(job_id, (job) => ($("#lib-job").innerHTML = `<p class="muted"><span class="spinner"></span> ${esc(job.message)}</p>`));
+      toast("Library updated");
+      route();
+    });
+  $("#import").onclick = (e) => runJob(e.currentTarget, "/library/import", { items: $("#items").value.split(/\s+/).filter(Boolean) });
+  $("#discover").onclick = (e) => runJob(e.currentTarget, "/library/discover", { query: $("#disc").value });
+};
+
+const fmt = (n) => (n >= 1e6 ? (n / 1e6).toFixed(1) + "M" : n >= 1e3 ? (n / 1e3).toFixed(1) + "K" : String(n ?? 0));
+
+views.libprofile = async (id) => {
+  const p = await api(`/library/profiles/${id}`);
+  view.innerHTML = `
+    <div class="row">${p.avatar ? `<img src="${esc(p.avatar)}" width="56" height="56" style="border-radius:50%">` : ""}
+      <div class="grow"><h1>@${esc(p.username)}</h1><div class="muted">${esc(p.nickname)} · ${fmt(p.followers)} followers · ${fmt(p.total_likes)} likes
+      ${p.niche ? ` · ${esc(p.niche)}` : ""}${p.product_medium ? ` · promotes: ${esc(p.product_medium)}` : ""}</div></div>
+      <a class="btn" href="${esc(p.url)}" target="_blank">Open on TikTok</a><button class="danger" id="pdel">Remove</button></div>
+    <p>${esc(p.bio)} ${p.link_in_bio ? `· <a href="https://${esc(p.link_in_bio.replace(/^https?:\/\//, ""))}" target="_blank">${esc(p.link_in_bio)}</a>` : ""}</p>
+    <h2>Posts (${p.slideshows.length})</h2>
+    <div class="grid" style="grid-template-columns:repeat(auto-fill,minmax(260px,1fr))">${p.slideshows
+      .map((x) => `<div class="card" data-post="${x.id}">
+        <div class="slides" style="gap:6px">${(x.images.length ? x.images : [x.cover]).filter(Boolean)
+          .map((u) => `<img src="${esc(u)}" style="height:180px">`).join("")}</div>
+        <div class="small">${esc(x.description).slice(0, 140)}</div>
+        <div class="small muted">${fmt(x.views)} views · ${fmt(x.likes)} likes · ${fmt(x.saves)} saves ${x.is_slideshow ? "" : "· video"}</div>
+        ${x.slide_texts?.length ? `<ol class="small">${x.slide_texts.map((t) => `<li>${esc(t)}</li>`).join("")}</ol>` : ""}
+        <div class="row" style="margin-top:8px">
+          ${x.is_slideshow ? `<button data-remix="${x.id}" class="primary">Remix</button><button data-read="${x.id}">Read slides</button>` : ""}
+          <a class="btn" href="${esc(x.url)}" target="_blank">View</a></div>
+      </div>`).join("")}</div>`;
+  $("#pdel").onclick = async () => {
+    if (!confirm("Remove this account from the library?")) return;
+    await api(`/library/profiles/${id}`, { method: "DELETE" });
+    location.hash = "#library";
+  };
+  view.onclick = (ev) => {
+    const b = ev.target.closest("button");
+    if (!b) return;
+    if (b.dataset.read)
+      busy(b, async () => {
+        await api(`/library/posts/${b.dataset.read}/analyze`, { method: "POST" });
+        route();
+      });
+    if (b.dataset.remix)
+      busy(b, async () => {
+        const topic = prompt("New topic for your version (leave empty to keep the same subject):", "") ?? null;
+        if (topic === null) return;
+        const { slideshow_ids } = await api(`/library/posts/${b.dataset.remix}/remix`, {
+          method: "POST", body: { count: 1, topic: topic || null, image_source: "auto" },
+        });
+        location.hash = `#slideshow/${slideshow_ids[0]}`;
+      });
+  };
+};
+
+views.settings = async () => {
+  const data = await api("/settings");
+  const v = data.values;
+  const field = (key, label, type = "text", ph = "") => `<div><label>${label}${v[key].from_env ? ` <span class="pill">from ${esc(v[key].from_env)}</span>` : ""}</label>
+    <input name="${key}" type="${type}" placeholder="${esc(v[key].set && type === "password" ? v[key].value : ph)}" ${type === "password" ? "" : `value="${esc(v[key].value)}"`}></div>`;
+  const provOpts = (cur) => `<option value="">auto-detect from key</option>` +
+    Object.entries(data.llm_providers).map(([k, p]) => `<option value="${k}" ${k === cur ? "selected" : ""}>${esc(p.label)}</option>`).join("");
+  view.innerHTML = `
+    <h1>Settings</h1>
+    <p class="sub">Paste any AI key — the provider is detected from it. Keys are stored in this server's database.</p>
+    <div class="card">
+      <h3>AI for writing (and reading slides)</h3>
+      <div class="form-grid">
+        <div><label>Provider</label><select name="llm_provider">${provOpts(v.llm_provider.value)}</select></div>
+        ${field("llm_api_key", "API key", "password", "sk-ant-… / sk-… / AIza… / sk-or-… / gsk_…")}
+        ${field("llm_model", "Model (blank = provider default)", "text", "")}
+        ${field("llm_base_url", "Base URL (custom / Ollama / proxies)", "text", "")}
+      </div>
+      <p class="small muted">Defaults: ${Object.entries(data.llm_providers).filter(([, p]) => p.default_model).map(([k, p]) => `${esc(k)} → ${esc(p.default_model)}`).join(" · ")}</p>
+    </div>
+    <div class="card" style="margin-top:14px">
+      <h3>AI images</h3>
+      <div class="form-grid">
+        <div><label>Image provider</label>${select("image_provider", ["auto", ...Object.keys(data.image_providers)], v.image_provider.value || "auto")}</div>
+        ${field("image_api_key", "Image API key (blank = reuse the AI key when it can make images)", "password")}
+        ${field("image_model", "Image model (blank = default)")}
+      </div>
+      <p class="small muted">auto: OpenAI or Gemini keys make images too; otherwise Pollinations is used for free (watermarked).</p>
+    </div>
+    <div class="card" style="margin-top:14px">
+      <h3>Stock photos & scraping</h3>
+      <div class="form-grid">
+        ${field("pexels_api_key", "Pexels API key", "password")}
+        ${field("unsplash_access_key", "Unsplash access key", "password")}
+        ${field("apify_token", "Apify token (library discovery)", "password")}
+      </div>
+    </div>
+    <div class="row" style="margin-top:16px"><button class="primary" id="save">Save</button><button id="test">Test AI + images</button></div>
+    <div id="test-out"></div>`;
+  $("#save").onclick = (e) =>
+    busy(e.currentTarget, async () => {
+      const values = {};
+      $$("input, select", view).forEach((el) => {
+        if (!el.name) return;
+        if (el.type === "password" && !el.value) return; // keep stored secret
+        values[el.name] = el.name === "image_provider" && el.value === "auto" ? "" : el.value;
+      });
+      await api("/settings", { method: "PUT", body: { values } });
+      toast("Saved");
+      statusPills();
+      route();
+    });
+  $("#test").onclick = (e) =>
+    busy(e.currentTarget, async () => {
+      const r = await api("/settings/test", { method: "POST" });
+      $("#test-out").innerHTML = `<div class="card" style="margin-top:14px">
+        <div>${r.ai.ok ? "✅" : "❌"} AI: ${esc(r.ai.detail)}</div><div>${r.images.ok ? "✅" : "❌"} Images: ${esc(r.images.detail)}</div></div>`;
+    });
+};
+
 // ---- router ----------------------------------------------------------------------------
 
 async function route() {
@@ -622,7 +843,8 @@ async function statusPills() {
   try {
     const st = await api("/status");
     $("#status-pills").innerHTML = [
-      ["Claude", st.anthropic], ["Images", st.image_providers.length > 0], ["TikTok", st.tiktok],
+      [st.ai ? `AI: ${st.ai_provider}` : "AI", st.ai], ["Images", !st.image_generation.startsWith("unavailable")],
+      ["TikTok", st.tiktok], ["Apify", st.apify],
     ].map(([k, ok]) => `<span class="pill ${ok ? "ok" : "bad"}">${k}</span>`).join("");
   } catch { /* shown by the view */ }
 }

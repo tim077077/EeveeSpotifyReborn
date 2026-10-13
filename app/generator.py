@@ -1,14 +1,12 @@
-"""Claude-backed slideshow writer: hook/topic + style -> structured slide plan."""
+"""Slideshow writer: hook/topic + style -> structured slide plan, on whichever AI key is configured."""
 
 from __future__ import annotations
 
 import difflib
 import re
 
-import anthropic
-
-from .config import settings
-from .schemas import SlideshowPlan
+from . import llm
+from .schemas import CampaignPlan, SlideshowPlan
 
 SYSTEM_PROMPT = """You write viral TikTok photo-carousel slideshows (the "slideshow" post type).
 
@@ -26,21 +24,22 @@ Styling defaults (override whenever the creative direction says otherwise):
 - Use "background"/"light_background" text styles when the direction asks for boxed or highlighted text.
 - Default text_position "center" unless the direction says top or bottom.
 
-image_query: a stock-photo search phrase describing a background that fits the slide's mood (aesthetic, no text in the image, e.g. "cozy bedroom warm lamp night"). Keep queries visually consistent across slides."""
+Backgrounds: each slide gets a photo behind the text. image_query is a short stock-photo search; image_prompt describes the same photo for an AI image generator. Keep every slide's background in one consistent visual style (same palette, lighting and photographic feel), leave calm space where the text sits, and never ask for text, letters or logos inside the image."""
+
+CAMPAIGN_PROMPT = """You plan TikTok slideshow content from a short brief written by a creator.
+
+Turn the brief into a reusable format:
+- name: short name for this content series.
+- format_summary: one line describing the slideshow format.
+- style: creative direction for the slide writer - slide count, voice, list structure, fonts and text placement. Pick what performs on TikTok for this niche if the brief doesn't say.
+- visual_style: the look of every background photo (subject matter, palette, lighting, camera feel), consistent across the series, suitable for both stock search and AI image generation. No text in images.
+- aspect_ratio: "4:5" unless the brief asks otherwise.
+- hooks: distinct, scroll-stopping first-slide hooks for separate slideshows in this series. Vary the angle (numbers, mistakes, before/after, "things nobody tells you", POV). No two may be near-duplicates.
+- language: the language the slides should be written in (the brief's language unless it says otherwise)."""
 
 
 class GenerationError(RuntimeError):
     pass
-
-
-_client: anthropic.Anthropic | None = None
-
-
-def client() -> anthropic.Anthropic:
-    global _client
-    if _client is None:
-        _client = anthropic.Anthropic()
-    return _client
 
 
 def fingerprint(text: str) -> str:
@@ -59,10 +58,19 @@ def build_prompt(
     product: dict | None = None,
     recent_titles: list[str] | None = None,
     slide_count_hint: int | None = None,
+    visual_style: str = "",
+    reference: str = "",
 ) -> str:
     parts = [f"<topic>\n{topic}\n</topic>"]
     if style:
         parts.append(f"<creative_direction>\n{style}\n</creative_direction>")
+    if visual_style:
+        parts.append(f"<visual_style>\n{visual_style}\n</visual_style>")
+    if reference:
+        parts.append(
+            "<reference_slideshow>\nA slideshow that performed well. Copy its format, pacing and tone, but write entirely "
+            f"new text (never reuse its sentences):\n{reference}\n</reference_slideshow>"
+        )
     if product:
         parts.append(
             "<product>\n"
@@ -75,7 +83,7 @@ def build_prompt(
     if recent_titles:
         listed = "\n".join(f"- {t}" for t in recent_titles[:30])
         parts.append(
-            "These slideshows were already posted on this account. Make this one clearly different "
+            "These slideshows were already made for this account. Make this one clearly different "
             f"(new angle, new hook wording, new list items):\n{listed}"
         )
     parts.append(f"Write all on-slide text, the caption and the description in {language}.")
@@ -89,37 +97,17 @@ def generate_plan(
     product: dict | None = None,
     recent_titles: list[str] | None = None,
     slide_count_hint: int | None = None,
+    visual_style: str = "",
+    reference: str = "",
 ) -> SlideshowPlan:
-    prompt = build_prompt(topic, style, language, product, recent_titles, slide_count_hint)
+    prompt = build_prompt(topic, style, language, product, recent_titles, slide_count_hint, visual_style, reference)
     recent_fps = [fingerprint(t) for t in recent_titles or []]
-
+    plan: SlideshowPlan | None = None
     for attempt in range(2):
         try:
-            response = client().beta.messages.parse(
-                model=settings.anthropic_model,
-                max_tokens=16000,
-                system=SYSTEM_PROMPT,
-                messages=[{"role": "user", "content": prompt}],
-                output_format=SlideshowPlan,
-                output_config={"effort": settings.anthropic_effort},
-                betas=["server-side-fallback-2026-07-01"],
-                fallbacks="default",
-            )
-        except anthropic.AuthenticationError as exc:
-            raise GenerationError("Anthropic API key missing or invalid (set ANTHROPIC_API_KEY).") from exc
-        except anthropic.RateLimitError as exc:
-            raise GenerationError("Anthropic rate limit hit; try again shortly.") from exc
-        except anthropic.APIStatusError as exc:
-            raise GenerationError(f"Anthropic API error {exc.status_code}: {exc.message}") from exc
-        except anthropic.APIConnectionError as exc:
-            raise GenerationError("Could not reach the Anthropic API.") from exc
-
-        if response.stop_reason == "refusal":
-            raise GenerationError("The model declined to write this slideshow; adjust the topic.")
-        if response.stop_reason == "max_tokens" or response.parsed_output is None:
-            raise GenerationError("The model response was cut off; try a shorter request.")
-
-        plan = response.parsed_output
+            plan = llm.complete_json(SYSTEM_PROMPT, prompt, SlideshowPlan)
+        except llm.LLMError as exc:
+            raise GenerationError(str(exc)) from exc
         if not plan.slides:
             raise GenerationError("The model returned no slides.")
         hook_text = " ".join(t.text for t in plan.slides[0].text_items)
@@ -129,6 +117,18 @@ def generate_plan(
                 "Use a completely different hook and list."
             )
             continue
-        plan.caption = plan.caption[:89]
-        return plan
+        break
+    assert plan is not None
+    plan.caption = plan.caption[:89]
     return plan
+
+
+def plan_campaign(brief: str, hook_count: int) -> CampaignPlan:
+    prompt = f"<brief>\n{brief}\n</brief>\n\nWrite exactly {hook_count} hooks."
+    try:
+        campaign = llm.complete_json(CAMPAIGN_PROMPT, prompt, CampaignPlan)
+    except llm.LLMError as exc:
+        raise GenerationError(str(exc)) from exc
+    if not campaign.hooks:
+        raise GenerationError("The model returned no hooks.")
+    return campaign

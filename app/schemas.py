@@ -35,8 +35,9 @@ class Slide(BaseModel):
     image_layout: ImageLayout = "single"
     text_items: list[TextItem] = Field(default_factory=list)
     text_position: TextPosition | None = None
-    # Search phrase used to source a background when no image is set.
+    # Search phrase / generation prompt used to source a background when no image is set.
     image_query: str = ""
+    image_prompt: str = ""
 
 
 class SlideshowSpec(BaseModel):
@@ -66,6 +67,10 @@ class PlanSlide(BaseModel):
     role: SlideRole
     text_items: list[PlanTextItem]
     image_query: str = Field(description="3-6 word stock-photo search phrase for this slide's background, aesthetic and specific.")
+    image_prompt: str = Field(
+        description="One-sentence description of this slide's background photo for an AI image generator: subject, setting, "
+        "lighting, framing. Never include text, captions, letters or logos in the image."
+    )
 
 
 class SlideshowPlan(BaseModel):
@@ -76,11 +81,33 @@ class SlideshowPlan(BaseModel):
     slides: list[PlanSlide]
 
 
+class CampaignPlan(BaseModel):
+    name: str
+    format_summary: str
+    style: str
+    visual_style: str
+    aspect_ratio: AspectRatio
+    hooks: list[str]
+    language: str
+
+
+class SlideTextRead(BaseModel):
+    """Text a vision model read off one library slide."""
+
+    slides: list[str] = Field(description="The visible overlay text of each image, in order. Empty string if none.")
+
+
+class ProfileClassification(BaseModel):
+    niche: str = Field(description="One or two lowercase words, e.g. fitness, skincare, personal finance, studying, relationships.")
+    product_medium: Literal["app", "physical product", "digital product", "service", "creator", "none"]
+
+
 # --- API bodies ---------------------------------------------------------------------
 
 
 class GenerateRequest(BaseModel):
     prompt: str = Field(description="Topic, slide count, tone, fonts, text placement - in plain language.")
+    image_source: Literal["auto", "stock", "ai"] | None = None
     automation_id: str | None = None
     images: list[str] = Field(default_factory=list, description="Background images mapped by index to slides.")
     aspect_ratio: AspectRatio | None = None
@@ -101,8 +128,11 @@ class PostSettings(BaseModel):
 
 
 class ImageSettings(BaseModel):
-    # "auto" searches a stock provider per slide; "collection" draws from collection_id.
-    source: Literal["auto", "collection"] = "auto"
+    # "auto": stock photos when a stock key is set, otherwise AI-generated.
+    # "stock" / "ai" force one; "collection" draws from collection_id.
+    source: Literal["auto", "stock", "ai", "collection"] = "auto"
+    # Look of every background (fed to AI image generation and the slide writer).
+    visual_style: str = ""
     collection_id: str | None = None
     hook_collection_id: str | None = None
     cta_collection_id: str | None = None
@@ -140,6 +170,40 @@ class AutomationPatch(BaseModel):
     schedule: list[str] | None = None
     paused: bool | None = None
     favorite: bool | None = None
+
+
+class StudioRequest(BaseModel):
+    brief: str = Field(description="What kind of slideshows you want, in plain language.")
+    count: int = Field(default=3, ge=1, le=10)
+    image_source: Literal["auto", "stock", "ai"] = "auto"
+    aspect_ratio: AspectRatio | None = None
+    language: str | None = None
+    product_id: str | None = None
+    # Optionally keep going: save the format as an automation that posts on a schedule.
+    save_as_automation: bool = False
+    tiktok_account_id: str | None = None
+    schedule: list[str] = Field(default_factory=list)
+
+
+class RemixRequest(BaseModel):
+    count: int = Field(default=1, ge=1, le=5)
+    topic: str | None = Field(default=None, description="New topic; defaults to the same subject.")
+    image_source: Literal["auto", "stock", "ai"] = "auto"
+    aspect_ratio: AspectRatio | None = None
+
+
+class LibraryImportRequest(BaseModel):
+    items: list[str] = Field(description="TikTok usernames (@name), profile URLs or post URLs.")
+    max_posts: int = Field(default=30, ge=1, le=200)
+
+
+class LibraryDiscoverRequest(BaseModel):
+    query: str = Field(description="Search phrase or #hashtag.")
+    max_posts: int = Field(default=50, ge=1, le=300)
+
+
+class SettingsUpdate(BaseModel):
+    values: dict[str, str]
 
 
 class RunRequest(BaseModel):

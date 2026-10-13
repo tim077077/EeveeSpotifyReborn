@@ -148,6 +148,79 @@ class Post(Base):
     slideshow: Mapped[Slideshow] = relationship(back_populates="posts")
 
 
+class Setting(Base):
+    """Key/value settings editable from the dashboard (API keys, provider choices)."""
+
+    __tablename__ = "settings"
+
+    key: Mapped[str] = mapped_column(String(64), primary_key=True)
+    value: Mapped[str] = mapped_column(Text, default="")
+
+
+class LibraryProfile(Base):
+    """A public TikTok account tracked in the slideshow library."""
+
+    __tablename__ = "library_profiles"
+
+    id: Mapped[str] = mapped_column(String(32), primary_key=True, default=new_id)
+    username: Mapped[str] = mapped_column(String(128), unique=True)
+    tiktok_user_id: Mapped[str] = mapped_column(String(64), default="")
+    nickname: Mapped[str] = mapped_column(String(256), default="")
+    avatar_path: Mapped[str] = mapped_column(Text, default="")
+    bio: Mapped[str] = mapped_column(Text, default="")
+    bio_link: Mapped[str] = mapped_column(Text, default="")
+    followers: Mapped[int] = mapped_column(Integer, default=0)
+    following: Mapped[int] = mapped_column(Integer, default=0)
+    total_likes: Mapped[int] = mapped_column(Integer, default=0)
+    video_count: Mapped[int] = mapped_column(Integer, default=0)
+    region: Mapped[str] = mapped_column(String(16), default="")
+    verified: Mapped[bool] = mapped_column(Boolean, default=False)
+    niche: Mapped[str] = mapped_column(String(64), default="")
+    # What the account promotes, e.g. "app", "physical product", "creator", "none".
+    product_medium: Mapped[str] = mapped_column(String(64), default="")
+    scraped_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+    posts: Mapped[list["LibraryPost"]] = relationship(back_populates="profile", cascade="all, delete-orphan")
+
+
+class LibraryPost(Base):
+    __tablename__ = "library_posts"
+
+    id: Mapped[str] = mapped_column(String(32), primary_key=True)  # TikTok item id
+    profile_id: Mapped[str] = mapped_column(ForeignKey("library_profiles.id", ondelete="CASCADE"))
+    url: Mapped[str] = mapped_column(Text, default="")
+    description: Mapped[str] = mapped_column(Text, default="")
+    is_slideshow: Mapped[bool] = mapped_column(Boolean, default=False)
+    # Local copies (media-relative); TikTok CDN links expire within hours.
+    images: Mapped[list[Any]] = mapped_column(default=list)
+    cover_path: Mapped[str] = mapped_column(Text, default="")
+    # Text read off each slide by a vision model, when analyzed.
+    slide_texts: Mapped[list[Any]] = mapped_column(default=list)
+    music: Mapped[str] = mapped_column(Text, default="")
+    views: Mapped[int] = mapped_column(Integer, default=0)
+    likes: Mapped[int] = mapped_column(Integer, default=0)
+    comments: Mapped[int] = mapped_column(Integer, default=0)
+    shares: Mapped[int] = mapped_column(Integer, default=0)
+    saves: Mapped[int] = mapped_column(Integer, default=0)
+    posted_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    scraped_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+    profile: Mapped[LibraryProfile] = relationship(back_populates="posts")
+
+
+class Job(Base):
+    """Background task with a pollable status (library scrapes, studio batches)."""
+
+    __tablename__ = "jobs"
+
+    id: Mapped[str] = mapped_column(String(32), primary_key=True, default=new_id)
+    kind: Mapped[str] = mapped_column(String(32))
+    # queued | running | completed | failed
+    status: Mapped[str] = mapped_column(String(16), default="queued")
+    message: Mapped[str] = mapped_column(Text, default="")
+    result: Mapped[dict[str, Any]] = mapped_column(default=dict)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+
+
 _connect_args = {"check_same_thread": False} if settings.database_url.startswith("sqlite") else {}
 engine = create_engine(settings.database_url, connect_args=_connect_args)
 SessionLocal = sessionmaker(bind=engine, expire_on_commit=False)

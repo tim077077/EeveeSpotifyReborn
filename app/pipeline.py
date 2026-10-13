@@ -14,13 +14,16 @@ from datetime import datetime, timedelta, timezone
 from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
-from . import db, generator, images, renderer, tiktok
+from . import db, generator, imagegen, images, renderer, tiktok
 from .config import settings
-from .schemas import ImageSettings, PostSettings, Slide, SlideshowPlan, SlideshowSpec, TextItem
+from .schemas import CampaignPlan, ImageSettings, PostSettings, Slide, SlideshowPlan, SlideshowSpec, TextItem
 
 log = logging.getLogger("slidemill.pipeline")
 
 executor = ThreadPoolExecutor(max_workers=8, thread_name_prefix="slidemill")
+# Long-running orchestration (studio batches, library scrapes) waits on `executor` work, so it
+# runs on its own pool to avoid starving it.
+job_executor = ThreadPoolExecutor(max_workers=4, thread_name_prefix="slidemill-job")
 _generation_slots = threading.BoundedSemaphore(settings.max_concurrent_generations)
 
 
@@ -41,7 +44,7 @@ def spec_from_plan(plan: SlideshowPlan, image_settings: ImageSettings, aspect_ra
         items = [TextItem(**t.model_dump()) for t in ps.text_items]
         if image_settings.text_on_first_slide_only and i > 0:
             items = []
-        slides.append(Slide(role=ps.role, text_items=items, image_query=ps.image_query))
+        slides.append(Slide(role=ps.role, text_items=items, image_query=ps.image_query, image_prompt=ps.image_prompt))
     return SlideshowSpec(
         title=plan.title,
         aspect_ratio=aspect_ratio or image_settings.aspect_ratio,
@@ -55,17 +58,28 @@ def spec_from_plan(plan: SlideshowPlan, image_settings: ImageSettings, aspect_ra
     )
 
 
-def assign_images(session: Session, spec: SlideshowSpec, settings_: ImageSettings, explicit: list[str] | None = None) -> None:
-    """Fill each slide's background from explicit refs, collections, or stock search."""
+def _source_for(settings_: ImageSettings) -> str:
+    if settings_.source == "auto":
+        return "stock" if images.providers() else "ai"
+    return settings_.source
+
+
+def assign_images(spec: SlideshowSpec, settings_: ImageSettings, explicit: list[str] | None = None) -> None:
+    """Fill each slide's background from explicit refs, collections, stock search or AI generation.
+
+    Uses short DB sessions: AI generation can take a minute and must not hold the SQLite write lock.
+    """
     explicit = explicit or []
     used_ids: set[str] = set()
     used_urls: set[str] = set()
     orientation = images.orientation_for(spec.aspect_ratio)
+    source = _source_for(settings_)
 
     has_cta = any(s.role == "cta" for s in spec.slides)
     if settings_.cta_slide and settings_.cta_collection_id and not has_cta and len(spec.slides) < 20:
         spec.slides.append(Slide(role="cta"))
 
+    needs_ai: list[Slide] = []
     for i, slide in enumerate(spec.slides):
         if i < len(explicit) and explicit[i]:
             slide.image = explicit[i]
@@ -75,16 +89,42 @@ def assign_images(session: Session, spec: SlideshowSpec, settings_: ImageSetting
         collection_id = {
             "hook": settings_.hook_collection_id,
             "cta": settings_.cta_collection_id,
-        }.get(slide.role) or (settings_.collection_id if settings_.source == "collection" else None)
-        picked = None
+        }.get(slide.role) or (settings_.collection_id if source == "collection" else None)
+        picked_path = None
         if collection_id:
-            picked = images.pick_from_collection(session, collection_id, used_ids)
-        if picked is None and (settings_.source == "auto" or not collection_id):
-            query = slide.image_query or spec.title
-            picked = images.auto_image(session, query, orientation, used_urls)
-        if picked is not None:
-            used_ids.add(picked.id)
-            slide.image = picked.path
+            with db.session_scope() as session:
+                picked = images.pick_from_collection(session, collection_id, used_ids)
+                if picked:
+                    used_ids.add(picked.id)
+                    picked_path = picked.path
+        if picked_path is None and source == "stock":
+            with db.session_scope() as session:
+                picked = images.auto_image(session, slide.image_query or spec.title, orientation, used_urls)
+                picked_path = picked.path if picked else None
+        if picked_path is None and source in {"ai", "stock"}:
+            # AI is also the fallback when stock search finds nothing.
+            needs_ai.append(slide)
+            continue
+        slide.image = picked_path
+
+    if needs_ai:
+        with ThreadPoolExecutor(max_workers=4) as pool:
+            results = pool.map(lambda sl: _ai_background(sl, spec, settings_.visual_style), needs_ai)
+            for slide, path in zip(needs_ai, results):
+                slide.image = path
+
+
+def _ai_background(slide: Slide, spec: SlideshowSpec, visual_style: str) -> str | None:
+    prompt = slide.image_prompt or slide.image_query or spec.title
+    try:
+        data = imagegen.generate(prompt, spec.aspect_ratio, visual_style)
+    except imagegen.ImageGenError as exc:
+        log.warning("AI background failed (%s); slide keeps the plain background", exc)
+        return None
+    rel, w, h = images.store_bytes(data, "library/ai")
+    with db.session_scope() as session:
+        session.add(db.Image(collection_id=None, path=rel, source="ai", query=prompt[:500], width=w, height=h, use_count=1))
+    return rel
 
 
 def render(session: Session, show: db.Slideshow) -> None:
@@ -133,17 +173,38 @@ def recent_titles(session: Session, automation_id: str | None, limit: int = 30) 
 
 
 def create_pending(
-    session: Session, prompt: str, automation_id: str | None = None, cron_id: str | None = None
+    session: Session,
+    prompt: str,
+    automation_id: str | None = None,
+    cron_id: str | None = None,
+    queue: bool = False,
 ) -> db.Slideshow:
-    active = session.scalar(
-        select(func.count()).select_from(db.Slideshow).where(db.Slideshow.status.in_(["generating", "rendering"]))
+    """Insert a slideshow row to be filled by generate_into.
+
+    Single requests are refused when the generation slots are full; batch requests (queue=True)
+    wait their turn in "queued" status instead.
+    """
+    if not queue:
+        active = session.scalar(
+            select(func.count()).select_from(db.Slideshow).where(db.Slideshow.status.in_(["generating", "rendering"]))
+        )
+        if active >= settings.max_concurrent_generations:
+            raise PipelineError(f"{active} slideshows already generating (limit {settings.max_concurrent_generations}).")
+    show = db.Slideshow(
+        prompt=prompt, automation_id=automation_id, created_by_cron_id=cron_id, status="queued" if queue else "generating"
     )
-    if active >= settings.max_concurrent_generations:
-        raise PipelineError(f"{active} slideshows already generating (limit {settings.max_concurrent_generations}).")
-    show = db.Slideshow(prompt=prompt, automation_id=automation_id, created_by_cron_id=cron_id, status="generating")
     session.add(show)
     session.flush()
     return show
+
+
+def _set_status(slideshow_id: str, status: str, error: str = "") -> None:
+    with db.session_scope() as session:
+        show = session.get(db.Slideshow, slideshow_id)
+        if show:
+            show.status = status
+            if error:
+                show.error = error[:2000]
 
 
 def generate_into(
@@ -155,20 +216,24 @@ def generate_into(
     product: dict | None = None,
     explicit_images: list[str] | None = None,
     aspect_ratio: str | None = None,
+    reference: str = "",
 ) -> None:
-    """Fill a pending slideshow. Runs in a worker thread; records failures on the row."""
+    """Fill a pending slideshow: write text, source images, render. Runs in a worker thread."""
     image_settings = image_settings or ImageSettings()
     with _generation_slots:
         try:
+            _set_status(slideshow_id, "generating")
             with db.session_scope() as session:
                 show = session.get(db.Slideshow, slideshow_id)
                 topic, automation_id = show.prompt, show.automation_id
                 titles = recent_titles(session, automation_id)
-            plan = generator.generate_plan(topic, style, language, product, titles)
+            plan = generator.generate_plan(
+                topic, style, language, product, titles, visual_style=image_settings.visual_style, reference=reference
+            )
+            spec = spec_from_plan(plan, image_settings, aspect_ratio)
+            assign_images(spec, image_settings, explicit_images)
             with db.session_scope() as session:
                 show = session.get(db.Slideshow, slideshow_id)
-                spec = spec_from_plan(plan, image_settings, aspect_ratio)
-                assign_images(session, spec, image_settings, explicit_images)
                 show.title = plan.title
                 show.caption = plan.caption
                 show.description = plan.description
@@ -181,11 +246,78 @@ def generate_into(
                 show.status = "completed"
         except Exception as exc:  # noqa: BLE001 - surface any failure on the row
             log.exception("generation failed for %s", slideshow_id)
-            with db.session_scope() as session:
-                show = session.get(db.Slideshow, slideshow_id)
-                if show:
-                    show.status = "failed"
-                    show.error = str(exc)[:2000]
+            _set_status(slideshow_id, "failed", str(exc))
+
+
+# --- studio: brief -> format -> finished slideshows -----------------------------------
+
+
+def run_studio(job_id: str, brief: str, count: int, image_source: str, aspect_ratio: str | None, language: str | None,
+               product_id: str | None, save_as_automation: bool, tiktok_account_id: str | None, schedule: list[str]) -> None:
+    """Plan a content format from a brief, then generate `count` complete slideshows from it."""
+    _job(job_id, status="running", message="Planning the format…")
+    try:
+        # Extra hooks give a saved automation material for future runs.
+        campaign: CampaignPlan = generator.plan_campaign(brief, count + (10 if save_as_automation else 0))
+        image_settings = ImageSettings(
+            source=image_source, visual_style=campaign.visual_style, aspect_ratio=aspect_ratio or campaign.aspect_ratio
+        )
+        product = None
+        automation_id = None
+        with db.session_scope() as session:
+            if product_id and (p := session.get(db.Product, product_id)):
+                product = {"name": p.name, "description": p.description}
+            if save_as_automation:
+                automation = db.Automation(
+                    title=campaign.name,
+                    tiktok_account_id=tiktok_account_id,
+                    product_id=product_id,
+                    hooks=campaign.hooks,
+                    style=campaign.style,
+                    language=language or campaign.language,
+                    post_settings=PostSettings(auto_post=bool(tiktok_account_id)).model_dump(),
+                    image_settings=image_settings.model_dump(),
+                )
+                automation.schedules = [db.ScheduleJob(cron=c) for c in schedule]
+                session.add(automation)
+                session.flush()
+                automation_id = automation.id
+            ids = [create_pending(session, hook, automation_id, queue=True).id for hook in campaign.hooks[:count]]
+        if save_as_automation:
+            from . import scheduler  # local import: scheduler imports pipeline
+
+            scheduler.sync()
+        _job(
+            job_id,
+            message=f"Writing {len(ids)} slideshows…",
+            result={"campaign": campaign.model_dump(), "slideshow_ids": ids, "automation_id": automation_id},
+        )
+        futures = [
+            executor.submit(
+                generate_into, sid, style=campaign.style, language=language or campaign.language,
+                image_settings=image_settings, product=product, aspect_ratio=image_settings.aspect_ratio,
+            )
+            for sid in ids
+        ]
+        for f in futures:
+            f.result()
+        _job(job_id, status="completed", message="Done")
+    except Exception as exc:  # noqa: BLE001
+        log.exception("studio job %s failed", job_id)
+        _job(job_id, status="failed", message=str(exc)[:2000])
+
+
+def _job(job_id: str, status: str | None = None, message: str | None = None, result: dict | None = None) -> None:
+    with db.session_scope() as session:
+        job = session.get(db.Job, job_id)
+        if job is None:
+            return
+        if status:
+            job.status = status
+        if message is not None:
+            job.message = message
+        if result is not None:
+            job.result = {**(job.result or {}), **result}
 
 
 # --- automations --------------------------------------------------------------------

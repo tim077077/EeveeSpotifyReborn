@@ -15,7 +15,7 @@ import pytest
 from fastapi.testclient import TestClient
 from PIL import Image
 
-from app import db, generator, pipeline, tiktok
+from app import db, generator, imagegen, pipeline, tiktok
 from app.config import settings
 from app.main import app
 from app.schemas import PlanSlide, PlanTextItem, SlideshowPlan
@@ -23,7 +23,7 @@ from app.schemas import PlanSlide, PlanTextItem, SlideshowPlan
 AUTH = {"Authorization": "Bearer test-key"}
 
 
-def fake_plan(topic, style="", language="English", product=None, recent_titles=None, slide_count_hint=None):
+def fake_plan(topic, style="", language="English", product=None, recent_titles=None, slide_count_hint=None, **_):
     def item(text, size="medium"):
         return PlanTextItem(text=text, font="tiktok", font_size=size, text_style="outline", text_color="white")
 
@@ -33,15 +33,22 @@ def fake_plan(topic, style="", language="English", product=None, recent_titles=N
         description="what actually worked for me #sleep #habits",
         text_position="center",
         slides=[
-            PlanSlide(role="hook", text_items=[item(topic, "large")], image_query="cozy bedroom night"),
-            *[PlanSlide(role="body", text_items=[item(f"{i}. tip number {i}")], image_query="calm morning") for i in range(1, 4)],
+            PlanSlide(role="hook", text_items=[item(topic, "large")], image_query="cozy bedroom night", image_prompt="cozy bedroom at night"),
+            *[PlanSlide(role="body", text_items=[item(f"{i}. tip number {i}")], image_query="calm morning", image_prompt="calm morning light") for i in range(1, 4)],
         ],
     )
+
+
+def fake_image(prompt, aspect_ratio="4:5", visual_style="", cfg=None):
+    buf = io.BytesIO()
+    Image.new("RGB", (400, 500), (90, 60, 120)).save(buf, "PNG")
+    return buf.getvalue()
 
 
 @pytest.fixture()
 def client(monkeypatch):
     monkeypatch.setattr(generator, "generate_plan", fake_plan)
+    monkeypatch.setattr(imagegen, "generate", fake_image)
     calls = {}
 
     def fake_publish(account, urls, **kw):

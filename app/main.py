@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import logging
-import os
 import secrets
 from datetime import datetime, timedelta, timezone
 from contextlib import asynccontextmanager
@@ -15,7 +14,7 @@ from fastapi.staticfiles import StaticFiles
 from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
-from . import db, images, pipeline, scheduler, tiktok
+from . import db, imagegen, images, library, llm, pipeline, scheduler, store, tiktok
 from .config import STATIC_DIR, settings
 from .schemas import (
     AutomationIn,
@@ -24,11 +23,16 @@ from .schemas import (
     GenerateRequest,
     ImageSettings,
     ImportImagesRequest,
+    LibraryDiscoverRequest,
+    LibraryImportRequest,
     PostSettings,
     ProductIn,
     PublishRequest,
+    RemixRequest,
     RunRequest,
+    SettingsUpdate,
     SlideshowSpec,
+    StudioRequest,
 )
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
@@ -138,10 +142,14 @@ def image_out(i: db.Image) -> dict[str, Any]:
 
 @api.get("/status")
 def status() -> dict[str, Any]:
+    cfg = llm.resolve()
     return {
-        "anthropic": bool(os.environ.get("ANTHROPIC_API_KEY") or os.environ.get("ANTHROPIC_AUTH_TOKEN")),
-        "model": settings.anthropic_model,
+        "ai": bool(cfg),
+        "ai_provider": cfg.provider if cfg else None,
+        "model": cfg.model if cfg else None,
+        "image_generation": imagegen.describe(),
         "image_providers": images.providers(),
+        "apify": library.apify_available(),
         "tiktok": tiktok.configured(),
         "public_base_url": settings.public_base_url,
         "timezone": settings.timezone,
@@ -155,15 +163,19 @@ def status() -> dict[str, Any]:
 def generate(body: GenerateRequest, session: Session = Depends(get_session)) -> dict[str, Any]:
     kwargs: dict[str, Any] = {"explicit_images": body.images, "aspect_ratio": body.aspect_ratio}
     style = ""
+    image_settings = ImageSettings()
     if body.automation_id:
         automation = session.get(db.Automation, body.automation_id)
         if automation is None:
             raise _404("automation")
         style = automation.style
-        kwargs["image_settings"] = ImageSettings.model_validate(automation.image_settings or {})
+        image_settings = ImageSettings.model_validate(automation.image_settings or {})
         kwargs["language"] = body.language or automation.language
     else:
         kwargs["language"] = body.language or "English"
+    if body.image_source:
+        image_settings.source = body.image_source
+    kwargs["image_settings"] = image_settings
     try:
         show = pipeline.create_pending(session, body.prompt, body.automation_id)
     except pipeline.PipelineError as exc:
@@ -580,6 +592,256 @@ def list_posts(
 def refresh_posts():
     pipeline.executor.submit(pipeline.refresh_posts)
     return {"queued": True}
+
+
+# --- settings ----------------------------------------------------------------------------------
+
+
+@api.get("/settings")
+def get_settings() -> dict[str, Any]:
+    return {
+        "values": store.public_view(),
+        "llm_providers": {k: {"label": v.label, "default_model": v.default_model, "vision": v.vision} for k, v in llm.PRESETS.items()},
+        "image_providers": imagegen.IMAGE_PROVIDERS,
+    }
+
+
+@api.put("/settings")
+def put_settings(body: SettingsUpdate) -> dict[str, Any]:
+    values = dict(body.values)
+    # A pasted LLM key with no explicit provider picks its provider from the key's prefix.
+    if values.get("llm_api_key") and not values.get("llm_provider"):
+        detected = llm.detect_provider(values["llm_api_key"])
+        if detected:
+            values["llm_provider"] = detected
+    try:
+        store.set_many(values)
+    except KeyError as exc:
+        raise HTTPException(422, {"error": f"unknown setting {exc}", "code": "VALIDATION_ERROR"}) from exc
+    return get_settings()
+
+
+@api.post("/settings/test")
+def test_settings() -> dict[str, Any]:
+    out: dict[str, Any] = {}
+    try:
+        out["ai"] = {"ok": True, "detail": llm.test()}
+    except llm.LLMError as exc:
+        out["ai"] = {"ok": False, "detail": str(exc)}
+    out["images"] = {"ok": not imagegen.describe().startswith("unavailable"), "detail": imagegen.describe()}
+    return out
+
+
+# --- jobs -----------------------------------------------------------------------------------
+
+
+def _new_job(session: Session, kind: str) -> db.Job:
+    job = db.Job(kind=kind)
+    session.add(job)
+    session.flush()
+    session.commit()
+    return job
+
+
+@api.get("/jobs/{job_id}")
+def get_job(job_id: str, session: Session = Depends(get_session)) -> dict[str, Any]:
+    job = session.get(db.Job, job_id)
+    if job is None:
+        raise _404("job")
+    out = {"id": job.id, "kind": job.kind, "status": job.status, "message": job.message, "result": job.result}
+    ids = (job.result or {}).get("slideshow_ids") or []
+    if ids:
+        rows = {s.id: s for s in session.scalars(select(db.Slideshow).where(db.Slideshow.id.in_(ids))).all()}
+        out["slideshows"] = [slideshow_out(rows[i]) for i in ids if i in rows]
+    return out
+
+
+# --- studio ------------------------------------------------------------------------------------
+
+
+@api.post("/studio", status_code=202)
+def studio(body: StudioRequest, session: Session = Depends(get_session)) -> dict[str, Any]:
+    """Describe what you want; get finished slideshows (text, images, rendering) back."""
+    if not llm.configured():
+        raise HTTPException(422, {"error": "Add an AI key in Settings first.", "code": "VALIDATION_ERROR"})
+    try:
+        schedule = [scheduler.validate_cron(c) for c in body.schedule]
+    except ValueError as exc:
+        raise HTTPException(422, {"error": f"invalid cron: {exc}", "code": "VALIDATION_ERROR"}) from exc
+    job = _new_job(session, "studio")
+    pipeline.job_executor.submit(
+        pipeline.run_studio, job.id, body.brief, body.count, body.image_source, body.aspect_ratio, body.language,
+        body.product_id, body.save_as_automation, body.tiktok_account_id, schedule,
+    )
+    return {"job_id": job.id}
+
+
+# --- library ------------------------------------------------------------------------------------
+
+
+def profile_out(p: db.LibraryProfile, posts: list[db.LibraryPost] | None = None) -> dict[str, Any]:
+    out = {
+        "id": p.id,
+        "username": p.username,
+        "nickname": p.nickname,
+        "avatar": pipeline.media_url(p.avatar_path) if p.avatar_path else None,
+        "bio": p.bio,
+        "link_in_bio": p.bio_link,
+        "followers": p.followers,
+        "following_count": p.following,
+        "total_likes": p.total_likes,
+        "video_count": p.video_count,
+        "region": p.region,
+        "verified": p.verified,
+        "niche": p.niche,
+        "product_medium": p.product_medium,
+        "url": f"https://www.tiktok.com/@{p.username}",
+        "scraped_at": p.scraped_at.isoformat() if p.scraped_at else None,
+    }
+    if posts is not None:
+        out["slideshows"] = [library_post_out(x) for x in posts]
+    return out
+
+
+def library_post_out(x: db.LibraryPost) -> dict[str, Any]:
+    return {
+        "id": x.id,
+        "url": x.url,
+        "description": x.description,
+        "is_slideshow": x.is_slideshow,
+        "images": [pipeline.media_url(i) for i in x.images],
+        "cover": pipeline.media_url(x.cover_path) if x.cover_path else None,
+        "slide_texts": x.slide_texts,
+        "music": x.music,
+        "views": x.views,
+        "likes": x.likes,
+        "comments": x.comments,
+        "shares": x.shares,
+        "saves": x.saves,
+        "posted_at": x.posted_at.isoformat() if x.posted_at else None,
+    }
+
+
+@api.get("/library/niches")
+def library_niches(session: Session = Depends(get_session)) -> dict[str, Any]:
+    rows = session.execute(
+        select(db.LibraryProfile.niche, func.count()).where(db.LibraryProfile.niche != "").group_by(db.LibraryProfile.niche)
+        .order_by(func.count().desc())
+    ).all()
+    return {"niches": [{"niche": n, "profile_count": c} for n, c in rows]}
+
+
+@api.get("/library")
+def library_search(
+    q: str = "",
+    niche: str = "",
+    product_medium: str = "",
+    region: str = "",
+    sort: str = "followers",
+    limit: int = Query(24, le=100),
+    offset: int = 0,
+    session: Session = Depends(get_session),
+) -> dict[str, Any]:
+    query = select(db.LibraryProfile)
+    if q:
+        like = f"%{q.lower()}%"
+        query = query.where(
+            func.lower(db.LibraryProfile.username).like(like)
+            | func.lower(db.LibraryProfile.nickname).like(like)
+            | func.lower(db.LibraryProfile.bio).like(like)
+            | db.LibraryProfile.id.in_(select(db.LibraryPost.profile_id).where(func.lower(db.LibraryPost.description).like(like)))
+        )
+    if niche:
+        query = query.where(db.LibraryProfile.niche == niche)
+    if product_medium:
+        query = query.where(db.LibraryProfile.product_medium == product_medium)
+    if region:
+        query = query.where(db.LibraryProfile.region == region.upper())
+    order = {"recent": db.LibraryProfile.scraped_at, "likes": db.LibraryProfile.total_likes}.get(sort, db.LibraryProfile.followers)
+    total = session.scalar(select(func.count()).select_from(query.subquery()))
+    rows = session.scalars(query.order_by(order.desc()).limit(limit).offset(offset)).all()
+    out = []
+    for p in rows:
+        top = sorted([x for x in p.posts if x.is_slideshow], key=lambda x: -x.views)[:4]
+        item = profile_out(p)
+        item["slideshow_count"] = sum(1 for x in p.posts if x.is_slideshow)
+        item["top_slideshows"] = [library_post_out(x) for x in top]
+        out.append(item)
+    return {"profiles": out, "total": total}
+
+
+@api.get("/library/profiles/{profile_id}")
+def library_profile(profile_id: str, session: Session = Depends(get_session)) -> dict[str, Any]:
+    p = session.get(db.LibraryProfile, profile_id)
+    if p is None:
+        raise _404("profile")
+    posts = sorted(p.posts, key=lambda x: (not x.is_slideshow, -x.views))
+    return profile_out(p, posts)
+
+
+@api.delete("/library/profiles/{profile_id}")
+def library_delete(profile_id: str, session: Session = Depends(get_session)) -> dict[str, Any]:
+    p = session.get(db.LibraryProfile, profile_id)
+    if p is None:
+        raise _404("profile")
+    for x in p.posts:
+        for rel in x.images + ([x.cover_path] if x.cover_path else []):
+            images.delete_file(rel)
+    session.delete(p)
+    return {"deleted": True}
+
+
+@api.post("/library/import", status_code=202)
+def library_import(body: LibraryImportRequest, session: Session = Depends(get_session)) -> dict[str, Any]:
+    items = [i for i in body.items if i.strip()]
+    if not items:
+        raise HTTPException(422, {"error": "Paste at least one TikTok username or URL.", "code": "VALIDATION_ERROR"})
+    job = _new_job(session, "library_import")
+    pipeline.job_executor.submit(library.import_job, job.id, items, body.max_posts)
+    return {"job_id": job.id}
+
+
+@api.post("/library/discover", status_code=202)
+def library_discover(body: LibraryDiscoverRequest, session: Session = Depends(get_session)) -> dict[str, Any]:
+    if not library.apify_available():
+        raise HTTPException(422, {"error": "Search/hashtag discovery needs an Apify token in Settings.", "code": "VALIDATION_ERROR"})
+    job = _new_job(session, "library_discover")
+    pipeline.job_executor.submit(library.discover_job, job.id, body.query, body.max_posts)
+    return {"job_id": job.id}
+
+
+@api.post("/library/posts/{post_id}/analyze")
+def library_analyze(post_id: str) -> dict[str, Any]:
+    try:
+        return {"slide_texts": library.analyze_post(post_id)}
+    except library.LibraryError as exc:
+        raise HTTPException(422, {"error": str(exc), "code": "VALIDATION_ERROR"}) from exc
+
+
+@api.post("/library/posts/{post_id}/remix", status_code=202)
+def library_remix(post_id: str, body: RemixRequest, session: Session = Depends(get_session)) -> dict[str, Any]:
+    """Make new slideshows in the format of a library post."""
+    post = session.get(db.LibraryPost, post_id)
+    if post is None:
+        raise _404("post")
+    if not post.slide_texts and post.images:
+        try:
+            library.analyze_post(post_id)
+        except library.LibraryError:
+            pass  # caption-only reference still works
+    reference, default_topic = library.reference_text(post_id)
+    topic = body.topic or default_topic
+    image_settings = ImageSettings(source=body.image_source)
+    ids = []
+    for _ in range(body.count):
+        show = pipeline.create_pending(session, topic, queue=True)
+        ids.append(show.id)
+    session.commit()
+    for sid in ids:
+        pipeline.executor.submit(
+            pipeline.generate_into, sid, image_settings=image_settings, aspect_ratio=body.aspect_ratio, reference=reference
+        )
+    return {"slideshow_ids": ids}
 
 
 app.include_router(api)

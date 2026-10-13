@@ -12,7 +12,7 @@ from PIL import ImageOps
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
-from . import db
+from . import db, imagegen, store
 from .config import settings
 
 
@@ -32,9 +32,9 @@ class ImageSearchError(RuntimeError):
 
 def providers() -> list[str]:
     out = []
-    if settings.pexels_api_key:
+    if store.get("pexels_api_key"):
         out.append("pexels")
-    if settings.unsplash_access_key:
+    if store.get("unsplash_access_key"):
         out.append("unsplash")
     return out
 
@@ -53,7 +53,7 @@ def _pexels(query: str, count: int, orientation: str, page: int) -> list[StockPh
     resp = httpx.get(
         "https://api.pexels.com/v1/search",
         params={"query": query, "per_page": min(count, 80), "orientation": orientation, "page": page},
-        headers={"Authorization": settings.pexels_api_key},
+        headers={"Authorization": store.get("pexels_api_key")},
         timeout=20,
     )
     resp.raise_for_status()
@@ -74,7 +74,7 @@ def _unsplash(query: str, count: int, orientation: str, page: int) -> list[Stock
     resp = httpx.get(
         "https://api.unsplash.com/search/photos",
         params={"query": query, "per_page": min(count, 30), "orientation": orientation, "page": page},
-        headers={"Authorization": f"Client-ID {settings.unsplash_access_key}"},
+        headers={"Authorization": f"Client-ID {store.get('unsplash_access_key')}"},
         timeout=20,
     )
     resp.raise_for_status()
@@ -145,6 +145,16 @@ def auto_image(session: Session, query: str, orientation: str, used_urls: set[st
         return existing
     image = download_into(session, photo, None, query)
     image.use_count = 1
+    return image
+
+
+def ai_image(session: Session, prompt: str, aspect_ratio: str, visual_style: str = "") -> db.Image:
+    """Generate a background with the configured image model and keep it in the 'ai' pool."""
+    data = imagegen.generate(prompt, aspect_ratio, visual_style)
+    rel, w, h = store_bytes(data, "library/ai")
+    image = db.Image(collection_id=None, path=rel, source="ai", query=prompt[:500], width=w, height=h, use_count=1)
+    session.add(image)
+    session.flush()
     return image
 
 

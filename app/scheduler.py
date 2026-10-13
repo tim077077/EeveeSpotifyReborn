@@ -8,7 +8,7 @@ from apscheduler.schedulers.background import BackgroundScheduler
 from apscheduler.triggers.cron import CronTrigger
 from sqlalchemy import select
 
-from . import db, pipeline
+from . import db, library, pipeline
 from .config import settings
 
 log = logging.getLogger("slidemill.scheduler")
@@ -63,6 +63,7 @@ def start() -> None:
     if scheduler.running:
         return
     scheduler.add_job(pipeline.refresh_posts, "interval", minutes=10, id="refresh_posts", replace_existing=True)
+    scheduler.add_job(library.refresh_all, "cron", hour=4, minute=17, id="library_refresh", replace_existing=True)
     sync()
     scheduler.start()
 
