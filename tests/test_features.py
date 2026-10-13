@@ -235,3 +235,110 @@ def test_library_import_search_analyze_remix(client, monkeypatch):
         time.sleep(0.2)
     assert "1. double cleanse" in captured["reference"]
     assert client.get(f"/api/v1/slideshows/{sid}", headers=AUTH).json()["prompt"] == "acne myths"
+
+
+# --- best times per country + auto-posting ------------------------------------------------
+
+from datetime import datetime, timedelta, timezone as dt_timezone
+from zoneinfo import ZoneInfo
+
+from app import scheduler, timing
+
+
+def test_standard_cron_weekdays_mean_monday_to_friday():
+    trig = scheduler.cron_trigger("0 9 * * 1-5", "Europe/Bucharest")
+    saturday = datetime(2026, 10, 17, 12, tzinfo=dt_timezone.utc)
+    nxt = trig.get_next_fire_time(None, saturday)
+    assert nxt.strftime("%A %H:%M") == "Monday 09:00"
+    assert scheduler.parse_dow("0") == {0} and scheduler.parse_dow("7") == {0} and scheduler.parse_dow("fri-mon") == {5, 6, 0, 1}
+    assert scheduler.shift_earlier("0 0 * * 1,2", 15) == "45 23 * * 0,1"
+    assert scheduler.shift_earlier("*/5 * * * *", 15) is None
+
+
+def test_best_times_shape_and_rules():
+    plan = timing.best_times("US", 3)
+    assert plan["timezone"] == "America/New_York" and len(plan["zones"]) == 4
+    assert all(len(v) == 3 for v in plan["schedule"].values())
+    assert len(plan["heatmap"]) == 7 and len(plan["heatmap"][0]) == 24
+    for times in plan["schedule"].values():  # spaced at least 2h apart
+        mins = [int(t[:2]) * 60 + int(t[3:]) for t in times]
+        assert all(b - a >= 120 for a, b in zip(mins, mins[1:]))
+    # crons reproduce the schedule exactly
+    tz = ZoneInfo(plan["timezone"])
+    week = datetime(2026, 11, 2, tzinfo=tz)  # a Monday
+    fired = set()
+    for c in plan["crons"]:
+        trig, t = scheduler.cron_trigger(c, plan["timezone"]), week - timedelta(seconds=1)
+        while (t := trig.get_next_fire_time(None, t + timedelta(seconds=1))) < week + timedelta(days=7):
+            fired.add((timing.DAYS[t.weekday()], t.strftime("%H:%M")))
+    assert fired == {(d, t) for d, ts in plan["schedule"].items() for t in ts}
+    assert timing.best_times("SA", 2)["weekend"] == ["fri", "sat"]
+
+
+def test_library_evidence_moves_the_schedule():
+    base = timing.best_times("NZ", 1)["schedule"]["wed"]
+    with db.session_scope() as s:
+        prof = db.LibraryProfile(username="nzposter", region="NZ")
+        s.add(prof)
+        s.flush()
+        tz = ZoneInfo("Pacific/Auckland")
+        for i in range(60):  # Wednesday 07:00 posts massively outperform
+            day = datetime(2026, 3, 4, tzinfo=tz) + timedelta(weeks=i % 20)
+            hour = 7 if i % 3 == 0 else 20
+            s.add(db.LibraryPost(id=f"nz{i}", profile_id=prof.id, views=100000 if hour == 7 else 1000,
+                                 posted_at=day.replace(hour=hour).astimezone(dt_timezone.utc)))
+    learned = timing.best_times("NZ", 1)
+    assert "library posts" in " ".join(learned["sources"])
+    assert learned["schedule"]["wed"] != base and learned["schedule"]["wed"][0].startswith(("06", "07"))
+
+
+def test_apply_timing_turns_on_auto_posting(client):
+    a = client.post("/api/v1/automations", json={"title": "RO tips", "hooks": ["x"]}, headers=AUTH).json()
+    r = client.post(f"/api/v1/automations/{a['id']}/apply-timing", json={"country": "ro", "posts_per_day": 2}, headers=AUTH)
+    assert r.status_code == 200, r.text
+    auto = r.json()["automation"]
+    assert auto["timezone"] == "Europe/Bucharest" and auto["target_country"] == "RO"
+    assert auto["post_settings"]["post_mode"] == "DIRECT_POST" and auto["post_settings"]["auto_post"] is True
+    assert {s["cron"] for s in auto["schedule"]} == set(r.json()["plan"]["crons"])
+    assert any("No TikTok account" in w for w in r.json()["warnings"])
+    assert client.post(f"/api/v1/automations/{a['id']}/apply-timing", json={"country": "XX"}, headers=AUTH).status_code == 404
+
+
+def test_scheduled_run_waits_for_post_time(client, monkeypatch):
+    from app import tiktok
+
+    with db.session_scope() as s:
+        acct = db.TikTokAccount(open_id="wait-test", username="w", access_token="t")
+        s.add(acct)
+        s.flush()
+        aid = db.Automation(title="t", hooks=["h"], tiktok_account_id=acct.id,
+                            post_settings={"auto_post": True, "post_mode": "MEDIA_UPLOAD"})
+        s.add(aid)
+        s.flush()
+        automation_id = aid.id
+    slept = []
+    monkeypatch.setattr(pipeline.time, "sleep", lambda secs: slept.append(secs))
+    monkeypatch.setattr(tiktok, "publish_photos", lambda *a, **k: "pub")
+    publish_at = datetime.now(dt_timezone.utc) + timedelta(minutes=10)
+    sid = pipeline.run_automation(automation_id, cron_id="c", publish_at=publish_at)
+    assert slept and 9 * 60 < slept[0] < 15 * 60
+    with db.session_scope() as s:
+        show = s.get(db.Slideshow, sid)
+        assert show.posts[0].status == "processing"
+        s.delete(show)  # keep other tests' post statistics clean
+
+
+def test_migration_adds_new_columns(tmp_path):
+    from sqlalchemy import create_engine, inspect, text
+
+    engine = create_engine(f"sqlite:///{tmp_path / 'old.db'}")
+    with engine.begin() as conn:
+        conn.execute(text("CREATE TABLE automations (id VARCHAR(32) PRIMARY KEY, title VARCHAR(256))"))
+    original = db.engine
+    db.engine = engine
+    try:
+        db._add_missing_columns()
+    finally:
+        db.engine = original
+    cols = {c["name"] for c in inspect(engine).get_columns("automations")}
+    assert {"timezone", "target_country", "paused"} <= cols

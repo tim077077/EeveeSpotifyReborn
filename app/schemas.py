@@ -155,7 +155,9 @@ class AutomationIn(BaseModel):
     language: str = "English"
     post_settings: PostSettings = Field(default_factory=PostSettings)
     image_settings: ImageSettings = Field(default_factory=ImageSettings)
-    schedule: list[str] = Field(default_factory=list, description="Cron expressions in the server timezone.")
+    schedule: list[str] = Field(default_factory=list, description="Cron expressions in `timezone`.")
+    timezone: str = Field(default="", description="IANA timezone for the schedule; blank = server timezone.")
+    target_country: str = ""
 
 
 class AutomationPatch(BaseModel):
@@ -168,6 +170,8 @@ class AutomationPatch(BaseModel):
     post_settings: PostSettings | None = None
     image_settings: ImageSettings | None = None
     schedule: list[str] | None = None
+    timezone: str | None = None
+    target_country: str | None = None
     paused: bool | None = None
     favorite: bool | None = None
 
@@ -183,6 +187,10 @@ class StudioRequest(BaseModel):
     save_as_automation: bool = False
     tiktok_account_id: str | None = None
     schedule: list[str] = Field(default_factory=list)
+    # When set, the saved automation posts at that country's best times (overrides `schedule`).
+    target_country: str | None = None
+    posts_per_day: int = Field(default=2, ge=1, le=6)
+    auto_publish: bool = False
 
 
 class RemixRequest(BaseModel):
@@ -204,6 +212,13 @@ class LibraryDiscoverRequest(BaseModel):
 
 class SettingsUpdate(BaseModel):
     values: dict[str, str]
+
+
+class ApplyTimingRequest(BaseModel):
+    country: str
+    posts_per_day: int = Field(default=3, ge=1, le=6)
+    # True: publish publicly by itself at those hours. False: send each one to TikTok drafts.
+    auto_publish: bool = True
 
 
 class RunRequest(BaseModel):

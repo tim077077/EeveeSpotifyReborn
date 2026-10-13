@@ -11,6 +11,7 @@ It was built by tearing down how reel.farm works; see [docs/REELFARM_TEARDOWN.md
 - **Any AI key.** Paste a key in Settings and the provider is detected from its prefix. The model and base URL can be overridden. Claude uses structured outputs. Everything else goes through the OpenAI-compatible API in JSON mode, with schema validation and one automatic repair retry.
 - **AI backgrounds.** Images come from OpenAI (`gpt-image-1`), Gemini (`gemini-2.5-flash-image`), Together (FLUX) or Pollinations (free, no key, watermarked). An OpenAI or Gemini writing key makes images too, so one key covers everything.
 - **AI slideshow generator.** You give it a prompt; the AI returns hook, body and CTA slides with styling, a caption and a description. Recent titles go back into the prompt so new slideshows don't repeat old ones.
+- **Best times to post, by country.** Pick the country you want to reach and how many posts a day. You get a weekly schedule in that country's local time, with a day × hour heatmap. Multi-timezone countries (US, Canada, Brazil, Australia, Mexico, Indonesia) are weighted by population, and local weekends (Fri–Sat in Saudi Arabia, Egypt and Israel) and late-evening cultures (Spain, Latin America, the Gulf) are respected. The schedule starts from an engagement baseline and adapts as real data comes in: scraped library posts from accounts in that country and your own posts' views. One click turns on **auto-posting**: each slideshow is generated 15 minutes early and published on time, plus 0–4 random minutes, either publicly or to drafts.
 - **Slide renderer.** TikTok-style outline text and boxed text, 7 fonts, 4 aspect ratios, grid layouts, darkening overlays and Korean/Japanese/Chinese text. Every slide can be edited in the dashboard and re-rendered.
 - **Automations.** Each automation has a list of hooks that it rotates through, a style prompt, a language, an optional product for a soft CTA, image settings and posting times (cron). Automations can be paused, resumed or run now.
 - **Images.** Upload your own image collections or import them from Pexels/Unsplash. You can also let it search stock photos for each slide automatically. Collections are cycled least-used first so images don't repeat.
@@ -64,13 +65,14 @@ Tracked profiles refresh daily at 04:17. Scraping TikTok breaks its Terms of Ser
 .venv/bin/python -m pytest -q
 ```
 
-The tests stub out the AI, image and TikTok calls (22 tests). They cover:
+The tests stub out the AI, image and TikTok calls (28 tests). They cover:
 
 - key → provider detection and the OpenAI-compatible JSON path with its repair retry
 - Studio producing complete slideshows with AI backgrounds and saving them as an automation
 - library import, search, slide reading and remix
 - generate, render, edit, publish, metrics sync and the direct-post cap
 - cron automations, collections and video export
+- country schedules: the cron round-trip, weekend rules, learning from library data, apply-timing, posting at the planned time, and DB migration
 
 ## Layout
 
@@ -85,7 +87,8 @@ app/
   images.py      stock search, collections, least-used picking
   pipeline.py    generate -> images -> render -> publish -> metrics
   tiktok.py      OAuth, photo posting, status, metrics
-  scheduler.py   cron jobs per automation
+  timing.py      best posting times per country (baseline + learned)
+  scheduler.py   cron jobs per automation, in its own timezone
   main.py        REST API + dashboard
 static/          dashboard (vanilla JS)
 fonts/           open-licence fonts (OFL)

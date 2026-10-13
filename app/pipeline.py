@@ -7,6 +7,7 @@ import random
 import shutil
 import subprocess
 import threading
+import time
 from collections import Counter
 from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timedelta, timezone
@@ -14,7 +15,7 @@ from datetime import datetime, timedelta, timezone
 from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
-from . import db, generator, imagegen, images, renderer, tiktok
+from . import db, generator, imagegen, images, renderer, tiktok, timing
 from .config import settings
 from .schemas import CampaignPlan, ImageSettings, PostSettings, Slide, SlideshowPlan, SlideshowSpec, TextItem
 
@@ -253,7 +254,8 @@ def generate_into(
 
 
 def run_studio(job_id: str, brief: str, count: int, image_source: str, aspect_ratio: str | None, language: str | None,
-               product_id: str | None, save_as_automation: bool, tiktok_account_id: str | None, schedule: list[str]) -> None:
+               product_id: str | None, save_as_automation: bool, tiktok_account_id: str | None, schedule: list[str],
+               target_country: str | None = None, posts_per_day: int = 2, auto_publish: bool = False) -> None:
     """Plan a content format from a brief, then generate `count` complete slideshows from it."""
     _job(job_id, status="running", message="Planning the format…")
     try:
@@ -278,6 +280,13 @@ def run_studio(job_id: str, brief: str, count: int, image_source: str, aspect_ra
                     post_settings=PostSettings(auto_post=bool(tiktok_account_id)).model_dump(),
                     image_settings=image_settings.model_dump(),
                 )
+                if target_country:
+                    plan = timing.best_times(target_country, posts_per_day, tiktok_account_id)
+                    automation.timezone, automation.target_country = plan["timezone"], plan["country"]
+                    schedule = plan["crons"]
+                    automation.post_settings = PostSettings(
+                        auto_post=bool(tiktok_account_id), post_mode="DIRECT_POST" if auto_publish else "MEDIA_UPLOAD"
+                    ).model_dump()
                 automation.schedules = [db.ScheduleJob(cron=c) for c in schedule]
                 session.add(automation)
                 session.flush()
@@ -334,8 +343,18 @@ def pick_hook(session: Session, automation: db.Automation) -> str:
     return random.choice([h for h in hooks if used.get(h, 0) == low])
 
 
-def run_automation(automation_id: str, hook: str | None = None, mode: str = "export", cron_id: str | None = None) -> str | None:
-    """Generate one slideshow for an automation and, if configured, publish it. Blocking."""
+def run_automation(
+    automation_id: str,
+    hook: str | None = None,
+    mode: str = "export",
+    cron_id: str | None = None,
+    publish_at: datetime | None = None,
+) -> str | None:
+    """Generate one slideshow for an automation and, if configured, publish it. Blocking.
+
+    With `publish_at` (scheduled runs start a little early), the finished slideshow waits until
+    then - plus a few random minutes so posts don't land on the exact same second every day.
+    """
     with db.session_scope() as session:
         automation = session.get(db.Automation, automation_id)
         if automation is None:
@@ -362,6 +381,10 @@ def run_automation(automation_id: str, hook: str | None = None, mode: str = "exp
     generate_into(show_id, **kwargs)
 
     if mode == "export" and post_settings.auto_post and account_id:
+        if publish_at is not None:
+            wait = (publish_at - datetime.now(timezone.utc)).total_seconds() + random.uniform(0, 240)
+            if 0 < wait < 3600:
+                time.sleep(wait)
         try:
             publish(show_id, account_id, post_settings)
         except PipelineError as exc:

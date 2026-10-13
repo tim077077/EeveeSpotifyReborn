@@ -7,6 +7,7 @@ import secrets
 from datetime import datetime, timedelta, timezone
 from contextlib import asynccontextmanager
 from typing import Any
+from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from fastapi import APIRouter, Depends, FastAPI, File, HTTPException, Query, Request, UploadFile
 from fastapi.responses import FileResponse, HTMLResponse, RedirectResponse
@@ -14,9 +15,10 @@ from fastapi.staticfiles import StaticFiles
 from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
-from . import db, imagegen, images, library, llm, pipeline, scheduler, store, tiktok
+from . import db, imagegen, images, library, llm, pipeline, scheduler, store, tiktok, timing
 from .config import STATIC_DIR, settings
 from .schemas import (
+    ApplyTimingRequest,
     AutomationIn,
     AutomationPatch,
     CollectionIn,
@@ -125,6 +127,8 @@ def automation_out(a: db.Automation) -> dict[str, Any]:
         "language": a.language,
         "post_settings": a.post_settings,
         "image_settings": a.image_settings,
+        "timezone": a.timezone or settings.timezone,
+        "target_country": a.target_country,
         "paused": a.paused,
         "favorite": a.favorite,
         "schedule": [{"job_id": j.id, "cron": j.cron} for j in a.schedules],
@@ -311,9 +315,18 @@ def publish_slideshow(slideshow_id: str, body: PublishRequest, session: Session 
 # --- automations ---------------------------------------------------------------------------
 
 
+def _check_timezone(tz: str) -> None:
+    if not tz:
+        return
+    try:
+        ZoneInfo(tz)
+    except (ZoneInfoNotFoundError, ValueError) as exc:
+        raise HTTPException(422, {"error": f"unknown timezone {tz!r}", "code": "VALIDATION_ERROR"}) from exc
+
+
 def _set_schedule(session: Session, automation: db.Automation, crons: list[str]) -> None:
     try:
-        crons = [scheduler.validate_cron(c) for c in crons]
+        crons = [scheduler.validate_cron(c, automation.timezone or None) for c in crons]
     except ValueError as exc:
         raise HTTPException(422, {"error": f"invalid cron: {exc}", "code": "VALIDATION_ERROR"}) from exc
     automation.schedules.clear()
@@ -333,7 +346,10 @@ def create_automation(body: AutomationIn, session: Session = Depends(get_session
         language=body.language,
         post_settings=body.post_settings.model_dump(),
         image_settings=body.image_settings.model_dump(),
+        timezone=body.timezone,
+        target_country=body.target_country.upper(),
     )
+    _check_timezone(body.timezone)
     session.add(automation)
     session.flush()
     _set_schedule(session, automation, body.schedule)
@@ -363,6 +379,7 @@ def patch_automation(automation_id: str, body: AutomationPatch, session: Session
         raise _404("automation")
     data = body.model_dump(exclude_unset=True)
     schedule = data.pop("schedule", None)
+    _check_timezone(data.get("timezone") or "")
     for key, value in data.items():
         setattr(automation, key, value)
     if schedule is not None:
@@ -594,6 +611,54 @@ def refresh_posts():
     return {"queued": True}
 
 
+# --- posting times ---------------------------------------------------------------------------
+
+
+@api.get("/timing/countries")
+def timing_countries() -> dict[str, Any]:
+    return {"countries": timing.country_list()}
+
+
+@api.get("/timing/best")
+def timing_best(country: str, posts_per_day: int = Query(3, ge=1, le=6), tiktok_account_id: str | None = None):
+    try:
+        return timing.best_times(country, posts_per_day, tiktok_account_id)
+    except KeyError as exc:
+        raise HTTPException(404, {"error": f"unsupported country {country!r}", "code": "NOT_FOUND"}) from exc
+
+
+def apply_timing(session: Session, automation: db.Automation, country: str, posts_per_day: int, auto_publish: bool) -> dict:
+    plan = timing.best_times(country, posts_per_day, automation.tiktok_account_id)
+    automation.timezone = plan["timezone"]
+    automation.target_country = plan["country"]
+    post = PostSettings.model_validate(automation.post_settings or {})
+    post.auto_post = True
+    post.post_mode = "DIRECT_POST" if auto_publish else "MEDIA_UPLOAD"
+    automation.post_settings = post.model_dump()
+    automation.paused = False
+    _set_schedule(session, automation, plan["crons"])
+    return plan
+
+
+@api.post("/automations/{automation_id}/apply-timing")
+def automation_apply_timing(automation_id: str, body: ApplyTimingRequest, session: Session = Depends(get_session)):
+    """Schedule an automation at the best times for a country and turn on auto-posting."""
+    automation = session.get(db.Automation, automation_id)
+    if automation is None:
+        raise _404("automation")
+    if body.country.upper() not in timing.COUNTRIES:
+        raise HTTPException(404, {"error": f"unsupported country {body.country!r}", "code": "NOT_FOUND"})
+    plan = apply_timing(session, automation, body.country, body.posts_per_day, body.auto_publish)
+    session.commit()
+    scheduler.sync()
+    warnings = []
+    if not automation.tiktok_account_id:
+        warnings.append("No TikTok account on this automation: slideshows will be made but not posted.")
+    if body.auto_publish and body.posts_per_day > settings.tiktok_direct_posts_per_day:
+        warnings.append(f"TikTok allows {settings.tiktok_direct_posts_per_day} direct posts a day; extra ones go to drafts.")
+    return {"automation": automation_out(automation), "plan": plan, "warnings": warnings}
+
+
 # --- settings ----------------------------------------------------------------------------------
 
 
@@ -668,10 +733,13 @@ def studio(body: StudioRequest, session: Session = Depends(get_session)) -> dict
         schedule = [scheduler.validate_cron(c) for c in body.schedule]
     except ValueError as exc:
         raise HTTPException(422, {"error": f"invalid cron: {exc}", "code": "VALIDATION_ERROR"}) from exc
+    if body.target_country and body.target_country.upper() not in timing.COUNTRIES:
+        raise HTTPException(404, {"error": f"unsupported country {body.target_country!r}", "code": "NOT_FOUND"})
     job = _new_job(session, "studio")
     pipeline.job_executor.submit(
         pipeline.run_studio, job.id, body.brief, body.count, body.image_source, body.aspect_ratio, body.language,
         body.product_id, body.save_as_automation, body.tiktok_account_id, schedule,
+        body.target_country, body.posts_per_day, body.auto_publish,
     )
     return {"job_id": job.id}
 

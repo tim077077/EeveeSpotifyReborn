@@ -82,7 +82,8 @@ function timesToCron(times, days) {
 }
 function cronToTimes(crons) {
   const simple = crons.every((c) => /^\d+ \d+ \* \* [\d,\-*]+$/.test(c));
-  if (!simple) return null;
+  // Per-day schedules (different days per time) can't be shown as one times list.
+  if (!simple || new Set(crons.map((c) => c.split(" ")[4])).size > 1) return null;
   const times = crons.map((c) => {
     const [m, h] = c.split(" ");
     return `${h.padStart(2, "0")}:${m.padStart(2, "0")}`;
@@ -342,7 +343,8 @@ views.automations = async () => {
         <div class="row"><h3 class="grow">${a.favorite ? "★ " : ""}${esc(a.title)}</h3>
           <span class="pill ${a.paused ? "bad" : a.schedule.length ? "live" : ""}">${a.paused ? "paused" : a.schedule.length ? "live" : "no schedule"}</span></div>
         <div class="small muted">${acct[a.tiktok_account_id] ? "@" + esc(acct[a.tiktok_account_id].username) : "no account"} · ${a.hooks.length} hooks · ${a.schedule.length} posts/day</div>
-        <div class="small muted">Next: ${a.next_runs[0] ? esc(new Date(a.next_runs[0]).toLocaleString()) : "—"}</div>
+        <div class="small muted">${a.target_country ? `🎯 ${esc(a.target_country)} · ` : ""}times in ${esc(a.timezone)} · ${esc(a.post_settings.post_mode === "DIRECT_POST" ? "auto-publish" : "drafts")}</div>
+        <div class="small muted">Next post: ${a.next_runs[0] ? esc(new Date(a.next_runs[0]).toLocaleString()) : "—"}</div>
         <div class="row" style="margin-top:12px">
           <button data-run="${a.id}">Run now</button>
           <button data-edit="${a.id}">Edit</button>
@@ -378,7 +380,8 @@ async function automationDialog(a) {
   const [accounts, products, collections] = await Promise.all([api("/tiktok/accounts"), api("/products"), api("/collections")]);
   const ps = a?.post_settings ?? {};
   const is = a?.image_settings ?? {};
-  const sched = cronToTimes(a?.schedule.map((s) => s.cron) ?? []) ?? { times: "", days: "*" };
+  const sched = cronToTimes(a?.schedule.map((s) => s.cron) ?? []) ?? { times: "", days: "*", simple: false };
+  if (sched.simple === undefined) sched.simple = true;
   const opt = (list, cur, label) =>
     `<option value="">${label}</option>` + list.map((x) => `<option value="${x.id}" ${x.id === cur ? "selected" : ""}>${esc(x.name || x.username || x.display_name)}</option>`).join("");
   const dlg = $("#dialog");
@@ -397,7 +400,10 @@ async function automationDialog(a) {
     <div class="form-grid">
       <div><label>Posting times (HH:MM, comma-separated)</label><input name="times" value="${esc(sched.times)}" placeholder="09:00, 18:30"></div>
       <div><label>Days (cron day-of-week: * = every day, 1-5 = weekdays)</label><input name="days" value="${esc(sched.days)}"></div>
+      <div><label>Timezone for these times (IANA, blank = server)</label><input name="timezone" value="${esc(a?.timezone ?? "")}" placeholder="Europe/London"></div>
+      <div><label>&nbsp;</label><a class="btn" href="#timing">Pick best times by country →</a></div>
     </div>
+    ${a && !sched.simple ? `<p class="small muted">This automation uses a per-day schedule (${a.schedule.length} slots${a.target_country ? ` for ${esc(a.target_country)}` : ""}). Leave the times field empty to keep it.</p>` : ""}
     <h3 style="margin-top:18px">Posting</h3>
     <div class="form-grid">
       <div><label>Mode</label>${select("post_mode", ["MEDIA_UPLOAD", "DIRECT_POST"], ps.post_mode ?? "MEDIA_UPLOAD")}</div>
@@ -444,7 +450,8 @@ async function automationDialog(a) {
         language: val("language") || "English",
         hooks: val("hooks").split("\n").map((s) => s.trim()).filter(Boolean),
         style: val("style"),
-        schedule: timesToCron(val("times"), val("days").trim()),
+        timezone: val("timezone").trim(),
+        ...(val("times").trim() || !a || sched.simple ? { schedule: timesToCron(val("times"), val("days").trim()) } : {}),
         post_settings: {
           post_mode: val("post_mode"), visibility: val("visibility"),
           caption_mode: val("caption_mode"), caption_static: val("caption_static"),
@@ -631,13 +638,19 @@ views.studio = async () => {
       <div class="form-grid" id="auto-opts" hidden>
         <div><label>TikTok account</label><select id="acct"><option value="">— none (drafts only) —</option>${accounts.accounts
           .map((a) => `<option value="${a.id}">@${esc(a.username)}</option>`).join("")}</select></div>
-        <div><label>Posting times (HH:MM, comma-separated)</label><input id="times" value="09:00, 18:00"></div>
+        <div><label>Post for this country's best times</label><select id="scountry"><option value="">— use the times below —</option></select></div>
+        <div><label>Posts per day</label><input id="sppd" type="number" min="1" max="6" value="2"></div>
+        <div><label>Posting times if no country (HH:MM, comma-separated)</label><input id="times" value="09:00, 18:00"></div>
+        <div><label>Mode</label><select id="spub"><option value="0">Send to TikTok drafts</option><option value="1">Publish publicly by itself</option></select></div>
       </div>
       <div class="row" style="margin-top:16px"><button class="primary" id="make">Make slideshows</button>
         <span class="muted small">About a minute per slideshow, three at a time.</span></div>
     </div>
     <div id="studio-out"></div>`;
   $("#auto").onchange = () => ($("#auto-opts").hidden = !$("#auto").checked);
+  api("/timing/countries").then((r) => {
+    $("#scountry").insertAdjacentHTML("beforeend", r.countries.map((c) => `<option value="${c.code}">${esc(c.name)}</option>`).join(""));
+  });
   $("#make").onclick = (e) =>
     busy(e.currentTarget, async () => {
       const brief = $("#brief").value.trim();
@@ -649,6 +662,8 @@ views.studio = async () => {
           brief, count: +$("#count").value, image_source: $("#src").value, aspect_ratio: ar === "auto" ? null : ar,
           product_id: $("#product").value || null, save_as_automation: $("#auto").checked,
           tiktok_account_id: $("#acct").value || null, schedule: $("#auto").checked ? timesToCron($("#times").value, "*") : [],
+          target_country: ($("#auto").checked && $("#scountry").value) || null, posts_per_day: +$("#sppd").value,
+          auto_publish: $("#spub").value === "1",
         },
       });
       await pollJob(job_id, (job) => {
@@ -826,6 +841,100 @@ views.settings = async () => {
       $("#test-out").innerHTML = `<div class="card" style="margin-top:14px">
         <div>${r.ai.ok ? "✅" : "❌"} AI: ${esc(r.ai.detail)}</div><div>${r.images.ok ? "✅" : "❌"} Images: ${esc(r.images.detail)}</div></div>`;
     });
+};
+
+// ---- best times to post ---------------------------------------------------------------
+
+const DAY_LABELS = { mon: "Mon", tue: "Tue", wed: "Wed", thu: "Thu", fri: "Fri", sat: "Sat", sun: "Sun" };
+// Sequential blue ramp, dark surface: low = deep (recedes), high = light.
+const RAMP = ["#0d366b", "#104281", "#184f95", "#1c5cab", "#256abf", "#2a78d6", "#3987e5", "#5598e7", "#6da7ec", "#86b6ef", "#9ec5f4", "#b7d3f6", "#cde2fb"];
+const heatColor = (v) => RAMP[Math.min(RAMP.length - 1, Math.max(0, Math.round(v * (RAMP.length - 1))))];
+
+function heatmap(plan) {
+  const picks = new Set();
+  Object.entries(plan.schedule).forEach(([d, times]) => times.forEach((t) => picks.add(`${d}-${parseInt(t, 10)}`)));
+  const days = Object.keys(DAY_LABELS);
+  let html = `<div class="heat" role="img" aria-label="Audience activity by day and hour in ${esc(plan.timezone)}"><div></div>`;
+  for (let h = 0; h < 24; h++) html += `<div class="hr">${h % 3 === 0 ? h : ""}</div>`;
+  days.forEach((d, di) => {
+    html += `<div class="lab">${DAY_LABELS[d]}${plan.weekend.includes(d) ? "*" : ""}</div>`;
+    plan.heatmap[di].forEach((v, h) => {
+      const pick = picks.has(`${d}-${h}`);
+      html += `<div class="cell ${pick ? "pick" : ""}" style="background:${heatColor(v)}" data-tip="${DAY_LABELS[d]} ${String(h).padStart(2, "0")}:00 · reach score ${Math.round(v * 100)}${pick ? " · scheduled" : ""}"></div>`;
+    });
+  });
+  html += `</div><div class="heat-legend">low <span class="ramp"></span> high · ringed = scheduled post · * = weekend</div>`;
+  return html;
+}
+
+function attachTips(root) {
+  let tip;
+  root.addEventListener("mousemove", (e) => {
+    const cell = e.target.closest("[data-tip]");
+    if (!cell) { tip?.remove(); tip = null; return; }
+    tip ??= document.body.appendChild(Object.assign(document.createElement("div"), { className: "heat-tip" }));
+    tip.textContent = cell.dataset.tip;
+    tip.style.left = `${e.clientX + 12}px`;
+    tip.style.top = `${e.clientY + 12}px`;
+  });
+  root.addEventListener("mouseleave", () => { tip?.remove(); tip = null; });
+}
+
+views.timing = async () => {
+  const [countries, autos, accounts] = await Promise.all([api("/timing/countries"), api("/automations"), api("/tiktok/accounts")]);
+  const saved = (() => { try { return localStorage.getItem("slidemill_country") || "US"; } catch { return "US"; } })();
+  view.innerHTML = `
+    <h1>Best times to post</h1>
+    <p class="sub">Pick the country you want to reach. Slidemill builds a weekly schedule in that country's local time and can post on its own at those hours.</p>
+    <div class="card"><div class="form-grid">
+      <div><label>Target country</label><select id="country">${countries.countries
+        .map((c) => `<option value="${c.code}" ${c.code === saved ? "selected" : ""}>${esc(c.name)}${c.multi_zone ? " (all time zones)" : ""}</option>`).join("")}</select></div>
+      <div><label>Posts per day</label><input id="ppd" type="number" min="1" max="6" value="3"></div>
+      <div><label>Learn from this account's results (optional)</label><select id="tacct"><option value="">—</option>${accounts.accounts
+        .map((a) => `<option value="${a.id}">@${esc(a.username)}</option>`).join("")}</select></div>
+    </div></div>
+    <div id="plan"></div>
+    <h2>Auto-post at these times</h2>
+    <div class="card">
+      ${autos.automations.length ? `<div class="form-grid">
+        <div><label>Automation</label><select id="auto-sel">${autos.automations.map((a) => `<option value="${a.id}">${esc(a.title)}${a.target_country ? ` (now: ${esc(a.target_country)})` : ""}</option>`).join("")}</select></div>
+        <div><label>Mode</label><select id="pub"><option value="1">Publish publicly by itself</option><option value="0">Send each one to my TikTok drafts</option></select></div>
+      </div>
+      <div class="row" style="margin-top:14px"><button class="primary" id="apply">Turn on auto-posting</button>
+      <span class="small muted">Each slot: the slideshow is made 15 minutes early, then posted on time (± a few minutes so it doesn't look robotic).</span></div>
+      <div id="apply-out"></div>`
+      : `<p class="muted">Create an automation first (or use <a href="#studio">Studio</a> and tick "keep it going").</p>`}
+    </div>`;
+  attachTips(view);
+  const load = async () => {
+    try { localStorage.setItem("slidemill_country", $("#country").value); } catch { /* ignore */ }
+    const qs = new URLSearchParams({ country: $("#country").value, posts_per_day: $("#ppd").value });
+    if ($("#tacct").value) qs.set("tiktok_account_id", $("#tacct").value);
+    const plan = await api(`/timing/best?${qs}`);
+    const days = Object.keys(DAY_LABELS);
+    $("#plan").innerHTML = `
+      <h2>${esc(plan.name)} · times in ${esc(plan.timezone)}</h2>
+      <div class="card">${heatmap(plan)}</div>
+      <div class="card" style="margin-top:12px;overflow-x:auto"><table>
+        <tr>${days.map((d) => `<th>${DAY_LABELS[d]}</th>`).join("")}</tr>
+        <tr>${days.map((d) => `<td>${plan.schedule[d].map(esc).join("<br>")}</td>`).join("")}</tr></table>
+        <p class="small muted">Based on: ${plan.sources.map(esc).join(", ")}. Confidence: ${esc(plan.confidence)}.
+        ${plan.zones.length > 1 ? `Weighted across ${plan.zones.map((z) => `${esc(z.zone.split("/").pop().replace("_", " "))} ${Math.round(z.share * 100)}%`).join(", ")}.` : ""}
+        Scrape accounts from this country into the library, or post for a few weeks, and these times adapt to real results.</p></div>`;
+  };
+  ["country", "ppd", "tacct"].forEach((id) => ($(`#${id}`).onchange = () => load().catch((e) => toast(e.message, true))));
+  await load();
+  const apply = $("#apply");
+  if (apply)
+    apply.onclick = (e) =>
+      busy(e.currentTarget, async () => {
+        const r = await api(`/automations/${$("#auto-sel").value}/apply-timing`, {
+          method: "POST", body: { country: $("#country").value, posts_per_day: +$("#ppd").value, auto_publish: $("#pub").value === "1" },
+        });
+        const next = r.automation.next_runs.slice(0, 3).map((t) => new Date(t).toLocaleString()).join(" · ");
+        $("#apply-out").innerHTML = `<p>✅ <b>${esc(r.automation.title)}</b> now posts ${r.plan.posts_per_day}×/day for ${esc(r.plan.name)}. Next: ${esc(next || "—")} (your local time)</p>
+          ${r.warnings.map((w) => `<p class="small" style="color:var(--warn)">⚠ ${esc(w)}</p>`).join("")}`;
+      });
 };
 
 // ---- router ----------------------------------------------------------------------------

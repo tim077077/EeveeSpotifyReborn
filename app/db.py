@@ -90,6 +90,10 @@ class Automation(Base):
     language: Mapped[str] = mapped_column(String(64), default="English")
     post_settings: Mapped[dict[str, Any]] = mapped_column(default=dict)
     image_settings: Mapped[dict[str, Any]] = mapped_column(default=dict)
+    # Schedule crons are interpreted in this IANA timezone ("" = server timezone).
+    timezone: Mapped[str] = mapped_column(String(64), default="")
+    # ISO country code the posting times were optimized for, if any.
+    target_country: Mapped[str] = mapped_column(String(8), default="")
     paused: Mapped[bool] = mapped_column(Boolean, default=False)
     favorite: Mapped[bool] = mapped_column(Boolean, default=False)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
@@ -228,6 +232,32 @@ SessionLocal = sessionmaker(bind=engine, expire_on_commit=False)
 
 def init_db() -> None:
     Base.metadata.create_all(engine)
+    _add_missing_columns()
+
+
+def _add_missing_columns() -> None:
+    """Additive migration: create columns added to models after a table already existed."""
+    from sqlalchemy import inspect, text
+
+    inspector = inspect(engine)
+    with engine.begin() as conn:
+        for table in Base.metadata.sorted_tables:
+            if not inspector.has_table(table.name):
+                continue
+            existing = {c["name"] for c in inspector.get_columns(table.name)}
+            for column in table.columns:
+                if column.name in existing:
+                    continue
+                ddl_type = column.type.compile(dialect=engine.dialect)
+                default = column.default.arg if column.default is not None and not callable(column.default.arg) else None
+                clause = ""
+                if isinstance(default, bool):
+                    clause = f" DEFAULT {int(default)}"
+                elif isinstance(default, (int, float)):
+                    clause = f" DEFAULT {default}"
+                elif isinstance(default, str):
+                    clause = " DEFAULT '" + default.replace("'", "''") + "'"
+                conn.execute(text(f'ALTER TABLE {table.name} ADD COLUMN "{column.name}" {ddl_type}{clause}'))
 
 
 @contextmanager
