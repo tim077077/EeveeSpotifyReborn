@@ -294,8 +294,16 @@ def test_library_evidence_moves_the_schedule():
 
 def test_apply_timing_turns_on_auto_posting(client):
     a = client.post("/api/v1/automations", json={"title": "RO tips", "hooks": ["x"]}, headers=AUTH).json()
-    r = client.post(f"/api/v1/automations/{a['id']}/apply-timing", json={"country": "ro", "posts_per_day": 2}, headers=AUTH)
+    no_consent = client.post(f"/api/v1/automations/{a['id']}/apply-timing", json={"country": "ro", "posts_per_day": 2}, headers=AUTH)
+    assert no_consent.status_code == 422  # auto-publish needs a privacy choice + consent
+    r = client.post(
+        f"/api/v1/automations/{a['id']}/apply-timing",
+        json={"country": "ro", "posts_per_day": 2, "privacy_level": "PUBLIC_TO_EVERYONE", "consent": True},
+        headers=AUTH,
+    )
     assert r.status_code == 200, r.text
+    assert r.json()["automation"]["post_settings"]["consented"] is True
+    assert r.json()["automation"]["post_settings"]["visibility"] == "PUBLIC_TO_EVERYONE"
     auto = r.json()["automation"]
     assert auto["timezone"] == "Europe/Bucharest" and auto["target_country"] == "RO"
     assert auto["post_settings"]["post_mode"] == "DIRECT_POST" and auto["post_settings"]["auto_post"] is True
@@ -342,3 +350,65 @@ def test_migration_adds_new_columns(tmp_path):
         db.engine = original
     cols = {c["name"] for c in inspect(engine).get_columns("automations")}
     assert {"timezone", "target_country", "paused"} <= cols
+
+
+# --- hardening ----------------------------------------------------------------------------
+
+
+def test_direct_post_requires_explicit_choices(client, monkeypatch):
+    from app import tiktok
+
+    monkeypatch.setattr(tiktok, "publish_photos", lambda *a, **k: "pub")
+    with db.session_scope() as s:
+        acct = db.TikTokAccount(open_id="consent-test", username="c", access_token="t")
+        s.add(acct)
+        s.flush()
+        account_id = acct.id
+    sid = client.post("/api/v1/slideshows/create", json={"slides": [{"text_items": [{"text": "x"}]}]}, headers=AUTH).json()["id"]
+    url = f"/api/v1/slideshows/{sid}/publish"
+    base = {"tiktok_account_id": account_id, "post_mode": "DIRECT_POST"}
+    assert client.post(url, json=base, headers=AUTH).status_code == 422  # no privacy choice
+    assert client.post(url, json={**base, "privacy_level": "SELF_ONLY"}, headers=AUTH).status_code == 422  # no consent
+    bad = {**base, "privacy_level": "SELF_ONLY", "consent": True, "branded_content": True}
+    assert client.post(url, json=bad, headers=AUTH).status_code == 422  # branded can't be private
+    ok = client.post(url, json={**base, "privacy_level": "SELF_ONLY", "consent": True}, headers=AUTH)
+    assert ok.status_code == 202 and ok.json()["post_mode"] == "DIRECT_POST"
+    # an automation asking for direct posts without recorded consent gets drafts
+    pid = pipeline.publish(sid, account_id, pipeline.PostSettings(post_mode="DIRECT_POST"))
+    with db.session_scope() as s:
+        assert s.get(db.Post, pid).post_mode == "MEDIA_UPLOAD"
+
+
+def test_secrets_are_encrypted_at_rest(client):
+    from sqlalchemy import text
+
+    store.set_many({"llm_api_key": "sk-ant-supersecretvalue123"})
+    with db.session_scope() as s:
+        s.add(db.TikTokAccount(open_id="enc-test", username="e", access_token="tok-plain-123", refresh_token="ref-plain-456"))
+    with db.engine.connect() as conn:
+        raw_key = conn.execute(text("SELECT value FROM settings WHERE key='llm_api_key'")).scalar()
+        raw_tok = conn.execute(text("SELECT access_token FROM tiktok_accounts WHERE open_id='enc-test'")).scalar()
+    assert raw_key.startswith("enc:") and "supersecret" not in raw_key
+    assert raw_tok.startswith("enc:") and "plain" not in raw_tok
+    assert store.get("llm_api_key") == "sk-ant-supersecretvalue123"
+    # legacy plaintext rows are encrypted on startup
+    with db.engine.begin() as conn:
+        conn.execute(text("UPDATE settings SET value='legacy-plain' WHERE key='llm_api_key'"))
+    db.init_db()
+    with db.engine.connect() as conn:
+        assert conn.execute(text("SELECT value FROM settings WHERE key='llm_api_key'")).scalar().startswith("enc:")
+    assert store.get("llm_api_key") == "legacy-plain"
+
+
+def test_public_deploy_requires_strong_password(monkeypatch):
+    from dataclasses import replace
+
+    from app import main
+
+    monkeypatch.setattr(main, "settings", replace(main.settings, public_base_url="https://slides.example.com", api_key="short"))
+    with pytest.raises(RuntimeError, match="SLIDEMILL_API_KEY"):
+        main.check_deployment_security()
+    monkeypatch.setattr(main, "settings", replace(main.settings, public_base_url="https://slides.example.com", api_key="x" * 32))
+    main.check_deployment_security()
+    monkeypatch.setattr(main, "settings", replace(main.settings, public_base_url="http://localhost:8000", api_key=""))
+    main.check_deployment_security()

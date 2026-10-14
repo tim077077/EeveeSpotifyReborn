@@ -129,6 +129,8 @@ def publish_photos(
     auto_add_music: bool = True,
     allow_comments: bool = True,
     is_aigc: bool = True,
+    brand_organic: bool = False,
+    branded_content: bool = False,
 ) -> str:
     """Start a photo-carousel post. Returns TikTok's publish_id.
 
@@ -138,14 +140,20 @@ def publish_photos(
     ensure_fresh(account)
     post_info: dict = {"title": title[:90], "description": description[:4000]}
     if post_mode == "DIRECT_POST":
-        options = creator_info(account).get("privacy_level_options") or []
+        info = creator_info(account)
+        options = info.get("privacy_level_options") or []
         if options and privacy_level not in options:
-            privacy_level = "SELF_ONLY" if "SELF_ONLY" in options else options[0]
+            # Never silently change the creator's choice; unaudited apps only allow SELF_ONLY.
+            raise TikTokError(f"Privacy {privacy_level} isn't available for this account (allowed: {', '.join(options)}).")
+        if branded_content and privacy_level == "SELF_ONLY":
+            raise TikTokError("Branded content can't be posted privately.")
         post_info |= {
             "privacy_level": privacy_level,
-            "disable_comment": not allow_comments,
+            "disable_comment": (not allow_comments) or bool(info.get("comment_disabled")),
             "auto_add_music": auto_add_music,
             "is_aigc": is_aigc,
+            "brand_organic_toggle": brand_organic,
+            "brand_content_toggle": branded_content,
         }
     body = {
         "post_info": post_info,

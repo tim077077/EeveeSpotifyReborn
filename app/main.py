@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import logging
+import os
 import secrets
 from datetime import datetime, timedelta, timezone
 from contextlib import asynccontextmanager
@@ -15,7 +16,7 @@ from fastapi.staticfiles import StaticFiles
 from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
-from . import db, imagegen, images, library, llm, pipeline, scheduler, store, tiktok, timing
+from . import db, imagegen, images, legal, library, llm, pipeline, scheduler, store, tiktok, timing
 from .config import STATIC_DIR, settings
 from .schemas import (
     ApplyTimingRequest,
@@ -42,6 +43,7 @@ logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name
 
 @asynccontextmanager
 async def lifespan(_: FastAPI):
+    check_deployment_security()
     db.init_db()
     if settings.run_scheduler:
         scheduler.start()
@@ -49,7 +51,55 @@ async def lifespan(_: FastAPI):
     scheduler.shutdown()
 
 
+def check_deployment_security() -> None:
+    """Refuse to serve a public deployment without a strong dashboard/API password."""
+    if not settings.is_public or os.environ.get("SLIDEMILL_ALLOW_NO_AUTH") == "1":
+        return
+    if len(settings.api_key) < 24:
+        raise RuntimeError(
+            f"PUBLIC_BASE_URL is {settings.public_base_url}, so this server is reachable from the internet, "
+            "but SLIDEMILL_API_KEY is missing or shorter than 24 characters. Anyone could control your TikTok "
+            "accounts and read your keys. Set a long random SLIDEMILL_API_KEY (deploy/install.sh does this)."
+        )
+
+
 app = FastAPI(title="Slidemill", version="0.1.0", lifespan=lifespan)
+
+
+@app.middleware("http")
+async def security_headers(request: Request, call_next):
+    response = await call_next(request)
+    response.headers.setdefault("X-Content-Type-Options", "nosniff")
+    response.headers.setdefault("X-Frame-Options", "DENY")
+    response.headers.setdefault("Referrer-Policy", "same-origin")
+    if settings.public_base_url.startswith("https://"):
+        response.headers.setdefault("Strict-Transport-Security", "max-age=31536000")
+    return response
+
+
+@app.get("/favicon.ico", include_in_schema=False)
+def favicon():
+    return FileResponse(STATIC_DIR / "favicon.svg", media_type="image/svg+xml")
+
+
+@app.get("/about", response_class=HTMLResponse, include_in_schema=False)
+def about_page() -> str:
+    return legal.about_html()
+
+
+@app.get("/privacy", response_class=HTMLResponse, include_in_schema=False)
+def privacy_page() -> str:
+    return legal.privacy_html()
+
+
+@app.get("/terms", response_class=HTMLResponse, include_in_schema=False)
+def terms_page() -> str:
+    return legal.terms_html()
+
+
+@app.get("/healthz", include_in_schema=False)
+def healthz() -> dict[str, str]:
+    return {"status": "ok"}
 app.mount("/media", StaticFiles(directory=settings.media_dir), name="media")
 app.mount("/static", StaticFiles(directory=STATIC_DIR), name="static")
 
@@ -299,10 +349,20 @@ def publish_slideshow(slideshow_id: str, body: PublishRequest, session: Session 
             account_id = account_id or automation.tiktok_account_id
     if not account_id:
         raise HTTPException(422, {"error": "tiktok_account_id is required", "code": "VALIDATION_ERROR"})
+    mode = body.post_mode or (post_settings.post_mode if post_settings else "MEDIA_UPLOAD")
+    if mode == "DIRECT_POST":
+        if not body.privacy_level:
+            raise HTTPException(422, {"error": "Choose who can see this post.", "code": "VALIDATION_ERROR"})
+        if not body.consent:
+            raise HTTPException(422, {"error": "Confirm TikTok's Music Usage Confirmation to post.", "code": "VALIDATION_ERROR"})
+        if body.branded_content and body.privacy_level == "SELF_ONLY":
+            raise HTTPException(422, {"error": "Branded content can't be private.", "code": "VALIDATION_ERROR"})
     session.commit()
     try:
         post_id = pipeline.publish(
-            slideshow_id, account_id, post_settings, post_mode=body.post_mode, caption=body.caption, description=body.description
+            slideshow_id, account_id, post_settings, post_mode=body.post_mode, caption=body.caption,
+            description=body.description, privacy_level=body.privacy_level, allow_comments=body.allow_comments,
+            brand_organic=body.brand_organic, branded_content=body.branded_content, user_confirmed=mode == "DIRECT_POST",
         )
     except pipeline.PublishLimitError as exc:
         raise HTTPException(429, {"error": str(exc), "code": "RATE_LIMITED"}) from exc
@@ -548,6 +608,25 @@ def tiktok_connect():
     return {"url": url}
 
 
+@api.get("/tiktok/accounts/{account_id}/creator-info")
+def tiktok_creator_info(account_id: str, session: Session = Depends(get_session)):
+    """What TikTok says this creator can post right now (shown before every direct post)."""
+    account = session.get(db.TikTokAccount, account_id)
+    if account is None:
+        raise _404("account")
+    try:
+        info = tiktok.creator_info(account)
+    except tiktok.TikTokError as exc:
+        raise HTTPException(502, {"error": str(exc), "code": "TIKTOK_ERROR"}) from exc
+    return {
+        "nickname": info.get("creator_nickname") or account.display_name,
+        "username": info.get("creator_username") or account.username,
+        "avatar_url": info.get("creator_avatar_url") or account.avatar_url,
+        "privacy_level_options": info.get("privacy_level_options") or [],
+        "comment_disabled": bool(info.get("comment_disabled")),
+    }
+
+
 @api.delete("/tiktok/accounts/{account_id}")
 def tiktok_disconnect(account_id: str, session: Session = Depends(get_session)):
     a = session.get(db.TikTokAccount, account_id)
@@ -627,13 +706,30 @@ def timing_best(country: str, posts_per_day: int = Query(3, ge=1, le=6), tiktok_
         raise HTTPException(404, {"error": f"unsupported country {country!r}", "code": "NOT_FOUND"}) from exc
 
 
-def apply_timing(session: Session, automation: db.Automation, country: str, posts_per_day: int, auto_publish: bool) -> dict:
-    plan = timing.best_times(country, posts_per_day, automation.tiktok_account_id)
+def _require_publish_consent(auto_publish: bool, privacy_level: str | None, consent: bool, branded: bool) -> None:
+    if not auto_publish:
+        return
+    if not privacy_level:
+        raise HTTPException(422, {"error": "Choose who can see the automatic posts.", "code": "VALIDATION_ERROR"})
+    if not consent:
+        raise HTTPException(422, {"error": "Agree to TikTok's Music Usage Confirmation to post automatically.", "code": "VALIDATION_ERROR"})
+    if branded and privacy_level == "SELF_ONLY":
+        raise HTTPException(422, {"error": "Branded content can't be private.", "code": "VALIDATION_ERROR"})
+
+
+def apply_timing(session: Session, automation: db.Automation, body: ApplyTimingRequest) -> dict:
+    plan = timing.best_times(body.country, body.posts_per_day, automation.tiktok_account_id)
     automation.timezone = plan["timezone"]
     automation.target_country = plan["country"]
     post = PostSettings.model_validate(automation.post_settings or {})
     post.auto_post = True
-    post.post_mode = "DIRECT_POST" if auto_publish else "MEDIA_UPLOAD"
+    post.post_mode = "DIRECT_POST" if body.auto_publish else "MEDIA_UPLOAD"
+    if body.auto_publish:
+        post.visibility = body.privacy_level
+        post.consented = True
+        post.allow_comments = body.allow_comments
+        post.brand_organic = body.brand_organic
+        post.branded_content = body.branded_content
     automation.post_settings = post.model_dump()
     automation.paused = False
     _set_schedule(session, automation, plan["crons"])
@@ -648,7 +744,8 @@ def automation_apply_timing(automation_id: str, body: ApplyTimingRequest, sessio
         raise _404("automation")
     if body.country.upper() not in timing.COUNTRIES:
         raise HTTPException(404, {"error": f"unsupported country {body.country!r}", "code": "NOT_FOUND"})
-    plan = apply_timing(session, automation, body.country, body.posts_per_day, body.auto_publish)
+    _require_publish_consent(body.auto_publish, body.privacy_level, body.consent, body.branded_content)
+    plan = apply_timing(session, automation, body)
     session.commit()
     scheduler.sync()
     warnings = []
@@ -733,13 +830,14 @@ def studio(body: StudioRequest, session: Session = Depends(get_session)) -> dict
         schedule = [scheduler.validate_cron(c) for c in body.schedule]
     except ValueError as exc:
         raise HTTPException(422, {"error": f"invalid cron: {exc}", "code": "VALIDATION_ERROR"}) from exc
+    _require_publish_consent(body.auto_publish, body.privacy_level, body.consent, False)
     if body.target_country and body.target_country.upper() not in timing.COUNTRIES:
         raise HTTPException(404, {"error": f"unsupported country {body.target_country!r}", "code": "NOT_FOUND"})
     job = _new_job(session, "studio")
     pipeline.job_executor.submit(
         pipeline.run_studio, job.id, body.brief, body.count, body.image_source, body.aspect_ratio, body.language,
         body.product_id, body.save_as_automation, body.tiktok_account_id, schedule,
-        body.target_country, body.posts_per_day, body.auto_publish,
+        body.target_country, body.posts_per_day, body.auto_publish, body.privacy_level,
     )
     return {"job_id": job.id}
 

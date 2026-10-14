@@ -15,6 +15,7 @@ TextColor = Literal["white", "black", "yellow", "red", "pink", "orange", "green"
 TextWidth = Literal["full", "100%", "80%", "50%"]
 ImageLayout = Literal["single", "1:2", "1:3", "2:1", "2:2"]
 SlideRole = Literal["hook", "body", "cta"]
+PrivacyLevel = Literal["PUBLIC_TO_EVERYONE", "MUTUAL_FOLLOW_FRIENDS", "FOLLOWER_OF_CREATOR", "SELF_ONLY"]
 
 
 class TextItem(BaseModel):
@@ -125,6 +126,12 @@ class PostSettings(BaseModel):
     auto_music: bool = True
     allow_comments: bool = True
     disclose_ai_content: bool = True
+    # Commercial content disclosure (TikTok requires this to be asked, off by default).
+    brand_organic: bool = False  # promoting your own business
+    branded_content: bool = False  # paid partnership / promoting a third party
+    # The account owner agreed to TikTok's Music Usage Confirmation (and Branded Content Policy if
+    # branded) for unattended direct posts. Without it, scheduled posts go to drafts instead.
+    consented: bool = False
 
 
 class ImageSettings(BaseModel):
@@ -191,6 +198,8 @@ class StudioRequest(BaseModel):
     target_country: str | None = None
     posts_per_day: int = Field(default=2, ge=1, le=6)
     auto_publish: bool = False
+    privacy_level: PrivacyLevel | None = None
+    consent: bool = False
 
 
 class RemixRequest(BaseModel):
@@ -217,8 +226,14 @@ class SettingsUpdate(BaseModel):
 class ApplyTimingRequest(BaseModel):
     country: str
     posts_per_day: int = Field(default=3, ge=1, le=6)
-    # True: publish publicly by itself at those hours. False: send each one to TikTok drafts.
+    # True: publish by itself at those hours. False: send each one to TikTok drafts.
     auto_publish: bool = True
+    # Required for auto_publish: who can see the posts, and the owner's consent (TikTok rules).
+    privacy_level: PrivacyLevel | None = None
+    consent: bool = False
+    allow_comments: bool = False
+    brand_organic: bool = False
+    branded_content: bool = False
 
 
 class RunRequest(BaseModel):
@@ -231,6 +246,12 @@ class PublishRequest(BaseModel):
     post_mode: Literal["DIRECT_POST", "MEDIA_UPLOAD"] | None = None
     caption: str | None = None
     description: str | None = None
+    # Direct posts: the user must pick these explicitly (TikTok content-sharing guidelines).
+    privacy_level: PrivacyLevel | None = None
+    allow_comments: bool | None = None
+    brand_organic: bool = False
+    branded_content: bool = False
+    consent: bool = False
 
 
 class ProductIn(BaseModel):

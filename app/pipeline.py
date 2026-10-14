@@ -255,7 +255,8 @@ def generate_into(
 
 def run_studio(job_id: str, brief: str, count: int, image_source: str, aspect_ratio: str | None, language: str | None,
                product_id: str | None, save_as_automation: bool, tiktok_account_id: str | None, schedule: list[str],
-               target_country: str | None = None, posts_per_day: int = 2, auto_publish: bool = False) -> None:
+               target_country: str | None = None, posts_per_day: int = 2, auto_publish: bool = False,
+               privacy_level: str | None = None) -> None:
     """Plan a content format from a brief, then generate `count` complete slideshows from it."""
     _job(job_id, status="running", message="Planning the format…")
     try:
@@ -285,7 +286,11 @@ def run_studio(job_id: str, brief: str, count: int, image_source: str, aspect_ra
                     automation.timezone, automation.target_country = plan["timezone"], plan["country"]
                     schedule = plan["crons"]
                     automation.post_settings = PostSettings(
-                        auto_post=bool(tiktok_account_id), post_mode="DIRECT_POST" if auto_publish else "MEDIA_UPLOAD"
+                        auto_post=bool(tiktok_account_id),
+                        post_mode="DIRECT_POST" if auto_publish else "MEDIA_UPLOAD",
+                        visibility=privacy_level or "SELF_ONLY",
+                        consented=auto_publish,  # the API checked consent before starting
+                        allow_comments=False,
                     ).model_dump()
                 automation.schedules = [db.ScheduleJob(cron=c) for c in schedule]
                 session.add(automation)
@@ -417,7 +422,18 @@ def publish(
     post_mode: str | None = None,
     caption: str | None = None,
     description: str | None = None,
+    privacy_level: str | None = None,
+    allow_comments: bool | None = None,
+    brand_organic: bool | None = None,
+    branded_content: bool | None = None,
+    user_confirmed: bool = False,
 ) -> str:
+    """Send a rendered slideshow to TikTok.
+
+    Direct posts need the account owner's explicit consent: either `user_confirmed` (they just
+    clicked Post in the dashboard) or `post_settings.consented` (given when setting up the
+    automation). Without it the post goes to drafts instead.
+    """
     post_settings = post_settings or PostSettings()
     with db.session_scope() as session:
         show = session.get(db.Slideshow, slideshow_id)
@@ -428,6 +444,9 @@ def publish(
             raise PipelineError("TikTok account not found")
 
         mode = post_mode or post_settings.post_mode
+        if mode == "DIRECT_POST" and not (user_confirmed or post_settings.consented):
+            log.info("no posting consent recorded for %s; sending to drafts instead", slideshow_id)
+            mode = "MEDIA_UPLOAD"
         if mode == "DIRECT_POST" and direct_posts_last_24h(session, account_id) >= settings.tiktok_direct_posts_per_day:
             if not settings.tiktok_fallback_to_draft:
                 raise PublishLimitError("Direct-post limit reached for this account in the last 24h.")
@@ -449,10 +468,12 @@ def publish(
                 title=title or show.title,
                 description=desc or "",
                 post_mode=mode,
-                privacy_level=post_settings.visibility,
+                privacy_level=privacy_level or post_settings.visibility,
                 auto_add_music=post_settings.auto_music,
-                allow_comments=post_settings.allow_comments,
+                allow_comments=post_settings.allow_comments if allow_comments is None else allow_comments,
                 is_aigc=post_settings.disclose_ai_content,
+                brand_organic=post_settings.brand_organic if brand_organic is None else brand_organic,
+                branded_content=post_settings.branded_content if branded_content is None else branded_content,
             )
             post.status = "processing"
         except Exception as exc:  # noqa: BLE001 - record any failure on the post

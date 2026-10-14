@@ -120,8 +120,9 @@ def test_generate_render_publish_track(client):
 
     pipeline.refresh_posts()
     posts = client.get("/api/v1/posts", headers=AUTH).json()
-    assert posts["statistics"]["views"] == 1200
-    assert posts["posts"][0]["status"] == "published"
+    mine = [p for p in posts["posts"] if p["slideshow_id"] == sid]
+    assert mine[0]["status"] == "published" and mine[0]["views"] == 1200
+    assert posts["statistics"]["views"] == sum(p["views"] for p in posts["posts"])
 
 
 def test_direct_post_limit_falls_back_to_draft(client):
@@ -129,7 +130,7 @@ def test_direct_post_limit_falls_back_to_draft(client):
     sid = client.post("/api/v1/slideshows/create", json={"slides": [{"text_items": [{"text": "hi"}]}]}, headers=AUTH).json()["id"]
     modes = []
     for _ in range(settings.tiktok_direct_posts_per_day + 1):
-        r = client.post(f"/api/v1/slideshows/{sid}/publish", json={"tiktok_account_id": account_id, "post_mode": "DIRECT_POST"}, headers=AUTH)
+        r = client.post(f"/api/v1/slideshows/{sid}/publish", json={"tiktok_account_id": account_id, "post_mode": "DIRECT_POST", "privacy_level": "SELF_ONLY", "consent": True}, headers=AUTH)
         modes.append(r.json()["post_mode"])
     assert modes[-1] == "MEDIA_UPLOAD"
 

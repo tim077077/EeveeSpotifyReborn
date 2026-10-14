@@ -11,6 +11,7 @@ from sqlalchemy import JSON, Boolean, DateTime, ForeignKey, Integer, String, Tex
 from sqlalchemy.orm import DeclarativeBase, Mapped, Session, mapped_column, relationship, sessionmaker
 
 from .config import settings
+from .crypto import PREFIX, encrypt, EncryptedText
 
 
 def utcnow() -> datetime:
@@ -33,8 +34,8 @@ class TikTokAccount(Base):
     username: Mapped[str] = mapped_column(String(128), default="")
     display_name: Mapped[str] = mapped_column(String(256), default="")
     avatar_url: Mapped[str] = mapped_column(Text, default="")
-    access_token: Mapped[str] = mapped_column(Text)
-    refresh_token: Mapped[str] = mapped_column(Text, default="")
+    access_token: Mapped[str] = mapped_column(EncryptedText)
+    refresh_token: Mapped[str] = mapped_column(EncryptedText, default="")
     expires_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     refresh_expires_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
@@ -158,7 +159,7 @@ class Setting(Base):
     __tablename__ = "settings"
 
     key: Mapped[str] = mapped_column(String(64), primary_key=True)
-    value: Mapped[str] = mapped_column(Text, default="")
+    value: Mapped[str] = mapped_column(EncryptedText, default="")
 
 
 class LibraryProfile(Base):
@@ -233,6 +234,22 @@ SessionLocal = sessionmaker(bind=engine, expire_on_commit=False)
 def init_db() -> None:
     Base.metadata.create_all(engine)
     _add_missing_columns()
+    _encrypt_legacy_secrets()
+
+
+# (table, primary key, column) holding secrets that older versions stored in plaintext
+_SECRET_COLUMNS = [("settings", "key", "value"), ("tiktok_accounts", "id", "access_token"), ("tiktok_accounts", "id", "refresh_token")]
+
+
+def _encrypt_legacy_secrets() -> None:
+    from sqlalchemy import text
+
+    with engine.begin() as conn:
+        for table, pk, col in _SECRET_COLUMNS:
+            rows = conn.execute(text(f"SELECT {pk}, {col} FROM {table}")).all()
+            for key, value in rows:
+                if value and not value.startswith(PREFIX):
+                    conn.execute(text(f"UPDATE {table} SET {col} = :v WHERE {pk} = :k"), {"v": encrypt(value), "k": key})
 
 
 def _add_missing_columns() -> None:

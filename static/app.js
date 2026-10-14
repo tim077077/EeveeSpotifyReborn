@@ -197,8 +197,9 @@ views.slideshow = async (id) => {
         <label>Description</label><textarea id="description">${esc(s.description)}</textarea>
         <label>Account</label><select id="acct">${accounts.accounts
           .map((a) => `<option value="${a.id}">@${esc(a.username || a.display_name)}</option>`).join("") || "<option value=''>No accounts connected</option>"}</select>
-        <label>Mode</label>${select("mode", ["MEDIA_UPLOAD", "DIRECT_POST"], "MEDIA_UPLOAD", 'id="mode"')}
-        <p class="small muted">MEDIA_UPLOAD sends it to your TikTok inbox as a draft (add trending sound, then post). DIRECT_POST publishes immediately.</p>
+        <label>How</label><select id="mode"><option value="MEDIA_UPLOAD">Send to my TikTok drafts (add a sound, then post)</option>
+          <option value="DIRECT_POST">Post now</option></select>
+        <div id="direct-opts"></div>
         <div class="row"><button class="primary" id="publish">Send to TikTok</button><button id="save-meta">Save caption</button></div>
         ${s.posts.length ? `<h3 style="margin-top:16px">History</h3>${s.posts
           .map((p) => `<div class="small">${esc(p.created_at.slice(0, 16))} · ${esc(p.post_mode)} · <b>${esc(p.status)}</b> ${p.error ? `· ${esc(p.error)}` : ""}</div>`).join("")}` : ""}
@@ -237,13 +238,37 @@ views.slideshow = async (id) => {
   $("#publish").onclick = (e) =>
     busy(e.currentTarget, async () => {
       if (!$("#acct").value) throw new Error("Connect a TikTok account first.");
+      const direct = $("#mode").value === "DIRECT_POST";
+      const extra = direct ? readConsent($("#consent-direct")) : {};
       const p = await api(`/slideshows/${id}/publish`, {
         method: "POST",
-        body: { tiktok_account_id: $("#acct").value, post_mode: $("#mode").value, caption: $("#caption").value, description: $("#description").value },
+        body: { tiktok_account_id: $("#acct").value, post_mode: $("#mode").value, caption: $("#caption").value, description: $("#description").value, ...extra },
       });
-      toast(p.status === "failed" ? `Failed: ${p.error}` : `Sent (${p.post_mode}). Status updates every 10 min.`, p.status === "failed");
+      toast(
+        p.status === "failed" ? `Failed: ${p.error}`
+          : p.post_mode === "DIRECT_POST" ? "Posted. It can take a few minutes to appear on your profile."
+          : "Sent to your TikTok drafts — open TikTok's inbox to finish it.",
+        p.status === "failed",
+      );
       route();
     });
+  const refreshDirect = async () => {
+    const box = $("#direct-opts");
+    $("#publish").textContent = $("#mode").value === "DIRECT_POST" ? "Post to TikTok" : "Send to drafts";
+    if ($("#mode").value !== "DIRECT_POST" || !$("#acct").value) { box.innerHTML = ""; return; }
+    box.innerHTML = `<p class="muted small"><span class="spinner"></span> Checking the account…</p>`;
+    try {
+      const creator = await api(`/tiktok/accounts/${$("#acct").value}/creator-info`);
+      box.innerHTML = consentBlock("consent-direct", { creator });
+      wireConsent($("#consent-direct"), $("#publish"));
+      box.insertAdjacentHTML("beforeend", `<p class="small muted">Preview: the slides above are exactly what will be posted. Nothing is sent until you press Post.</p>`);
+    } catch (err) {
+      box.innerHTML = `<p class="small" style="color:var(--warn)">Can't post right now: ${esc(err.message)}</p>`;
+    }
+  };
+  $("#mode").onchange = refreshDirect;
+  $("#acct").onchange = refreshDirect;
+  refreshDirect();
   $("#save-meta").onclick = (e) =>
     busy(e.currentTarget, async () => {
       await api(`/slideshows/${id}`, { method: "PUT", body: { caption: $("#caption").value, description: $("#description").value } });
@@ -406,14 +431,16 @@ async function automationDialog(a) {
     ${a && !sched.simple ? `<p class="small muted">This automation uses a per-day schedule (${a.schedule.length} slots${a.target_country ? ` for ${esc(a.target_country)}` : ""}). Leave the times field empty to keep it.</p>` : ""}
     <h3 style="margin-top:18px">Posting</h3>
     <div class="form-grid">
-      <div><label>Mode</label>${select("post_mode", ["MEDIA_UPLOAD", "DIRECT_POST"], ps.post_mode ?? "MEDIA_UPLOAD")}</div>
-      <div><label>Visibility</label>${select("visibility", ["PUBLIC_TO_EVERYONE", "MUTUAL_FOLLOW_FRIENDS", "FOLLOWER_OF_CREATOR", "SELF_ONLY"], ps.visibility ?? "PUBLIC_TO_EVERYONE")}</div>
+      <div><label>Mode</label><select name="post_mode">
+        <option value="MEDIA_UPLOAD" ${ps.post_mode !== "DIRECT_POST" ? "selected" : ""}>Send to my TikTok drafts</option>
+        <option value="DIRECT_POST" ${ps.post_mode === "DIRECT_POST" ? "selected" : ""}>Post by itself</option></select></div>
+      <div></div>
       <div><label>Caption</label>${select("caption_mode", ["prompt", "static"], ps.caption_mode ?? "prompt")}<input name="caption_static" placeholder="Static caption" value="${esc(ps.caption_static ?? "")}"></div>
       <div><label>Description</label>${select("description_mode", ["prompt", "static"], ps.description_mode ?? "prompt")}<input name="description_static" placeholder="Static description" value="${esc(ps.description_static ?? "")}"></div>
     </div>
     <label class="check"><input type="checkbox" name="auto_post" ${ps.auto_post ?? true ? "checked" : ""}> Auto-post after generating</label>
     <label class="check"><input type="checkbox" name="auto_music" ${ps.auto_music ?? true ? "checked" : ""}> Let TikTok add music (direct post)</label>
-    <label class="check"><input type="checkbox" name="allow_comments" ${ps.allow_comments ?? true ? "checked" : ""}> Allow comments</label>
+    <div id="auto-consent"></div>
     <label class="check"><input type="checkbox" name="disclose_ai_content" ${ps.disclose_ai_content ?? true ? "checked" : ""}> Label as AI-generated</label>
     <h3 style="margin-top:18px">Images</h3>
     <div class="form-grid">
@@ -437,6 +464,13 @@ async function automationDialog(a) {
       ${a ? `<button class="danger" value="delete" id="del-auto" formnovalidate>Delete</button>` : ""}
     </div>`;
   dlg.showModal();
+  const showAutoConsent = () => {
+    const direct = $("#dialog-body").elements.post_mode.value === "DIRECT_POST";
+    $("#auto-consent").innerHTML = direct ? consentBlock("consent-auto", { saved: ps, automatic: true }) : "";
+    if (direct) wireConsent($("#consent-auto"), $("#save-auto"));
+  };
+  $("#dialog-body").elements.post_mode.onchange = showAutoConsent;
+  showAutoConsent();
   const f = $("#dialog-body");
   const val = (n) => f.elements[n].value;
   const chk = (n) => f.elements[n].checked;
@@ -453,10 +487,15 @@ async function automationDialog(a) {
         timezone: val("timezone").trim(),
         ...(val("times").trim() || !a || sched.simple ? { schedule: timesToCron(val("times"), val("days").trim()) } : {}),
         post_settings: {
-          post_mode: val("post_mode"), visibility: val("visibility"),
+          post_mode: val("post_mode"),
+          ...(val("post_mode") === "DIRECT_POST"
+            ? (({ privacy_level, allow_comments, brand_organic, branded_content }) => ({
+                visibility: privacy_level, allow_comments, brand_organic, branded_content, consented: true,
+              }))(readConsent($("#consent-auto")))
+            : { visibility: ps.visibility ?? "SELF_ONLY", allow_comments: ps.allow_comments ?? false, consented: ps.consented ?? false }),
           caption_mode: val("caption_mode"), caption_static: val("caption_static"),
           description_mode: val("description_mode"), description_static: val("description_static"),
-          auto_post: chk("auto_post"), auto_music: chk("auto_music"), allow_comments: chk("allow_comments"),
+          auto_post: chk("auto_post"), auto_music: chk("auto_music"),
           disclose_ai_content: chk("disclose_ai_content"),
         },
         image_settings: {
@@ -641,13 +680,18 @@ views.studio = async () => {
         <div><label>Post for this country's best times</label><select id="scountry"><option value="">— use the times below —</option></select></div>
         <div><label>Posts per day</label><input id="sppd" type="number" min="1" max="6" value="2"></div>
         <div><label>Posting times if no country (HH:MM, comma-separated)</label><input id="times" value="09:00, 18:00"></div>
-        <div><label>Mode</label><select id="spub"><option value="0">Send to TikTok drafts</option><option value="1">Publish publicly by itself</option></select></div>
+        <div><label>Mode</label><select id="spub"><option value="0">Send to TikTok drafts</option><option value="1">Post by itself</option></select></div>
       </div>
+      <div id="studio-consent"></div>
       <div class="row" style="margin-top:16px"><button class="primary" id="make">Make slideshows</button>
         <span class="muted small">About a minute per slideshow, three at a time.</span></div>
     </div>
     <div id="studio-out"></div>`;
   $("#auto").onchange = () => ($("#auto-opts").hidden = !$("#auto").checked);
+  $("#spub").onchange = () => {
+    $("#studio-consent").innerHTML = $("#spub").value === "1" ? consentBlock("consent-studio", { automatic: true }) : "";
+    if ($("#spub").value === "1") wireConsent($("#consent-studio"), $("#make"));
+  };
   api("/timing/countries").then((r) => {
     $("#scountry").insertAdjacentHTML("beforeend", r.countries.map((c) => `<option value="${c.code}">${esc(c.name)}</option>`).join(""));
   });
@@ -663,7 +707,8 @@ views.studio = async () => {
           product_id: $("#product").value || null, save_as_automation: $("#auto").checked,
           tiktok_account_id: $("#acct").value || null, schedule: $("#auto").checked ? timesToCron($("#times").value, "*") : [],
           target_country: ($("#auto").checked && $("#scountry").value) || null, posts_per_day: +$("#sppd").value,
-          auto_publish: $("#spub").value === "1",
+          auto_publish: $("#auto").checked && $("#spub").value === "1",
+          ...($("#auto").checked && $("#spub").value === "1" ? (({ privacy_level, consent }) => ({ privacy_level, consent }))(readConsent($("#consent-studio"))) : {}),
         },
       });
       await pollJob(job_id, (job) => {
@@ -843,6 +888,82 @@ views.settings = async () => {
     });
 };
 
+// ---- TikTok direct-post consent (content-sharing guidelines) ---------------------------
+
+const PRIVACY_LABELS = {
+  PUBLIC_TO_EVERYONE: "Everyone", MUTUAL_FOLLOW_FRIENDS: "Friends", FOLLOWER_OF_CREATOR: "Followers", SELF_ONLY: "Only me",
+};
+const MUSIC_URL = "https://www.tiktok.com/legal/page/global/music-usage-confirmation/en";
+const BC_URL = "https://www.tiktok.com/legal/page/global/bc-policy/en";
+
+// Privacy has no default and every toggle starts off: TikTok requires an explicit choice.
+function consentBlock(id, { creator = null, saved = null, automatic = false } = {}) {
+  const options = creator?.privacy_level_options?.length ? creator.privacy_level_options : Object.keys(PRIVACY_LABELS);
+  const pick = saved?.consented ? saved.visibility : "";
+  return `<div class="card" style="margin-top:10px;background:var(--bg)" id="${id}">
+    ${creator ? `<div class="row">${creator.avatar_url ? `<img src="${esc(creator.avatar_url)}" width="28" height="28" style="border-radius:50%">` : ""}
+      <div>Posting to <b>${esc(creator.nickname)}</b> <span class="muted">@${esc(creator.username)}</span></div></div>` : ""}
+    <label>Who can see ${automatic ? "these posts" : "this post"}</label>
+    <select data-c="privacy"><option value="" ${pick ? "" : "selected"} disabled>Choose…</option>${options
+      .map((o) => `<option value="${o}" ${o === pick ? "selected" : ""}>${esc(PRIVACY_LABELS[o] || o)}</option>`).join("")}</select>
+    <label class="check"><input type="checkbox" data-c="comments" ${saved?.consented && saved.allow_comments ? "checked" : ""}
+      ${creator?.comment_disabled ? "disabled" : ""}> Allow comments${creator?.comment_disabled ? " (turned off in your TikTok settings)" : ""}</label>
+    <label class="check"><input type="checkbox" data-c="disclose" ${saved?.brand_organic || saved?.branded_content ? "checked" : ""}> Disclose commercial content</label>
+    <div data-c="disclose-opts" ${saved?.brand_organic || saved?.branded_content ? "" : "hidden"} style="padding-left:24px">
+      <label class="check"><input type="checkbox" data-c="own" ${saved?.brand_organic ? "checked" : ""}> Your brand — promoting yourself or your own business</label>
+      <label class="check"><input type="checkbox" data-c="branded" ${saved?.branded_content ? "checked" : ""}> Branded content — paid partnership or a third party's brand</label>
+    </div>
+    <p class="small" data-c="label-notice" hidden></p>
+    <label class="check" style="margin-top:10px"><input type="checkbox" data-c="consent" ${saved?.consented ? "checked" : ""}>
+      <span data-c="consent-text"></span></label>
+    ${automatic ? `<p class="small muted">Applies to every automatic post until you change it here.</p>` : ""}
+  </div>`;
+}
+
+function wireConsent(root, button = null) {
+  const q = (k) => root.querySelector(`[data-c="${k}"]`);
+  const update = () => {
+    q("disclose-opts").hidden = !q("disclose").checked;
+    const branded = q("disclose").checked && q("branded").checked;
+    const own = q("disclose").checked && q("own").checked;
+    const incomplete = q("disclose").checked && !branded && !own;
+    q("label-notice").hidden = !(branded || own);
+    q("label-notice").textContent = branded
+      ? 'Your post will be labeled "Paid partnership".'
+      : 'Your post will be labeled "Promotional content".';
+    if (button) {
+      button.disabled = incomplete;
+      button.title = incomplete ? "Choose Your brand and/or Branded content, or turn disclosure off." : "";
+    }
+    q("consent-text").innerHTML = `By posting, you agree to TikTok's <a href="${MUSIC_URL}" target="_blank">Music Usage Confirmation</a>${
+      branded ? ` and <a href="${BC_URL}" target="_blank">Branded Content Policy</a>` : ""}.`;
+    const onlyMe = [...q("privacy").options].find((o) => o.value === "SELF_ONLY");
+    if (onlyMe) {
+      onlyMe.disabled = branded; // branded content can't be private
+      onlyMe.title = branded ? "Branded content can't be private" : "";
+    }
+    if (branded && q("privacy").value === "SELF_ONLY") q("privacy").value = "";
+  };
+  root.addEventListener("change", update);
+  update();
+}
+
+function readConsent(root) {
+  const q = (k) => root.querySelector(`[data-c="${k}"]`);
+  const disclose = q("disclose").checked;
+  const out = {
+    privacy_level: q("privacy").value || null,
+    allow_comments: q("comments").checked,
+    brand_organic: disclose && q("own").checked,
+    branded_content: disclose && q("branded").checked,
+    consent: q("consent").checked,
+  };
+  if (!out.privacy_level) throw new Error("Choose who can see the post.");
+  if (disclose && !out.brand_organic && !out.branded_content) throw new Error("Pick what kind of commercial content it is, or turn disclosure off.");
+  if (!out.consent) throw new Error("Tick the TikTok agreement to post.");
+  return out;
+}
+
 // ---- best times to post ---------------------------------------------------------------
 
 const DAY_LABELS = { mon: "Mon", tue: "Tue", wed: "Wed", thu: "Thu", fri: "Fri", sat: "Sat", sun: "Sun" };
@@ -898,8 +1019,9 @@ views.timing = async () => {
     <div class="card">
       ${autos.automations.length ? `<div class="form-grid">
         <div><label>Automation</label><select id="auto-sel">${autos.automations.map((a) => `<option value="${a.id}">${esc(a.title)}${a.target_country ? ` (now: ${esc(a.target_country)})` : ""}</option>`).join("")}</select></div>
-        <div><label>Mode</label><select id="pub"><option value="1">Publish publicly by itself</option><option value="0">Send each one to my TikTok drafts</option></select></div>
+        <div><label>Mode</label><select id="pub"><option value="0">Send each one to my TikTok drafts</option><option value="1">Post by itself</option></select></div>
       </div>
+      <div id="pub-consent"></div>
       <div class="row" style="margin-top:14px"><button class="primary" id="apply">Turn on auto-posting</button>
       <span class="small muted">Each slot: the slideshow is made 15 minutes early, then posted on time (± a few minutes so it doesn't look robotic).</span></div>
       <div id="apply-out"></div>`
@@ -924,12 +1046,26 @@ views.timing = async () => {
   };
   ["country", "ppd", "tacct"].forEach((id) => ($(`#${id}`).onchange = () => load().catch((e) => toast(e.message, true))));
   await load();
+  const pubSel = $("#pub");
+  if (pubSel) {
+    const showConsent = () => {
+      const auto = autos.automations.find((x) => x.id === $("#auto-sel").value);
+      $("#pub-consent").innerHTML = pubSel.value === "1" ? consentBlock("consent-timing", { saved: auto?.post_settings, automatic: true }) : "";
+      if (pubSel.value === "1") wireConsent($("#consent-timing"), $("#apply"));
+    };
+    pubSel.onchange = showConsent;
+    $("#auto-sel").onchange = showConsent;
+  }
   const apply = $("#apply");
   if (apply)
     apply.onclick = (e) =>
       busy(e.currentTarget, async () => {
         const r = await api(`/automations/${$("#auto-sel").value}/apply-timing`, {
-          method: "POST", body: { country: $("#country").value, posts_per_day: +$("#ppd").value, auto_publish: $("#pub").value === "1" },
+          method: "POST",
+          body: {
+            country: $("#country").value, posts_per_day: +$("#ppd").value, auto_publish: $("#pub").value === "1",
+            ...($("#pub").value === "1" ? readConsent($("#consent-timing")) : {}),
+          },
         });
         const next = r.automation.next_runs.slice(0, 3).map((t) => new Date(t).toLocaleString()).join(" · ");
         $("#apply-out").innerHTML = `<p>✅ <b>${esc(r.automation.title)}</b> now posts ${r.plan.posts_per_day}×/day for ${esc(r.plan.name)}. Next: ${esc(next || "—")} (your local time)</p>

@@ -19,7 +19,24 @@ It was built by tearing down how reel.farm works; see [docs/REELFARM_TEARDOWN.md
 - **Analytics.** It polls each post's publish status and syncs views, likes, comments and shares every 10 minutes.
 - **MP4 export** for Reels and Shorts, plus a **REST API** (`/api/v1`, docs at `/docs`).
 
-## Run it
+## Deploy (production)
+
+On a fresh Ubuntu server with a domain pointed at it:
+
+```bash
+git clone <your repo URL> slidemill && cd slidemill && sudo ./deploy/install.sh
+```
+
+The script sets up Docker, generates the dashboard password and the encryption key, and starts Slidemill behind Caddy with automatic HTTPS. **Follow [docs/LAUNCH_CHECKLIST.md](docs/LAUNCH_CHECKLIST.md)** for the server, the keys, the TikTok app review and your first two weeks.
+
+**Security**
+
+- The server refuses to start on a public URL without a strong `SLIDEMILL_API_KEY`.
+- API keys and TikTok tokens are encrypted at rest.
+- The container runs as a non-root user, and the app sends standard security headers.
+- Direct posts follow TikTok's content-sharing rules: the creator is shown, privacy has no default, toggles are off by default, commercial content is disclosed, and music-usage consent is required. Scheduled direct posts happen only after you give consent once in the automation's settings; without it they go to drafts.
+
+## Run it locally
 
 ```bash
 python3 -m venv .venv && .venv/bin/pip install -r requirements.txt
@@ -30,7 +47,7 @@ cp .env.example .env        # fill in keys
 
 You also need `ffmpeg` installed for video export.
 
-You can run it with Docker instead: `docker build -t slidemill . && docker run -p 8000:8000 --env-file .env -v slidemill:/data slidemill`
+For production, use the Docker setup in the Deploy section above.
 
 ### Keys you need
 
@@ -65,13 +82,14 @@ Tracked profiles refresh daily at 04:17. Scraping TikTok breaks its Terms of Ser
 .venv/bin/python -m pytest -q
 ```
 
-The tests stub out the AI, image and TikTok calls (28 tests). They cover:
+The tests stub out the AI, image and TikTok calls (31 tests). They cover:
 
 - key → provider detection and the OpenAI-compatible JSON path with its repair retry
 - Studio producing complete slideshows with AI backgrounds and saving them as an automation
 - library import, search, slide reading and remix
 - generate, render, edit, publish, metrics sync and the direct-post cap
 - cron automations, collections and video export
+- hardening: direct-post consent rules, encryption at rest with migration of plaintext rows, and the public-deploy password guard
 - country schedules: the cron round-trip, weekend rules, learning from library data, apply-timing, posting at the planned time, and DB migration
 
 ## Layout
@@ -89,7 +107,10 @@ app/
   tiktok.py      OAuth, photo posting, status, metrics
   timing.py      best posting times per country (baseline + learned)
   scheduler.py   cron jobs per automation, in its own timezone
+  crypto.py      encryption at rest for keys and tokens
+  legal.py       /about, /privacy, /terms pages for TikTok review
   main.py        REST API + dashboard
+deploy/          install.sh, backup.sh, update.sh, Caddyfile
 static/          dashboard (vanilla JS)
 fonts/           open-licence fonts (OFL)
 ```

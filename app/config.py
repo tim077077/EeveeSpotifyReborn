@@ -5,6 +5,7 @@ from __future__ import annotations
 import os
 from dataclasses import dataclass, field
 from pathlib import Path
+from urllib.parse import urlparse
 
 ROOT = Path(__file__).resolve().parent.parent
 
@@ -52,6 +53,15 @@ class Settings:
 
     max_concurrent_generations: int = int(os.environ.get("MAX_CONCURRENT_GENERATIONS", "3"))
     run_scheduler: bool = _bool("SLIDEMILL_SCHEDULER", True)
+
+    # Display name and contact for the generated privacy policy / terms pages.
+    app_name: str = os.environ.get("SLIDEMILL_APP_NAME", "Slidemill")
+    contact_email: str = os.environ.get("SLIDEMILL_CONTACT_EMAIL", "")
+
+    @property
+    def is_public(self) -> bool:
+        host = urlparse(self.public_base_url).hostname or ""
+        return host not in {"localhost", "127.0.0.1", "0.0.0.0", "::1"}
 
     @property
     def media_dir(self) -> Path:
