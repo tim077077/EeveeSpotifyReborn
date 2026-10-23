@@ -21,6 +21,10 @@ ENV_FALLBACKS: dict[str, tuple[str, ...]] = {
     "pexels_api_key": ("PEXELS_API_KEY",),
     "unsplash_access_key": ("UNSPLASH_ACCESS_KEY",),
     "apify_token": ("APIFY_TOKEN",),
+    # Browser extension posting
+    "browser_posts_per_day": ("BROWSER_POSTS_PER_DAY",),
+    "browser_min_gap_minutes": ("BROWSER_MIN_GAP_MINUTES",),
+    "browser_username": ("BROWSER_TIKTOK_USERNAME",),
 }
 SECRET_KEYS = {"llm_api_key", "image_api_key", "pexels_api_key", "unsplash_access_key", "apify_token"}
 

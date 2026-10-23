@@ -197,8 +197,12 @@ views.slideshow = async (id) => {
         <label>Description</label><textarea id="description">${esc(s.description)}</textarea>
         <label>Account</label><select id="acct">${accounts.accounts
           .map((a) => `<option value="${a.id}">@${esc(a.username || a.display_name)}</option>`).join("") || "<option value=''>No accounts connected</option>"}</select>
-        <label>How</label><select id="mode"><option value="MEDIA_UPLOAD">Send to my TikTok drafts (add a sound, then post)</option>
-          <option value="DIRECT_POST">Post now</option></select>
+        <label>How</label><select id="mode">
+          <option value="BROWSER:publish">Post from my browser (extension)</option>
+          <option value="BROWSER:draft">Save as draft from my browser (extension)</option>
+          <option value="MEDIA_UPLOAD">Send to my TikTok drafts (official API)</option>
+          <option value="DIRECT_POST">Post now (official API)</option></select>
+        <label class="check" id="sound-row"><input type="checkbox" id="sound" checked> Add a sound from TikTok's web library</label>
         <div id="direct-opts"></div>
         <div class="row"><button class="primary" id="publish">Send to TikTok</button><button id="save-meta">Save caption</button></div>
         ${s.posts.length ? `<h3 style="margin-top:16px">History</h3>${s.posts
@@ -237,15 +241,19 @@ views.slideshow = async (id) => {
 
   $("#publish").onclick = (e) =>
     busy(e.currentTarget, async () => {
-      if (!$("#acct").value) throw new Error("Connect a TikTok account first.");
-      const direct = $("#mode").value === "DIRECT_POST";
-      const extra = direct ? readConsent($("#consent-direct")) : {};
+      const [mode, browserAction] = $("#mode").value.split(":");
+      if (mode !== "BROWSER" && !$("#acct").value) throw new Error("Connect a TikTok account first.");
+      const extra = mode === "DIRECT_POST" ? readConsent($("#consent-direct")) : {};
       const p = await api(`/slideshows/${id}/publish`, {
         method: "POST",
-        body: { tiktok_account_id: $("#acct").value, post_mode: $("#mode").value, caption: $("#caption").value, description: $("#description").value, ...extra },
+        body: {
+          tiktok_account_id: $("#acct").value || null, post_mode: mode, caption: $("#caption").value, description: $("#description").value,
+          browser_action: browserAction || "publish", sound: $("#sound").checked, ...extra,
+        },
       });
       toast(
         p.status === "failed" ? `Failed: ${p.error}`
+          : p.post_mode === "BROWSER" ? "Queued. Your browser extension picks it up within a minute (keep tiktok.com open)."
           : p.post_mode === "DIRECT_POST" ? "Posted. It can take a few minutes to appear on your profile."
           : "Sent to your TikTok drafts — open TikTok's inbox to finish it.",
         p.status === "failed",
@@ -254,8 +262,15 @@ views.slideshow = async (id) => {
     });
   const refreshDirect = async () => {
     const box = $("#direct-opts");
-    $("#publish").textContent = $("#mode").value === "DIRECT_POST" ? "Post to TikTok" : "Send to drafts";
-    if ($("#mode").value !== "DIRECT_POST" || !$("#acct").value) { box.innerHTML = ""; return; }
+    const m = $("#mode").value;
+    $("#publish").textContent = m === "DIRECT_POST" ? "Post to TikTok" : m.startsWith("BROWSER") ? "Queue for my browser" : "Send to drafts";
+    $("#publish").disabled = false;
+    $("#sound-row").hidden = !m.startsWith("BROWSER");
+    if (m === "BROWSER:draft") {
+      box.innerHTML = `<p class="small" style="color:var(--warn)">Browser drafts aren't wired up yet: it waits in the queue (never posted publicly) until they are.</p>`;
+      return;
+    }
+    if (m !== "DIRECT_POST" || !$("#acct").value) { box.innerHTML = ""; return; }
     box.innerHTML = `<p class="muted small"><span class="spinner"></span> Checking the account…</p>`;
     try {
       const creator = await api(`/tiktok/accounts/${$("#acct").value}/creator-info`);
@@ -368,7 +383,7 @@ views.automations = async () => {
         <div class="row"><h3 class="grow">${a.favorite ? "★ " : ""}${esc(a.title)}</h3>
           <span class="pill ${a.paused ? "bad" : a.schedule.length ? "live" : ""}">${a.paused ? "paused" : a.schedule.length ? "live" : "no schedule"}</span></div>
         <div class="small muted">${acct[a.tiktok_account_id] ? "@" + esc(acct[a.tiktok_account_id].username) : "no account"} · ${a.hooks.length} hooks · ${a.schedule.length} posts/day</div>
-        <div class="small muted">${a.target_country ? `🎯 ${esc(a.target_country)} · ` : ""}times in ${esc(a.timezone)} · ${esc(a.post_settings.post_mode === "DIRECT_POST" ? "auto-publish" : "drafts")}</div>
+        <div class="small muted">${a.target_country ? `🎯 ${esc(a.target_country)} · ` : ""}times in ${esc(a.timezone)} · ${esc({ DIRECT_POST: "auto-publish (API)", BROWSER: a.post_settings.browser_action === "draft" ? "browser drafts" : "browser posting" }[a.post_settings.post_mode] || "drafts (API)")}</div>
         <div class="small muted">Next post: ${a.next_runs[0] ? esc(new Date(a.next_runs[0]).toLocaleString()) : "—"}</div>
         <div class="row" style="margin-top:12px">
           <button data-run="${a.id}">Run now</button>
@@ -433,7 +448,9 @@ async function automationDialog(a) {
     <div class="form-grid">
       <div><label>Mode</label><select name="post_mode">
         <option value="MEDIA_UPLOAD" ${ps.post_mode !== "DIRECT_POST" ? "selected" : ""}>Send to my TikTok drafts</option>
-        <option value="DIRECT_POST" ${ps.post_mode === "DIRECT_POST" ? "selected" : ""}>Post by itself</option></select></div>
+        <option value="DIRECT_POST" ${ps.post_mode === "DIRECT_POST" ? "selected" : ""}>Post by itself (official API)</option>
+        <option value="BROWSER:publish" ${ps.post_mode === "BROWSER" && ps.browser_action !== "draft" ? "selected" : ""}>Post from my browser (extension)</option>
+        <option value="BROWSER:draft" ${ps.post_mode === "BROWSER" && ps.browser_action === "draft" ? "selected" : ""}>Save drafts from my browser (extension)</option></select></div>
       <div></div>
       <div><label>Caption</label>${select("caption_mode", ["prompt", "static"], ps.caption_mode ?? "prompt")}<input name="caption_static" placeholder="Static caption" value="${esc(ps.caption_static ?? "")}"></div>
       <div><label>Description</label>${select("description_mode", ["prompt", "static"], ps.description_mode ?? "prompt")}<input name="description_static" placeholder="Static description" value="${esc(ps.description_static ?? "")}"></div>
@@ -487,7 +504,8 @@ async function automationDialog(a) {
         timezone: val("timezone").trim(),
         ...(val("times").trim() || !a || sched.simple ? { schedule: timesToCron(val("times"), val("days").trim()) } : {}),
         post_settings: {
-          post_mode: val("post_mode"),
+          post_mode: val("post_mode").split(":")[0],
+          browser_action: val("post_mode").split(":")[1] || "publish",
           ...(val("post_mode") === "DIRECT_POST"
             ? (({ privacy_level, allow_comments, brand_organic, branded_content }) => ({
                 visibility: privacy_level, allow_comments, brand_organic, branded_content, consented: true,
@@ -680,7 +698,11 @@ views.studio = async () => {
         <div><label>Post for this country's best times</label><select id="scountry"><option value="">— use the times below —</option></select></div>
         <div><label>Posts per day</label><input id="sppd" type="number" min="1" max="6" value="2"></div>
         <div><label>Posting times if no country (HH:MM, comma-separated)</label><input id="times" value="09:00, 18:00"></div>
-        <div><label>Mode</label><select id="spub"><option value="0">Send to TikTok drafts</option><option value="1">Post by itself</option></select></div>
+        <div><label>Mode</label><select id="spub">
+          <option value="browser:publish">Post from my browser (extension)</option>
+          <option value="browser:draft">Save drafts from my browser (extension)</option>
+          <option value="0">Send to TikTok drafts (official API)</option>
+          <option value="1">Post by itself (official API)</option></select></div>
       </div>
       <div id="studio-consent"></div>
       <div class="row" style="margin-top:16px"><button class="primary" id="make">Make slideshows</button>
@@ -708,6 +730,8 @@ views.studio = async () => {
           tiktok_account_id: $("#acct").value || null, schedule: $("#auto").checked ? timesToCron($("#times").value, "*") : [],
           target_country: ($("#auto").checked && $("#scountry").value) || null, posts_per_day: +$("#sppd").value,
           auto_publish: $("#auto").checked && $("#spub").value === "1",
+          via_browser: $("#auto").checked && $("#spub").value.startsWith("browser"),
+          browser_action: $("#spub").value.split(":")[1] || "publish",
           ...($("#auto").checked && $("#spub").value === "1" ? (({ privacy_level, consent }) => ({ privacy_level, consent }))(readConsent($("#consent-studio"))) : {}),
         },
       });
@@ -829,7 +853,9 @@ views.libprofile = async (id) => {
 };
 
 views.settings = async () => {
-  const data = await api("/settings");
+  const [data, ext] = await Promise.all([api("/settings"), api("/extension/status")]);
+  const seen = ext.extension?.at ? new Date(ext.extension.at) : null;
+  const online = seen && Date.now() - seen.getTime() < 3 * 60 * 1000;
   const v = data.values;
   const field = (key, label, type = "text", ph = "") => `<div><label>${label}${v[key].from_env ? ` <span class="pill">from ${esc(v[key].from_env)}</span>` : ""}</label>
     <input name="${key}" type="${type}" placeholder="${esc(v[key].set && type === "password" ? v[key].value : ph)}" ${type === "password" ? "" : `value="${esc(v[key].value)}"`}></div>`;
@@ -838,7 +864,26 @@ views.settings = async () => {
   view.innerHTML = `
     <h1>Settings</h1>
     <p class="sub">Paste any AI key — the provider is detected from it. Keys are stored in this server's database.</p>
-    <div class="card">
+    <div class="card" id="browser-poster">
+      <h3>Browser poster (no TikTok developer app needed)</h3>
+      <p class="small">
+        <span class="pill ${online ? "ok" : "bad"}">${online ? "extension online" : "extension offline"}</span>
+        ${seen ? `last check-in ${esc(seen.toLocaleString())}` : "never checked in"}
+        ${ext.extension?.username ? ` · posting as @${esc(ext.extension.username)}` : ""}
+        · ${ext.queued} queued · ${ext.done_last_24h}/${ext.posts_per_day} in the last 24h
+        ${ext.waiting_for_draft_support ? ` · <b>${ext.waiting_for_draft_support} draft(s) waiting for draft support</b>` : ""}
+      </p>
+      <div class="form-grid">
+        ${field("browser_posts_per_day", "Max posts per 24h", "text", "6")}
+        ${field("browser_min_gap_minutes", "Minimum minutes between posts", "text", "20")}
+        ${field("browser_username", "Your TikTok @username (for view counts, if the extension can't detect it)", "text", "")}
+        <div><label>&nbsp;</label><button type="button" id="ext-download">Download extension</button></div>
+      </div>
+      <p class="small muted">Install: unzip → chrome://extensions → Developer mode → Load unpacked. In the extension popup enter
+        this address (${esc(location.origin)}) and your Slidemill password, then keep a logged-in tiktok.com tab open.
+        Posting this way uses TikTok's private web endpoints and is against TikTok's terms; keep the limits low.</p>
+    </div>
+    <div class="card" style="margin-top:14px">
       <h3>AI for writing (and reading slides)</h3>
       <div class="form-grid">
         <div><label>Provider</label><select name="llm_provider">${provOpts(v.llm_provider.value)}</select></div>
@@ -867,6 +912,14 @@ views.settings = async () => {
     </div>
     <div class="row" style="margin-top:16px"><button class="primary" id="save">Save</button><button id="test">Test AI + images</button></div>
     <div id="test-out"></div>`;
+  $("#ext-download").onclick = (e) =>
+    busy(e.currentTarget, async () => {
+      const res = await fetch("/api/v1/extension/download", { headers: storedKey() ? { Authorization: `Bearer ${storedKey()}` } : {} });
+      if (!res.ok) throw new Error(`Download failed (${res.status})`);
+      const a = Object.assign(document.createElement("a"), { href: URL.createObjectURL(await res.blob()), download: "slidemill-tiktok-poster.zip" });
+      a.click();
+      URL.revokeObjectURL(a.href);
+    });
   $("#save").onclick = (e) =>
     busy(e.currentTarget, async () => {
       const values = {};
@@ -1019,7 +1072,11 @@ views.timing = async () => {
     <div class="card">
       ${autos.automations.length ? `<div class="form-grid">
         <div><label>Automation</label><select id="auto-sel">${autos.automations.map((a) => `<option value="${a.id}">${esc(a.title)}${a.target_country ? ` (now: ${esc(a.target_country)})` : ""}</option>`).join("")}</select></div>
-        <div><label>Mode</label><select id="pub"><option value="0">Send each one to my TikTok drafts</option><option value="1">Post by itself</option></select></div>
+        <div><label>Mode</label><select id="pub">
+          <option value="browser:publish">Post from my browser (extension)</option>
+          <option value="browser:draft">Save drafts from my browser (extension)</option>
+          <option value="0">Send to my TikTok drafts (official API)</option>
+          <option value="1">Post by itself (official API)</option></select></div>
       </div>
       <div id="pub-consent"></div>
       <div class="row" style="margin-top:14px"><button class="primary" id="apply">Turn on auto-posting</button>
@@ -1064,6 +1121,7 @@ views.timing = async () => {
           method: "POST",
           body: {
             country: $("#country").value, posts_per_day: +$("#ppd").value, auto_publish: $("#pub").value === "1",
+            via_browser: $("#pub").value.startsWith("browser"), browser_action: $("#pub").value.split(":")[1] || "publish",
             ...($("#pub").value === "1" ? readConsent($("#consent-timing")) : {}),
           },
         });

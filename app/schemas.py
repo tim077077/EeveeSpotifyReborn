@@ -15,6 +15,7 @@ TextColor = Literal["white", "black", "yellow", "red", "pink", "orange", "green"
 TextWidth = Literal["full", "100%", "80%", "50%"]
 ImageLayout = Literal["single", "1:2", "1:3", "2:1", "2:2"]
 SlideRole = Literal["hook", "body", "cta"]
+BrowserAction = Literal["publish", "draft"]
 PrivacyLevel = Literal["PUBLIC_TO_EVERYONE", "MUTUAL_FOLLOW_FRIENDS", "FOLLOWER_OF_CREATOR", "SELF_ONLY"]
 
 
@@ -121,7 +122,10 @@ class PostSettings(BaseModel):
     description_mode: Literal["prompt", "static"] = "prompt"
     description_static: str = ""
     auto_post: bool = True
-    post_mode: Literal["DIRECT_POST", "MEDIA_UPLOAD"] = "MEDIA_UPLOAD"
+    # BROWSER = posted by the Slidemill browser extension from your logged-in tiktok.com tab.
+    post_mode: Literal["DIRECT_POST", "MEDIA_UPLOAD", "BROWSER"] = "MEDIA_UPLOAD"
+    # Browser posts: publish right away, or save to TikTok drafts.
+    browser_action: BrowserAction = "publish"
     visibility: Literal["PUBLIC_TO_EVERYONE", "MUTUAL_FOLLOW_FRIENDS", "FOLLOWER_OF_CREATOR", "SELF_ONLY"] = "PUBLIC_TO_EVERYONE"
     auto_music: bool = True
     allow_comments: bool = True
@@ -200,6 +204,9 @@ class StudioRequest(BaseModel):
     auto_publish: bool = False
     privacy_level: PrivacyLevel | None = None
     consent: bool = False
+    # Post through the browser extension instead of the TikTok API.
+    via_browser: bool = False
+    browser_action: BrowserAction = "publish"
 
 
 class RemixRequest(BaseModel):
@@ -234,6 +241,18 @@ class ApplyTimingRequest(BaseModel):
     allow_comments: bool = False
     brand_organic: bool = False
     branded_content: bool = False
+    # Post through the browser extension instead of the TikTok API (no consent screen involved).
+    via_browser: bool = False
+    browser_action: BrowserAction = "publish"
+
+
+class ExtensionResult(BaseModel):
+    ok: bool
+    item_id: str = ""
+    username: str = ""
+    error: str = ""
+    # The extension can't do this yet (e.g. drafts before the request is captured): keep it queued.
+    unsupported: bool = False
 
 
 class RunRequest(BaseModel):
@@ -243,9 +262,11 @@ class RunRequest(BaseModel):
 
 class PublishRequest(BaseModel):
     tiktok_account_id: str | None = None
-    post_mode: Literal["DIRECT_POST", "MEDIA_UPLOAD"] | None = None
+    post_mode: Literal["DIRECT_POST", "MEDIA_UPLOAD", "BROWSER"] | None = None
     caption: str | None = None
     description: str | None = None
+    browser_action: BrowserAction = "publish"
+    sound: bool = True
     # Direct posts: the user must pick these explicitly (TikTok content-sharing guidelines).
     privacy_level: PrivacyLevel | None = None
     allow_comments: bool | None = None

@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
+import io
 import logging
+import zipfile
 import os
 import secrets
 from datetime import datetime, timedelta, timezone
@@ -11,15 +13,16 @@ from typing import Any
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from fastapi import APIRouter, Depends, FastAPI, File, HTTPException, Query, Request, UploadFile
-from fastapi.responses import FileResponse, HTMLResponse, RedirectResponse
+from fastapi.responses import FileResponse, HTMLResponse, RedirectResponse, Response
 from fastapi.staticfiles import StaticFiles
 from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
-from . import db, imagegen, images, legal, library, llm, pipeline, scheduler, store, tiktok, timing
+from . import browser_queue, db, imagegen, images, legal, library, llm, pipeline, scheduler, store, tiktok, timing
 from .config import STATIC_DIR, settings
 from .schemas import (
     ApplyTimingRequest,
+    ExtensionResult,
     AutomationIn,
     AutomationPatch,
     CollectionIn,
@@ -347,9 +350,9 @@ def publish_slideshow(slideshow_id: str, body: PublishRequest, session: Session 
         if automation:
             post_settings = PostSettings.model_validate(automation.post_settings or {})
             account_id = account_id or automation.tiktok_account_id
-    if not account_id:
-        raise HTTPException(422, {"error": "tiktok_account_id is required", "code": "VALIDATION_ERROR"})
     mode = body.post_mode or (post_settings.post_mode if post_settings else "MEDIA_UPLOAD")
+    if not account_id and mode != "BROWSER":
+        raise HTTPException(422, {"error": "tiktok_account_id is required", "code": "VALIDATION_ERROR"})
     if mode == "DIRECT_POST":
         if not body.privacy_level:
             raise HTTPException(422, {"error": "Choose who can see this post.", "code": "VALIDATION_ERROR"})
@@ -363,6 +366,7 @@ def publish_slideshow(slideshow_id: str, body: PublishRequest, session: Session 
             slideshow_id, account_id, post_settings, post_mode=body.post_mode, caption=body.caption,
             description=body.description, privacy_level=body.privacy_level, allow_comments=body.allow_comments,
             brand_organic=body.brand_organic, branded_content=body.branded_content, user_confirmed=mode == "DIRECT_POST",
+            browser_action=body.browser_action, sound=body.sound,
         )
     except pipeline.PublishLimitError as exc:
         raise HTTPException(429, {"error": str(exc), "code": "RATE_LIMITED"}) from exc
@@ -723,8 +727,11 @@ def apply_timing(session: Session, automation: db.Automation, body: ApplyTimingR
     automation.target_country = plan["country"]
     post = PostSettings.model_validate(automation.post_settings or {})
     post.auto_post = True
-    post.post_mode = "DIRECT_POST" if body.auto_publish else "MEDIA_UPLOAD"
-    if body.auto_publish:
+    if body.via_browser:
+        post.post_mode, post.browser_action = "BROWSER", body.browser_action
+    else:
+        post.post_mode = "DIRECT_POST" if body.auto_publish else "MEDIA_UPLOAD"
+    if body.auto_publish and not body.via_browser:
         post.visibility = body.privacy_level
         post.consented = True
         post.allow_comments = body.allow_comments
@@ -744,16 +751,61 @@ def automation_apply_timing(automation_id: str, body: ApplyTimingRequest, sessio
         raise _404("automation")
     if body.country.upper() not in timing.COUNTRIES:
         raise HTTPException(404, {"error": f"unsupported country {body.country!r}", "code": "NOT_FOUND"})
-    _require_publish_consent(body.auto_publish, body.privacy_level, body.consent, body.branded_content)
+    if not body.via_browser:
+        _require_publish_consent(body.auto_publish, body.privacy_level, body.consent, body.branded_content)
     plan = apply_timing(session, automation, body)
     session.commit()
     scheduler.sync()
     warnings = []
-    if not automation.tiktok_account_id:
+    if body.via_browser:
+        per_day, gap = browser_queue.limits()
+        if body.posts_per_day > per_day:
+            warnings.append(f"The browser poster is capped at {per_day} posts a day (Settings); extra ones wait in the queue.")
+        warnings.append("Keep a logged-in tiktok.com tab open with the Slidemill extension, or posts wait in the queue.")
+    elif not automation.tiktok_account_id:
         warnings.append("No TikTok account on this automation: slideshows will be made but not posted.")
-    if body.auto_publish and body.posts_per_day > settings.tiktok_direct_posts_per_day:
+    if body.auto_publish and not body.via_browser and body.posts_per_day > settings.tiktok_direct_posts_per_day:
         warnings.append(f"TikTok allows {settings.tiktok_direct_posts_per_day} direct posts a day; extra ones go to drafts.")
     return {"automation": automation_out(automation), "plan": plan, "warnings": warnings}
+
+
+# --- browser extension -------------------------------------------------------------------------
+
+EXTENSION_DIR = STATIC_DIR.parent / "extension"
+
+
+@api.get("/extension/next")
+def extension_next(version: str = "", username: str = "", draft: str = "0") -> dict[str, Any]:
+    """Called by the browser extension about once a minute: the next post to make, if any."""
+    return browser_queue.claim_next(client={"version": version, "username": username, "draft": draft})
+
+
+@api.post("/extension/jobs/{post_id}/result")
+def extension_result(post_id: str, body: ExtensionResult) -> dict[str, Any]:
+    post = browser_queue.record_result(post_id, body.ok, body.item_id, body.username, body.error, body.unsupported)
+    if post is None:
+        raise HTTPException(404, {"error": "no post in progress with that id", "code": "NOT_FOUND"})
+    return {"status": post.status}
+
+
+@api.get("/extension/status")
+def extension_status() -> dict[str, Any]:
+    return browser_queue.status()
+
+
+@api.get("/extension/download")
+def extension_download():
+    """The extension as a zip, ready for chrome://extensions -> Load unpacked."""
+    buf = io.BytesIO()
+    with zipfile.ZipFile(buf, "w", zipfile.ZIP_DEFLATED) as zf:
+        for path in sorted(EXTENSION_DIR.rglob("*")):
+            if path.is_file():
+                zf.write(path, f"slidemill-tiktok-poster/{path.relative_to(EXTENSION_DIR)}")
+    return Response(
+        buf.getvalue(),
+        media_type="application/zip",
+        headers={"Content-Disposition": 'attachment; filename="slidemill-tiktok-poster.zip"'},
+    )
 
 
 # --- settings ----------------------------------------------------------------------------------
@@ -830,7 +882,8 @@ def studio(body: StudioRequest, session: Session = Depends(get_session)) -> dict
         schedule = [scheduler.validate_cron(c) for c in body.schedule]
     except ValueError as exc:
         raise HTTPException(422, {"error": f"invalid cron: {exc}", "code": "VALIDATION_ERROR"}) from exc
-    _require_publish_consent(body.auto_publish, body.privacy_level, body.consent, False)
+    if not body.via_browser:
+        _require_publish_consent(body.auto_publish, body.privacy_level, body.consent, False)
     if body.target_country and body.target_country.upper() not in timing.COUNTRIES:
         raise HTTPException(404, {"error": f"unsupported country {body.target_country!r}", "code": "NOT_FOUND"})
     job = _new_job(session, "studio")
@@ -838,6 +891,7 @@ def studio(body: StudioRequest, session: Session = Depends(get_session)) -> dict
         pipeline.run_studio, job.id, body.brief, body.count, body.image_source, body.aspect_ratio, body.language,
         body.product_id, body.save_as_automation, body.tiktok_account_id, schedule,
         body.target_country, body.posts_per_day, body.auto_publish, body.privacy_level,
+        body.browser_action if body.via_browser else None,
     )
     return {"job_id": job.id}
 

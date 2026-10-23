@@ -15,6 +15,7 @@ It was built by tearing down how reel.farm works; see [docs/REELFARM_TEARDOWN.md
 - **Slide renderer.** TikTok-style outline text and boxed text, 7 fonts, 4 aspect ratios, grid layouts, darkening overlays and Korean/Japanese/Chinese text. Every slide can be edited in the dashboard and re-rendered.
 - **Automations.** Each automation has a list of hooks that it rotates through, a style prompt, a language, an optional product for a soft CTA, image settings and posting times (cron). Automations can be paused, resumed or run now.
 - **Images.** Upload your own image collections or import them from Pexels/Unsplash. You can also let it search stock photos for each slide automatically. Collections are cycled least-used first so images don't repeat.
+- **Browser poster (no developer app).** The Chrome extension in `extension/` posts Slidemill's queue from your logged-in tiktok.com tab, using the same internal endpoints TikTok Studio's web uploader uses. Pick "Post from my browser" anywhere you choose how to post: one slideshow, an automation, Best times or Studio. Slidemill caps posts per day (6 by default) and spaces them out (20 min by default), and view counts come from each post's public page. "Save drafts from my browser" is a placeholder: those jobs wait in the queue, never posted publicly, until the "Save draft" request is captured. Download the extension in **Settings → Browser poster** and read `extension/HOW-TO-USE.txt`. This route is against TikTok's terms, so use an account you can afford to lose.
 - **TikTok posting.** Connect any number of accounts with OAuth. Posts go out as photo carousels, either straight to your TikTok drafts (`MEDIA_UPLOAD`) or published directly (`DIRECT_POST`). The direct-post daily limit is enforced, with automatic fallback to drafts.
 - **Analytics.** It polls each post's publish status and syncs views, likes, comments and shares every 10 minutes.
 - **MP4 export** for Reels and Shorts, plus a **REST API** (`/api/v1`, docs at `/docs`).
@@ -82,7 +83,7 @@ Tracked profiles refresh daily at 04:17. Scraping TikTok breaks its Terms of Ser
 .venv/bin/python -m pytest -q
 ```
 
-The tests stub out the AI, image and TikTok calls (31 tests). They cover:
+The tests stub out the AI, image and TikTok calls (40 tests). They cover:
 
 - key → provider detection and the OpenAI-compatible JSON path with its repair retry
 - Studio producing complete slideshows with AI backgrounds and saving them as an automation
@@ -90,6 +91,7 @@ The tests stub out the AI, image and TikTok calls (31 tests). They cover:
 - generate, render, edit, publish, metrics sync and the direct-post cap
 - cron automations, collections and video export
 - hardening: direct-post consent rules, encryption at rest with migration of plaintext rows, and the public-deploy password guard
+- browser poster: queue order, one post at a time, daily cap and gap, drafts waiting for support, retries, stale claims, view counts, extension download
 - country schedules: the cron round-trip, weekend rules, learning from library data, apply-timing, posting at the planned time, and DB migration
 
 ## Layout
@@ -106,11 +108,13 @@ app/
   pipeline.py    generate -> images -> render -> publish -> metrics
   tiktok.py      OAuth, photo posting, status, metrics
   timing.py      best posting times per country (baseline + learned)
+  browser_queue.py  queue the browser extension pulls from (caps, gaps, retries)
   scheduler.py   cron jobs per automation, in its own timezone
   crypto.py      encryption at rest for keys and tokens
   legal.py       /about, /privacy, /terms pages for TikTok review
   main.py        REST API + dashboard
 deploy/          install.sh, backup.sh, update.sh, Caddyfile
+extension/       Chrome extension: posts the queue from your tiktok.com tab
 static/          dashboard (vanilla JS)
 fonts/           open-licence fonts (OFL)
 ```

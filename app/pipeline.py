@@ -15,7 +15,7 @@ from datetime import datetime, timedelta, timezone
 from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
-from . import db, generator, imagegen, images, renderer, tiktok, timing
+from . import browser_queue, db, generator, imagegen, images, renderer, tiktok, timing
 from .config import settings
 from .schemas import CampaignPlan, ImageSettings, PostSettings, Slide, SlideshowPlan, SlideshowSpec, TextItem
 
@@ -256,7 +256,7 @@ def generate_into(
 def run_studio(job_id: str, brief: str, count: int, image_source: str, aspect_ratio: str | None, language: str | None,
                product_id: str | None, save_as_automation: bool, tiktok_account_id: str | None, schedule: list[str],
                target_country: str | None = None, posts_per_day: int = 2, auto_publish: bool = False,
-               privacy_level: str | None = None) -> None:
+               privacy_level: str | None = None, browser_action: str | None = None) -> None:
     """Plan a content format from a brief, then generate `count` complete slideshows from it."""
     _job(job_id, status="running", message="Planning the format…")
     try:
@@ -291,6 +291,10 @@ def run_studio(job_id: str, brief: str, count: int, image_source: str, aspect_ra
                         visibility=privacy_level or "SELF_ONLY",
                         consented=auto_publish,  # the API checked consent before starting
                         allow_comments=False,
+                    ).model_dump()
+                if browser_action:
+                    automation.post_settings = PostSettings(
+                        auto_post=True, post_mode="BROWSER", browser_action=browser_action
                     ).model_dump()
                 automation.schedules = [db.ScheduleJob(cron=c) for c in schedule]
                 session.add(automation)
@@ -385,7 +389,7 @@ def run_automation(
 
     generate_into(show_id, **kwargs)
 
-    if mode == "export" and post_settings.auto_post and account_id:
+    if mode == "export" and post_settings.auto_post and (account_id or post_settings.post_mode == "BROWSER"):
         if publish_at is not None:
             wait = (publish_at - datetime.now(timezone.utc)).total_seconds() + random.uniform(0, 240)
             if 0 < wait < 3600:
@@ -416,12 +420,14 @@ def direct_posts_last_24h(session: Session, account_id: str) -> int:
 
 def publish(
     slideshow_id: str,
-    account_id: str,
+    account_id: str | None,
     post_settings: PostSettings | None = None,
     *,
     post_mode: str | None = None,
     caption: str | None = None,
     description: str | None = None,
+    browser_action: str | None = None,
+    sound: bool | None = None,
     privacy_level: str | None = None,
     allow_comments: bool | None = None,
     brand_organic: bool | None = None,
@@ -433,17 +439,31 @@ def publish(
     Direct posts need the account owner's explicit consent: either `user_confirmed` (they just
     clicked Post in the dashboard) or `post_settings.consented` (given when setting up the
     automation). Without it the post goes to drafts instead.
+
+    BROWSER mode queues the post for the Slidemill browser extension instead (no account needed).
     """
     post_settings = post_settings or PostSettings()
     with db.session_scope() as session:
         show = session.get(db.Slideshow, slideshow_id)
-        account = session.get(db.TikTokAccount, account_id)
         if show is None or show.status != "completed" or not show.rendered:
             raise PipelineError("slideshow is not rendered yet")
+        mode = post_mode or post_settings.post_mode
+        if mode == "BROWSER":
+            if caption is not None:
+                show.caption = caption[:89]
+            if description is not None:
+                show.description = description[:4000]
+            post = browser_queue.queue_post(
+                session,
+                show,
+                action=browser_action or post_settings.browser_action,
+                sound=post_settings.auto_music if sound is None else sound,
+            )
+            return post.id
+        account = session.get(db.TikTokAccount, account_id) if account_id else None
         if account is None:
             raise PipelineError("TikTok account not found")
 
-        mode = post_mode or post_settings.post_mode
         if mode == "DIRECT_POST" and not (user_confirmed or post_settings.consented):
             log.info("no posting consent recorded for %s; sending to drafts instead", slideshow_id)
             mode = "MEDIA_UPLOAD"
@@ -484,6 +504,10 @@ def publish(
 
 def refresh_posts() -> None:
     """Poll publish status for in-flight posts, then pull metrics for published ones."""
+    try:
+        browser_queue.refresh_metrics()
+    except Exception:  # noqa: BLE001 - API-post metrics below should still update
+        log.exception("browser post metrics refresh failed")
     with db.session_scope() as session:
         pending = session.scalars(select(db.Post).where(db.Post.status == "processing")).all()
         for post in pending:

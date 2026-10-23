@@ -138,10 +138,18 @@ class Post(Base):
     id: Mapped[str] = mapped_column(String(32), primary_key=True, default=new_id)
     slideshow_id: Mapped[str] = mapped_column(ForeignKey("slideshows.id", ondelete="CASCADE"))
     tiktok_account_id: Mapped[str | None] = mapped_column(ForeignKey("tiktok_accounts.id", ondelete="SET NULL"))
+    # DIRECT_POST | MEDIA_UPLOAD (official API) | BROWSER (posted by the browser extension)
     post_mode: Mapped[str] = mapped_column(String(32))
     publish_id: Mapped[str] = mapped_column(String(128), default="")
-    # pending | processing | published | sent_to_drafts | failed
+    # API: pending | processing | published | sent_to_drafts | failed
+    # BROWSER: queued | posting | published | sent_to_drafts | failed
     status: Mapped[str] = mapped_column(String(32), default="pending")
+    # Browser posts: claim bookkeeping, the account the extension posted from, and options
+    # ({"action": "publish" | "draft", "sound": bool}).
+    claimed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    attempts: Mapped[int] = mapped_column(Integer, default=0)
+    tiktok_username: Mapped[str] = mapped_column(String(128), default="")
+    options: Mapped[dict[str, Any] | None] = mapped_column(JSON, default=dict)
     post_id: Mapped[str] = mapped_column(String(128), default="")
     error: Mapped[str] = mapped_column(Text, default="")
     views: Mapped[int] = mapped_column(Integer, default=0)
