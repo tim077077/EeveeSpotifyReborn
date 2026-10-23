@@ -11,3 +11,5 @@ android/.gradle/
 android/build/
 android/app/build/
 android/.kotlin/
+android/**/build/
+android/build/
