@@ -319,6 +319,14 @@ def run_studio(job_id: str, brief: str, count: int, image_source: str, aspect_ra
         ]
         for f in futures:
             f.result()
+        # Score every Studio slideshow so you can pick the best one to post first.
+        from . import virality
+
+        for sid in ids:
+            try:
+                virality.predict(sid)
+            except Exception:  # noqa: BLE001 - a missing score never fails the batch
+                log.info("prediction skipped for %s", sid)
         _job(job_id, status="completed", message="Done")
     except Exception as exc:  # noqa: BLE001
         log.exception("studio job %s failed", job_id)
@@ -386,8 +394,10 @@ def run_automation(
         post_settings = PostSettings.model_validate(automation.post_settings or {})
         account_id = automation.tiktok_account_id
         show_id = show.id
+        min_score = automation.min_viral_score or 0
 
     generate_into(show_id, **kwargs)
+    show_id = pretest(show_id, min_score, kwargs)
 
     if mode == "export" and post_settings.auto_post and (account_id or post_settings.post_mode == "BROWSER"):
         if publish_at is not None:
@@ -399,6 +409,45 @@ def run_automation(
         except PipelineError as exc:
             log.warning("auto-publish failed for %s: %s", show_id, exc)
     return show_id
+
+
+def pretest(show_id: str, min_score: int, kwargs: dict) -> str:
+    """Predict the new slideshow's virality; below `min_score`, write one more version using the
+    predictor's tips and keep whichever scores higher (the other is deleted). 0 = off."""
+    from . import virality  # local import: virality imports db/llm only, but keep pipeline import-light
+
+    if min_score <= 0:
+        return show_id
+    try:
+        first = virality.predict(show_id)
+    except virality.PredictError as exc:
+        log.info("pre-test skipped: %s", exc)
+        return show_id
+    if first["viral_potential"] >= min_score:
+        return show_id
+    with db.session_scope() as session:
+        show = session.get(db.Slideshow, show_id)
+        retry = create_pending(session, show.prompt, show.automation_id, show.created_by_cron_id, queue=True)
+        retry_id = retry.id
+    advice = "\n- ".join(
+        [f"A first draft scored {first['viral_potential']}/100. Fix this:", *first["tips"]]
+        + ([f"Consider a hook like: {first['better_hook']}"] if first.get("better_hook") else [])
+    )
+    generate_into(retry_id, **{**kwargs, "style": (kwargs.get("style") or "") + "\n\n" + advice})
+    try:
+        second = virality.predict(retry_id)
+    except virality.PredictError:
+        second = None
+    keep = retry_id if second and second["viral_potential"] > first["viral_potential"] else show_id
+    drop = show_id if keep == retry_id else retry_id
+    with db.session_scope() as session:
+        dead = session.get(db.Slideshow, drop)
+        if dead:
+            for rel in dead.rendered + ([dead.video_path] if dead.video_path else []):
+                images.delete_file(rel)
+            session.delete(dead)
+    log.info("pre-test kept %s (%s -> %s)", keep, first["viral_potential"], second and second["viral_potential"])
+    return keep
 
 
 # --- publishing ---------------------------------------------------------------------

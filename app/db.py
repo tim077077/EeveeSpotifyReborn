@@ -97,6 +97,8 @@ class Automation(Base):
     target_country: Mapped[str] = mapped_column(String(8), default="")
     paused: Mapped[bool] = mapped_column(Boolean, default=False)
     favorite: Mapped[bool] = mapped_column(Boolean, default=False)
+    # Pre-test threshold for generated slideshows (0 = off); see virality.py.
+    min_viral_score: Mapped[int] = mapped_column(Integer, default=0)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
     schedules: Mapped[list["ScheduleJob"]] = relationship(back_populates="automation", cascade="all, delete-orphan")
 
@@ -128,6 +130,8 @@ class Slideshow(Base):
     video_path: Mapped[str] = mapped_column(Text, default="")
     fingerprint: Mapped[str] = mapped_column(Text, default="")
     error: Mapped[str] = mapped_column(Text, default="")
+    # Latest virality prediction (virality.score output), if any.
+    prediction: Mapped[dict[str, Any] | None] = mapped_column(JSON, default=None)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
     posts: Mapped[list["Post"]] = relationship(back_populates="slideshow", cascade="all, delete-orphan")
 

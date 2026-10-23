@@ -164,7 +164,8 @@ function showGrid(list) {
         ${s.slides[0] ? `<img src="${esc(s.slides[0])}" loading="lazy" alt="">` : `<div class="placeholder">${s.status === "failed" ? "failed" : '<span class="spinner"></span>'}</div>`}
         <div class="title">${esc(s.title)}</div>
         <div class="row small muted"><span class="pill ${s.status === "completed" ? "ok" : s.status === "failed" ? "bad" : ""}">${s.status}</span>
-        ${s.posts.length ? `<span class="pill live">${esc(s.posts[0].status)}</span>` : ""}</div>
+        ${s.posts.length ? `<span class="pill live">${esc(s.posts[0].status)}</span>` : ""}
+        ${s.prediction ? `<span class="pill ${scoreClass(s.prediction.viral_potential)}" title="Predicted viral potential">🔥 ${s.prediction.viral_potential}</span>` : ""}</div>
       </div>`,
     )
     .join("")}</div>`;
@@ -223,6 +224,7 @@ views.slideshow = async (id) => {
     ${s.error ? `<div class="card" style="border-color:var(--accent)">${esc(s.error)}</div>` : ""}
     ${s.status === "generating" || s.status === "rendering" ? `<p><span class="spinner"></span> Working… this page refreshes.</p>` : ""}
     <div class="slides">${s.slides.map((u) => `<a href="${esc(u)}" target="_blank"><img src="${esc(u)}?v=${Date.now()}" alt=""></a>`).join("")}</div>
+    ${s.status === "completed" ? `<div class="card" id="predict-card" style="margin-bottom:14px">${predictionHtml(s.prediction)}</div>` : ""}
 
     <div class="form-grid">
       <div class="card">
@@ -275,6 +277,7 @@ views.slideshow = async (id) => {
     setTimeout(() => location.hash === `#slideshow/${id}` && route(), 4000);
   }
 
+  wirePrediction(id, spec);
   phoneModes($("#mode"));
   if (PHONE) [$("#acct"), $("#acct").previousElementSibling].forEach((el) => (el.hidden = true));
   view.onclick = async (ev) => {
@@ -499,6 +502,8 @@ async function automationDialog(a) {
       <div><label>&nbsp;</label><a class="btn" href="#timing">Pick best times by country →</a></div>
     </div>
     ${a && !sched.simple ? `<p class="small muted">This automation uses a per-day schedule (${a.schedule.length} slots${a.target_country ? ` for ${esc(a.target_country)}` : ""}). Leave the times field empty to keep it.</p>` : ""}
+    <label>Pre-test before posting: if a new slideshow's predicted viral potential is below this, write one more version and keep the better one (0 = off)</label>
+    <input type="number" name="min_viral_score" min="0" max="100" value="${a?.min_viral_score ?? 0}" style="max-width:120px">
     <h3 style="margin-top:18px">Posting</h3>
     <div class="form-grid">
       <div><label>Mode</label><select name="post_mode">
@@ -566,6 +571,7 @@ async function automationDialog(a) {
         hooks: val("hooks").split("\n").map((s) => s.trim()).filter(Boolean),
         style: val("style"),
         timezone: val("timezone").trim(),
+        min_viral_score: Math.max(0, Math.min(100, +val("min_viral_score") || 0)),
         ...(val("times").trim() || !a || sched.simple ? { schedule: timesToCron(val("times"), val("days").trim()) } : {}),
         post_settings: {
           post_mode: val("post_mode").split(":")[0],
@@ -714,7 +720,7 @@ views.accounts = async () => {
 
 views.analytics = async () => {
   const sort = new URLSearchParams(location.hash.split("?")[1] || "").get("sort") || "recent";
-  const data = await api(`/posts?days=90&sort=${sort}&limit=200`);
+  const [data, cal] = await Promise.all([api(`/posts?days=90&sort=${sort}&limit=200`), api("/virality/calibration").catch(() => null)]);
   const s = data.statistics;
   view.innerHTML = `
     <div class="row"><h1 class="grow">Analytics</h1><button id="refresh">Refresh from TikTok</button></div>
@@ -722,6 +728,10 @@ views.analytics = async () => {
     <div class="grid">
       ${["views", "likes", "comments", "shares"].map((k) => `<div class="card"><div class="muted small">${k}</div><div class="stat">${s[k].toLocaleString()}</div></div>`).join("")}
     </div>
+    ${cal ? `<div class="card" style="margin-top:14px"><h3>Does the virality prediction work for you?</h3>
+      <p class="small">${esc(cal.summary)}</p>
+      <p class="small muted">Compares each posted slideshow's predicted score with its real views (rank correlation over ${cal.posts} posts).
+      Higgsfield-style predictors publish no such check; this one grades itself on your account.</p></div>` : ""}
     <h2>Posts</h2>
     <div class="row small">Sort: ${["recent", "views", "likes", "shares"].map((k) => `<a href="#analytics?sort=${k}" class="pill ${k === sort ? "live" : ""}">${k}</a>`).join("")}</div>
     <div class="card" style="margin-top:10px;overflow-x:auto"><table>
@@ -1046,6 +1056,64 @@ function wirePhoneCard() {
     const form = new FormData();
     form.append("file", file);
     try { await api("/backup/restore", { method: "POST", form }); toast("Restored"); route(); } catch (err) { toast(err.message, true); }
+  };
+}
+
+// ---- virality prediction -------------------------------------------------------------------
+
+const DIM_LABELS = { visual_pull: "Visual pull", curiosity: "Curiosity", clarity: "Clarity", relatability: "Relatability", shareability: "Shareability" };
+const scoreClass = (v) => (v >= 70 ? "ok" : v >= 55 ? "live" : "bad");
+
+function predictionHtml(p) {
+  if (!p) {
+    return `<div class="row"><div class="grow"><h3>Virality prediction</h3>
+      <p class="small muted">Before you post: hook strength, how many viewers swipe to the end, and what to fix. Uses your AI key (one call).</p></div>
+      <button class="primary" id="predict">Predict viral potential</button></div>`;
+  }
+  const bars = (p.slides || []).map((sl, i) => `<div class="att" title="Slide ${i + 1}: ${sl.attention}% still watching${sl.note ? " · " + esc(sl.note) : ""}">
+      <div class="att-fill ${p.biggest_drop === i + 1 ? "drop" : ""}" style="height:${Math.max(4, sl.attention)}%"></div><span>${i + 1}</span></div>`).join("");
+  return `<div class="row" style="align-items:flex-start">
+      <div class="gauge ${scoreClass(p.viral_potential)}"><b>${p.viral_potential}</b><span>/100</span></div>
+      <div class="grow"><h3 style="margin:0">${esc(p.verdict)} <span class="pill ${scoreClass(p.viral_potential)}">${esc(p.verdict_tag)}</span></h3>
+        <div class="row small" style="margin-top:6px;gap:18px">
+          <span>Hook score <b>${p.hook_score}</b></span><span>Hold rate <b>${p.hold_rate}%</b> reach the last slide</span>
+          ${p.biggest_drop ? `<span>Biggest drop after slide <b>${p.biggest_drop}</b></span>` : ""}</div></div>
+      <button id="predict">Predict again</button></div>
+    <div class="pred-grid">
+      <div><div class="small muted">Attention by slide</div><div class="att-row">${bars}</div></div>
+      <div>${Object.entries(p.dimensions || {}).map(([k, v]) => `<div class="dim"><span>${esc(DIM_LABELS[k] || k)}</span>
+        <div class="dim-bar"><div style="width:${v}%"></div></div><b>${v}</b></div>`).join("")}</div>
+    </div>
+    ${p.tips?.length ? `<div class="small" style="margin-top:10px"><b>Fix first</b><ul style="margin:4px 0 0 18px;padding:0">${p.tips.map((t) => `<li>${esc(t)}</li>`).join("")}</ul></div>` : ""}
+    ${p.better_hook ? `<div class="row small" style="margin-top:10px"><span class="grow">Stronger hook: <b>“${esc(p.better_hook)}”</b></span>
+      <button class="small" id="use-hook">Use this hook</button></div>` : ""}
+    <p class="small muted" style="margin:10px 0 0">${esc(p.basis)}. A prediction, not a promise: check Analytics to see if it tracks your real views.</p>`;
+}
+
+function wirePrediction(id, spec) {
+  const card = $("#predict-card");
+  if (!card) return;
+  card.onclick = async (ev) => {
+    const btn = ev.target.closest("button");
+    if (!btn) return;
+    if (btn.id === "predict") {
+      busy(btn, async () => {
+        const p = await api(`/slideshows/${id}/predict`, { method: "POST" });
+        card.innerHTML = predictionHtml(p);
+      });
+    } else if (btn.id === "use-hook") {
+      busy(btn, async () => {
+        const s = await api(`/slideshows/${id}`);
+        const hook = s.prediction.better_hook;
+        const next = structuredClone(spec);
+        const first = next.slides[0];
+        if (first.text_items.length) first.text_items[0].text = hook;
+        else first.text_items.push({ text: hook, font: "tiktok", font_size: "large", text_style: "outline", text_color: "white" });
+        await api(`/slideshows/${id}`, { method: "PUT", body: { spec: next } });
+        toast("Hook replaced and re-rendered. Predict again to compare.");
+        route();
+      });
+    }
   };
 }
 

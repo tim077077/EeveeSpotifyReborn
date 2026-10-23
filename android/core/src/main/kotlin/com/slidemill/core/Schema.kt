@@ -7,6 +7,7 @@ package com.slidemill.core
 sealed class Schema(val description: String) {
     class Str(description: String = "", val enum: List<String>? = null) : Schema(description)
     class Bool(description: String = "") : Schema(description)
+    class Integer(description: String = "") : Schema(description)
     class Array(val item: Schema, description: String = "") : Schema(description)
     class Object(val title: String, val props: LinkedHashMap<String, Schema>, description: String = "") : Schema(description)
 
@@ -15,6 +16,7 @@ sealed class Schema(val description: String) {
         val out: Obj = when (this) {
             is Str -> obj("type" to "string").also { o -> enum?.let { o["enum"] = it.toMutableList() } }
             is Bool -> obj("type" to "boolean")
+            is Integer -> obj("type" to "integer")
             is Array -> obj("type" to "array", "items" to item.toJson())
             is Object -> obj(
                 "type" to "object",
@@ -46,6 +48,12 @@ sealed class Schema(val description: String) {
             is Bool -> {
                 if (value !is Boolean) errors += "$where: Input should be a valid boolean"
                 value
+            }
+            is Integer -> when {
+                // Lenient like Pydantic's lax mode: 72, 72.0 and "72" are all 72.
+                value is Number && value.toDouble() == Math.floor(value.toDouble()) -> value.toLong()
+                value is String && value.trim().toLongOrNull() != null -> value.trim().toLong()
+                else -> { errors += "$where: Input should be a valid integer"; value }
             }
             is Array -> {
                 if (value !is List<*>) { errors += "$where: Input should be a valid list"; return value }

@@ -19,6 +19,9 @@ class FakeAi {
     val requests = CopyOnWriteArrayList<Pair<String, Obj>>() // path, body
     val headers = CopyOnWriteArrayList<Map<String, String>>()
     @Volatile var badFirst = 0 // how many invalid answers to give before valid ones
+    /** Hook scores the virality fake hands out in order (then 64). */
+    val hookScores = java.util.concurrent.ConcurrentLinkedQueue<Int>()
+    @Volatile var lastImages = 0
     private val server = HttpServer.create(InetSocketAddress("127.0.0.1", 0), 0)
     val url: String get() = "http://127.0.0.1:${server.address.port}"
 
@@ -26,6 +29,7 @@ class FakeAi {
         server.createContext("/") { ex ->
             val body = Json.parseObj(ex.requestBody.readBytes().toString(Charsets.UTF_8))
             requests += ex.requestURI.path to body
+            lastImages = Regex("data:image/jpeg;base64").findAll(Json.write(body)).count()
             headers += ex.requestHeaders.entries.associate { it.key.lowercase() to it.value.joinToString(",") }
             val system = if (ex.requestURI.path.endsWith("/v1/messages")) body.str("system") else body.objs("messages").first().str("content")
             val user = body.objs("messages").filter { it.str("role") == "user" }.joinToString("\n") { m ->
@@ -64,6 +68,15 @@ class FakeAi {
                     obj("role" to "body", "text_items" to arr(obj("text" to "1. dark room", "font" to "bebas", "font_size" to "medium", "text_style" to "background", "text_color" to "yellow")), "image_query" to "dark", "image_prompt" to "dark room"),
                     obj("role" to "body", "text_items" to arr(obj("text" to "2. 사랑 no screens", "font" to "cormorant", "font_size" to "small", "text_style" to "light_background", "text_color" to "pink")), "image_query" to "phone", "image_prompt" to "phone"),
                 ),
+            )
+        }
+        "performance analyst" in system -> {
+            val n = Regex("There are (\\d+) slides").find(user)?.groupValues?.get(1)?.toInt() ?: 3
+            val hook = hookScores.poll() ?: 64
+            obj(
+                "hook_score" to hook, "curiosity" to "70", "relatability" to 60, "payoff" to 55, "shareability" to 50,
+                "slides" to (1..n).map { obj("swipe_on" to 80, "visual_pull" to 60, "clarity" to 70, "note" to "ok") }.toMutableList<Any?>(),
+                "tips" to arr("Make slide 2 more specific."), "better_hook" to "the sleep habit nobody tells you",
             )
         }
         "categorize TikTok accounts" in system -> obj("niche" to "Skincare", "product_medium" to "creator")

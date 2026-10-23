@@ -12,6 +12,15 @@ It was built by tearing down how reel.farm works; see [docs/REELFARM_TEARDOWN.md
 - **AI backgrounds.** Images come from OpenAI (`gpt-image-1`), Gemini (`gemini-2.5-flash-image`), Together (FLUX) or Pollinations (free, no key, watermarked). An OpenAI or Gemini writing key makes images too, so one key covers everything.
 - **AI slideshow generator.** You give it a prompt; the AI returns hook, body and CTA slides with styling, a caption and a description. Recent titles go back into the prompt so new slideshows don't repeat old ones.
 - **Best times to post, by country.** Pick the country you want to reach and how many posts a day. You get a weekly schedule in that country's local time, with a day × hour heatmap. Multi-timezone countries (US, Canada, Brazil, Australia, Mexico, Indonesia) are weighted by population, and local weekends (Fri–Sat in Saudi Arabia, Egypt and Israel) and late-evening cultures (Spain, Latin America, the Gulf) are respected. The schedule starts from an engagement baseline and adapts as real data comes in: scraped library posts from accounts in that country and your own posts' views. One click turns on **auto-posting**: each slideshow is generated 15 minutes early and published on time, plus 0–4 random minutes, either publicly or to drafts.
+- **Virality prediction (before you post).** This is our take on Higgsfield's Virality Predictor, built for photo carousels. A vision model reads the rendered slides like a scrolling viewer. Its read is calibrated with real hooks from your library that beat or missed their account's usual views, and plain format rules check the structure (for example, a "5 habits" hook needs 5 list slides). It shows:
+  - viral potential out of 100
+  - a hook score
+  - the hold rate (the share of viewers who reach the last slide)
+  - an attention curve per slide
+  - five dimensions: visual pull, curiosity, clarity, relatability and shareability
+  - concrete fixes, and a stronger hook you can apply in one tap
+
+  Automations can **pre-test**: below your threshold, Slidemill writes one more version and keeps the better one. Analytics grades the predictor against your real views (rank correlation), so you can see whether it actually works for your account. See [docs/VIRALITY.md](docs/VIRALITY.md).
 - **Slide renderer.** TikTok-style outline text and boxed text, 7 fonts, 4 aspect ratios, grid layouts, darkening overlays and Korean/Japanese/Chinese text. Every slide can be edited in the dashboard and re-rendered.
 - **Automations.** Each automation has a list of hooks that it rotates through, a style prompt, a language, an optional product for a soft CTA, image settings and posting times (cron). Automations can be paused, resumed or run now.
 - **Images.** Upload your own image collections or import them from Pexels/Unsplash. You can also let it search stock photos for each slide automatically. Collections are cycled least-used first so images don't repeat.
@@ -109,6 +118,7 @@ app/
   pipeline.py    generate -> images -> render -> publish -> metrics
   tiktok.py      OAuth, photo posting, status, metrics
   timing.py      best posting times per country (baseline + learned)
+  virality.py    pre-post virality prediction (hook, hold rate, attention curve) + self-calibration
   browser_queue.py  queue the browser extension pulls from (caps, gaps, retries)
   scheduler.py   cron jobs per automation, in its own timezone
   crypto.py      encryption at rest for keys and tokens

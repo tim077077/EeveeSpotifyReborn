@@ -203,6 +203,10 @@ class Api(private val e: Engine, private val token: String, port: Int) : NanoHTT
             "created_at" to Db.iso(s.long("created_at")),
             "posts" to tx.where("posts") { it.str("slideshow_id") == s.str("id") }.map { postOut(it) }.toMutableList<Any?>(),
         )
+        val prediction = s.objOrNull("prediction")
+        out["prediction"] = if (full) prediction else prediction?.let {
+            obj("viral_potential" to it["viral_potential"], "hook_score" to it["hook_score"], "hold_rate" to it["hold_rate"], "verdict_tag" to it["verdict_tag"])
+        }
         if (full) out["spec"] = s.objAt("spec")
         return out
     }
@@ -223,6 +227,7 @@ class Api(private val e: Engine, private val token: String, port: Int) : NanoHTT
         "favorite" to a.bool("favorite"),
         "schedule" to a.objs("schedules").map { obj("job_id" to it.str("id"), "cron" to it.str("cron")) }.toMutableList<Any?>(),
         "next_runs" to e.scheduler.nextRuns(a).toMutableList<Any?>(),
+        "min_viral_score" to a.long("min_viral_score"),
         "created_at" to Db.iso(a.long("created_at")),
     )
 
@@ -401,6 +406,19 @@ class Api(private val e: Engine, private val token: String, port: Int) : NanoHTT
             obj("video_url" to url(rel))
         }
 
+        route("POST", "/slideshows/{id}/predict") { r ->
+            if (e.db.tx { get("slideshows", r.params[0]) } == null) throw notFound("slideshow")
+            try {
+                e.virality.predict(r.params[0])
+            } catch (x: LlmError) {
+                throw invalid(x.message ?: "AI error")
+            } catch (x: PipelineError) {
+                throw invalid(x.message ?: "can't predict")
+            }
+        }
+
+        route("GET", "/virality/calibration") { _ -> e.virality.calibration() }
+
         route("DELETE", "/slideshows/{id}") { r ->
             val s = e.db.tx { delete("slideshows", r.params[0]) } ?: throw notFound("slideshow")
             (s.strings("rendered") + listOfNotNull(s.strOrNull("video_path"))).forEach { e.images.deleteFile(it) }
@@ -443,7 +461,7 @@ class Api(private val e: Engine, private val token: String, port: Int) : NanoHTT
                     "hooks" to body.list("hooks"), "style" to body.str("style"), "language" to body.str("language"),
                     "post_settings" to body.objAt("post_settings"), "image_settings" to body.objAt("image_settings"),
                     "timezone" to body.str("timezone"), "target_country" to body.str("target_country").uppercase(),
-                    "paused" to false, "favorite" to false, "schedules" to scheds,
+                    "paused" to false, "favorite" to false, "schedules" to scheds, "min_viral_score" to body.long("min_viral_score"),
                 )).copyObj()
             }
             automationOut(a)

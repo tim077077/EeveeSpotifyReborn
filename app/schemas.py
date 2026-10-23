@@ -99,6 +99,26 @@ class SlideTextRead(BaseModel):
     slides: list[str] = Field(description="The visible overlay text of each image, in order. Empty string if none.")
 
 
+class SlideRead(BaseModel):
+    swipe_on: int = Field(description="0-100: percent of viewers who reach this slide and swipe on (last slide: who finish and engage).")
+    visual_pull: int = Field(description="0-100: how arresting and on-theme the image is.")
+    clarity: int = Field(description="0-100: how fast the text reads over the image.")
+    note: str = Field(description="At most 12 words on what helps or hurts this slide.")
+
+
+class ViralityRead(BaseModel):
+    """A viewer-simulation read of one slideshow (see app/virality.py)."""
+
+    hook_score: int = Field(description="0-100: how strongly slide 1 stops the scroll.")
+    curiosity: int = Field(description="0-100: how much the slides pull viewers to keep swiping.")
+    relatability: int = Field(description="0-100: how much the target viewer sees themselves in it.")
+    payoff: int = Field(description="0-100: whether the slides deliver what the hook promised.")
+    shareability: int = Field(description="0-100: likelihood of saves, sends and shares.")
+    slides: list[SlideRead]
+    tips: list[str] = Field(description="2-4 concrete edits that would raise the score most.")
+    better_hook: str = Field(description="A stronger slide-1 hook for this exact slideshow, same language, under 10 words.")
+
+
 class ProfileClassification(BaseModel):
     niche: str = Field(description="One or two lowercase words, e.g. fitness, skincare, personal finance, studying, relationships.")
     product_medium: Literal["app", "physical product", "digital product", "service", "creator", "none"]
@@ -169,6 +189,8 @@ class AutomationIn(BaseModel):
     schedule: list[str] = Field(default_factory=list, description="Cron expressions in `timezone`.")
     timezone: str = Field(default="", description="IANA timezone for the schedule; blank = server timezone.")
     target_country: str = ""
+    # Pre-test each slideshow; below this predicted score, write one more version and keep the better. 0 = off.
+    min_viral_score: int = Field(default=0, ge=0, le=100)
 
 
 class AutomationPatch(BaseModel):
@@ -185,6 +207,7 @@ class AutomationPatch(BaseModel):
     target_country: str | None = None
     paused: bool | None = None
     favorite: bool | None = None
+    min_viral_score: int | None = Field(default=None, ge=0, le=100)
 
 
 class StudioRequest(BaseModel):

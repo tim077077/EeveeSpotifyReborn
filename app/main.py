@@ -18,7 +18,7 @@ from fastapi.staticfiles import StaticFiles
 from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
-from . import browser_queue, db, imagegen, images, legal, library, llm, pipeline, scheduler, store, tiktok, timing
+from . import browser_queue, db, imagegen, images, legal, library, llm, pipeline, scheduler, store, tiktok, timing, virality
 from .config import STATIC_DIR, settings
 from .schemas import (
     ApplyTimingRequest,
@@ -148,7 +148,11 @@ def slideshow_out(s: db.Slideshow, full: bool = False) -> dict[str, Any]:
         "posts": [post_out(p) for p in s.posts],
     }
     if full:
+        out["prediction"] = s.prediction
         out["spec"] = s.spec
+    else:
+        p = s.prediction or None
+        out["prediction"] = {k: p.get(k) for k in ("viral_potential", "hook_score", "hold_rate", "verdict_tag")} if p else None
     return out
 
 
@@ -186,6 +190,7 @@ def automation_out(a: db.Automation) -> dict[str, Any]:
         "favorite": a.favorite,
         "schedule": [{"job_id": j.id, "cron": j.cron} for j in a.schedules],
         "next_runs": scheduler.next_runs(a.id),
+        "min_viral_score": a.min_viral_score or 0,
         "created_at": a.created_at.isoformat(),
     }
 
@@ -327,6 +332,22 @@ def make_video(slideshow_id: str, seconds_per_slide: float = 3.0, session: Sessi
     return {"video_url": pipeline.media_url(show.video_path)}
 
 
+@api.post("/slideshows/{slideshow_id}/predict")
+def predict_slideshow(slideshow_id: str) -> dict[str, Any]:
+    """Predict this slideshow's hook strength, swipe-through and viral potential before posting."""
+    try:
+        return virality.predict(slideshow_id)
+    except virality.PredictError as exc:
+        if str(exc) == "slideshow not found":
+            raise _404("slideshow") from exc
+        raise HTTPException(422, {"error": str(exc), "code": "VALIDATION_ERROR"}) from exc
+
+
+@api.get("/virality/calibration")
+def virality_calibration() -> dict[str, Any]:
+    return virality.calibration()
+
+
 @api.delete("/slideshows/{slideshow_id}")
 def delete_slideshow(slideshow_id: str, session: Session = Depends(get_session)) -> dict[str, Any]:
     show = session.get(db.Slideshow, slideshow_id)
@@ -412,6 +433,7 @@ def create_automation(body: AutomationIn, session: Session = Depends(get_session
         image_settings=body.image_settings.model_dump(),
         timezone=body.timezone,
         target_country=body.target_country.upper(),
+        min_viral_score=body.min_viral_score,
     )
     _check_timezone(body.timezone)
     session.add(automation)

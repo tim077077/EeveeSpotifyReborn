@@ -123,6 +123,21 @@ dialog::backdrop { background: rgba(0, 0, 0, 0.6); }
 }
 [hidden] { display: none !important; }
 
+/* virality prediction */
+.gauge { width: 84px; height: 84px; border-radius: 50%; border: 6px solid var(--line); display: flex; align-items: baseline; justify-content: center; padding-top: 22px; flex: none; }
+.gauge b { font-size: 26px; } .gauge span { font-size: 11px; color: var(--muted); }
+.gauge.ok { border-color: var(--ok); } .gauge.live { border-color: var(--accent-2); } .gauge.bad { border-color: var(--warn); }
+.pred-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 18px; margin-top: 14px; }
+.pred-grid > * { min-width: 0; }
+.att-row { display: flex; gap: 6px; align-items: flex-end; height: 96px; margin-top: 6px; }
+.att { flex: 1; height: 100%; display: flex; flex-direction: column; justify-content: flex-end; align-items: center; gap: 3px; font-size: 11px; color: var(--muted); }
+.att-fill { width: 100%; background: var(--accent-2); border-radius: 4px 4px 0 0; opacity: 0.85; }
+.att-fill.drop { background: var(--warn); }
+.dim { display: grid; grid-template-columns: 92px 1fr 28px; gap: 8px; align-items: center; font-size: 12px; margin: 5px 0; }
+.dim-bar { height: 8px; background: var(--panel-2); border-radius: 4px; overflow: hidden; }
+.dim-bar div { height: 100%; background: var(--accent); }
+@media (max-width: 820px) { .pred-grid { grid-template-columns: 1fr; } }
+
 /* posting-time heatmap: one-hue sequential ramp, near-zero recedes into the dark surface */
 .heat { display: grid; grid-template-columns: 44px repeat(24, minmax(0, 1fr)); gap: 2px; font-size: 11px; }
 .heat .lab { color: var(--muted); display: flex; align-items: center; }

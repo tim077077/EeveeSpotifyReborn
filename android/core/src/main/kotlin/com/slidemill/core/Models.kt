@@ -188,6 +188,8 @@ object Models {
         f("schedule", mutableListOf<Any?>(), V.strList()),
         f("timezone", "", V.str()),
         f("target_country", "", V.str()),
+        // Pre-test each slideshow; below this predicted score, write one more version and keep the better. 0 = off.
+        f("min_viral_score", 0L, V.int(0, 100)),
     ))
 
     val AUTOMATION_PATCH = Model(listOf(
@@ -204,6 +206,7 @@ object Models {
         f("target_country", null, V.nullableStr()),
         f("paused", null, V.nullableBool),
         f("favorite", null, V.nullableBool),
+        f("min_viral_score", null, { v, w -> if (v == null) null else V.int(0, 100)(v, w) }),
     ))
 
     val GENERATE = Model(listOf(

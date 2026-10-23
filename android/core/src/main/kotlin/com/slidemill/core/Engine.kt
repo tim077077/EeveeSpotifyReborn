@@ -35,6 +35,7 @@ class Engine(val platform: Platform, val dataDir: File, val token: String) {
     val pipeline = Pipeline(db, platform, mediaDir, generator, imageGen, images, renderer, queue, timing)
     val library = Library(db, store, llm, images, platform, mediaDir, pipeline)
     val scheduler = Scheduler(db, platform, pipeline) { periodic(it) }
+    val virality = Virality(db, llm, mediaDir).also { pipeline.virality = it }
 
     @Volatile var poster: PosterHooks? = null
     private var api: Api? = null

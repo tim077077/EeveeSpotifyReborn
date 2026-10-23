@@ -25,6 +25,9 @@ class Pipeline(
         const val MAX_CONCURRENT_GENERATIONS = 3
     }
 
+    /** Set by the engine; scores slideshows for pre-testing. */
+    @Volatile var virality: Virality? = null
+
     val executor = Executors.newFixedThreadPool(8)
     // Long-running orchestration (studio batches, library scrapes) waits on `executor` work, so it
     // runs on its own pool to avoid starving it.
@@ -292,6 +295,8 @@ class Pipeline(
             val futures: List<Future<*>> = ids.map { sid ->
                 executor.submit {
                     generateInto(sid, campaign.str("style"), lang, imageSettings, product, aspectRatio = imageSettings.str("aspect_ratio"))
+                    // Score every Studio slideshow so you can pick the best one to post first.
+                    virality?.let { v -> runCatching { v.predict(sid) } }
                 }
             }
             futures.forEach { it.get() }
@@ -318,7 +323,7 @@ class Pipeline(
      * then, plus a few random minutes so posts don't land on the same second every day.
      */
     fun runAutomation(automationId: String, hook: String? = null, mode: String = "export", cronId: String? = null, publishAt: Instant? = null): String? {
-        class Run(val showId: String, val kwargs: Obj, val post: Obj, val account: String?)
+        class Run(val showId: String, val kwargs: Obj, val post: Obj, val account: String?, val minScore: Int)
         val run = db.tx {
             val a = get("automations", automationId) ?: return@tx null
             if (cronId != null && a.bool("paused")) {
@@ -334,21 +339,54 @@ class Pipeline(
                 obj("style" to a.str("style"), "language" to a.str("language", "English"), "image_settings" to Models.IMAGE_SETTINGS.of(a.objAt("image_settings")), "product" to product),
                 Models.POST_SETTINGS.of(a.objAt("post_settings")),
                 a.strOrNull("tiktok_account_id"),
+                a.int("min_viral_score"),
             )
         } ?: return null
 
         generateInto(run.showId, run.kwargs.str("style"), run.kwargs.str("language"), run.kwargs.objAt("image_settings"), run.kwargs.objOrNull("product"))
+        val showId = pretest(run.showId, run.minScore, run.kwargs)
 
         val ps = run.post
         if (mode == "export" && ps.bool("auto_post", true) && (run.account != null || ps.str("post_mode") == "BROWSER" || phone)) {
             val notBefore = publishAt?.plusSeconds(Random.nextLong(0, 241))
             try {
-                publish(run.showId, ps, notBefore = notBefore)
+                publish(showId, ps, notBefore = notBefore)
             } catch (e: PipelineError) {
-                log("auto-publish failed for ${run.showId}: ${e.message}")
+                log("auto-publish failed for $showId: ${e.message}")
             }
         }
-        return run.showId
+        return showId
+    }
+
+    /**
+     * Pre-test: predict the new slideshow's virality; below `minScore`, write one more version using
+     * the predictor's tips and keep whichever scores higher (the other is deleted). 0 = off.
+     */
+    fun pretest(showId: String, minScore: Int, kwargs: Map<String, Any?>): String {
+        val v = virality ?: return showId
+        if (minScore <= 0) return showId
+        val first = runCatching { v.predict(showId) }.getOrElse { log("pre-test skipped: ${it.message}"); return showId }
+        if (first.int("viral_potential") >= minScore) return showId
+        val (prompt, automationId, cronId) = db.tx {
+            val s = get("slideshows", showId)!!
+            Triple(s.str("prompt"), s.strOrNull("automation_id"), s.strOrNull("created_by_cron_id"))
+        }
+        val retryId = db.tx { createPending(this, prompt, automationId, cronId, queued = true) }.str("id")
+        val advice = (listOf("A first draft scored ${first.int("viral_potential")}/100. Fix this:") + first.strings("tips") +
+            listOfNotNull(first.strOrNull("better_hook")?.let { "Consider a hook like: $it" })).joinToString("\n- ")
+        generateInto(retryId, kwargs.str("style") + "\n\n" + advice, kwargs.str("language", "English"), kwargs.objAt("image_settings"), kwargs.objOrNull("product"))
+        val second = runCatching { v.predict(retryId) }.getOrNull()
+        val keep = if (second != null && second.int("viral_potential") > first.int("viral_potential")) retryId else showId
+        val drop = if (keep == showId) retryId else showId
+        deleteSlideshow(drop)
+        log("pre-test kept $keep (${first.int("viral_potential")} -> ${second?.int("viral_potential")})")
+        return keep
+    }
+
+    fun deleteSlideshow(id: String) {
+        val s = db.tx { delete("slideshows", id) } ?: return
+        (s.strings("rendered") + listOfNotNull(s.strOrNull("video_path"))).forEach { images.deleteFile(it) }
+        db.tx { deleteWhere("posts") { it.str("slideshow_id") == id } }
     }
 
     // --- publishing -----------------------------------------------------------------------

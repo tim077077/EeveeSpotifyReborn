@@ -29,6 +29,9 @@ class ImageGen(private val store: Store, private val llm: Llm) {
         }
     }
 
+    /** Pause between free-tier retries (tests shorten it). */
+    @Volatile var retryDelayMs = 6_000L
+
     /** Replaces the network call (tests). */
     @Volatile var override: ((prompt: String, aspectRatio: String) -> ByteArray)? = null
 
@@ -140,9 +143,15 @@ class ImageGen(private val store: Store, private val llm: Llm) {
         val params = linkedMapOf<String, Any?>("width" to w, "height" to h, "nologo" to "true", "model" to cfg.model, "seed" to Random.nextInt(1, 1_000_000_000))
         if (cfg.apiKey.isNotEmpty()) params["token"] = cfg.apiKey
         val path = URLEncoder.encode(prompt.take(1500), "UTF-8").replace("+", "%20")
-        val resp = Net.get(Net.withQuery("https://image.pollinations.ai/prompt/$path", params), timeoutSec = 180)
-        if (resp.status >= 400 || !resp.header("content-type").startsWith("image/")) throw ImageGenError("pollinations error ${resp.status}")
-        return resp.body
+        // The free tier rate-limits back-to-back requests (one at a time per IP): back off and retry.
+        var last = 0
+        for (attempt in 0 until 4) {
+            val resp = Net.get(Net.withQuery("https://image.pollinations.ai/prompt/$path", params), timeoutSec = 180)
+            if (resp.status < 400 && resp.header("content-type").startsWith("image/")) return resp.body
+            last = resp.status
+            Thread.sleep(retryDelayMs * (attempt + 1))
+        }
+        throw ImageGenError("pollinations error $last (rate-limited; an image key avoids this)")
     }
 }
 
