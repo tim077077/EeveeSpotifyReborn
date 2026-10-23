@@ -13,4 +13,4 @@ dependencyResolutionManagement {
     }
 }
 rootProject.name = "Slidemill"
-include(":app")
+include(":app", ":core")

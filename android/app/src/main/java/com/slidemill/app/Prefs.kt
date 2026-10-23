@@ -3,7 +3,7 @@ package com.slidemill.app
 import android.content.Context
 import android.content.SharedPreferences
 
-/** App settings: where Slidemill runs, its password, and whether auto-posting is on. */
+/** App settings: the local API token and whether auto-posting is on. */
 object Prefs {
     private lateinit var prefs: SharedPreferences
 
@@ -13,21 +13,16 @@ object Prefs {
         }
     }
 
-    var server: String
-        get() = prefs.getString("server", "")!!.trimEnd('/')
-        set(v) = prefs.edit().putString("server", v.trim().trimEnd('/')).apply()
-
-    var key: String
-        get() = prefs.getString("key", "")!!
-        set(v) = prefs.edit().putString("key", v.trim()).apply()
+    /** Password for the in-app API server (127.0.0.1 only). */
+    var token: String
+        get() = prefs.getString("token", "")!!
+        set(v) = prefs.edit().putString("token", v).apply()
 
     var autoPost: Boolean
         get() = prefs.getBoolean("autoPost", false)
         set(v) = prefs.edit().putBoolean("autoPost", v).apply()
 
-    val configured: Boolean get() = server.startsWith("http") && key.isNotEmpty()
-
-    /** Job results waiting to be reported (survives the app being killed mid-post). */
+    /** Job results waiting to be recorded (survives the app being killed mid-post). */
     fun saveResult(postId: String, json: String) = prefs.edit().putString("result:$postId", json).apply()
     fun removeResult(postId: String) = prefs.edit().remove("result:$postId").apply()
     fun savedResults(): Map<String, String> =

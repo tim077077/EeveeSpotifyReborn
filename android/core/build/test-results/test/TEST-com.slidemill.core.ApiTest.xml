@@ -1,0 +1,19 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<testsuite name="com.slidemill.core.ApiTest" tests="13" skipped="0" failures="0" errors="0" timestamp="2026-10-23T21:35:07.325Z" hostname="vm" time="6.304">
+  <properties/>
+  <testcase name="studio_makes_complete_slideshows_and_an_automation" classname="com.slidemill.core.ApiTest" time="1.448"/>
+  <testcase name="auth_errors_and_dashboard" classname="com.slidemill.core.ApiTest" time="0.217"/>
+  <testcase name="apply_timing_and_validation" classname="com.slidemill.core.ApiTest" time="0.32"/>
+  <testcase name="queue_one_at_a_time_and_report" classname="com.slidemill.core.ApiTest" time="0.275"/>
+  <testcase name="collections_upload_and_pick_least_used" classname="com.slidemill.core.ApiTest" time="0.199"/>
+  <testcase name="library_import_search_analyze_remix_and_metrics" classname="com.slidemill.core.ApiTest" time="0.997"/>
+  <testcase name="backup_and_restore" classname="com.slidemill.core.ApiTest" time="0.34"/>
+  <testcase name="failures_retry_then_give_up_and_stale_claims_release" classname="com.slidemill.core.ApiTest" time="0.413"/>
+  <testcase name="gap_and_daily_cap" classname="com.slidemill.core.ApiTest" time="0.581"/>
+  <testcase name="settings_round_trip_and_test" classname="com.slidemill.core.ApiTest" time="0.164"/>
+  <testcase name="scheduled_run_generates_early_and_posts_on_time" classname="com.slidemill.core.ApiTest" time="0.455"/>
+  <testcase name="drafts_go_to_the_tiktok_app_never_public" classname="com.slidemill.core.ApiTest" time="0.191"/>
+  <testcase name="generate_edit_rerender_video_delete" classname="com.slidemill.core.ApiTest" time="0.698"/>
+  <system-out><![CDATA[]]></system-out>
+  <system-err><![CDATA[]]></system-err>
+</testsuite>

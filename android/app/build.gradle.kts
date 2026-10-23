@@ -11,8 +11,8 @@ android {
         applicationId = "com.slidemill.app"
         minSdk = 26
         targetSdk = 35
-        versionCode = 1
-        versionName = "1.0.0"
+        versionCode = 2
+        versionName = "2.0.0"
     }
 
     // A fixed key checked into the repo, so every build (local or CI) can update the installed app.
@@ -38,12 +38,22 @@ android {
     kotlinOptions {
         jvmTarget = "17"
     }
+    packaging {
+        resources.excludes += setOf("META-INF/*.kotlin_module")
+    }
     sourceSets["main"].assets.srcDir(layout.buildDirectory.dir("generated/sharedAssets"))
 }
 
-// The TikTok poster is shared with the browser extension: one source of truth.
-val copySharedPoster by tasks.registering(Copy::class) {
-    from(rootProject.file("../extension/tiktok-inject.js"))
-    into(layout.buildDirectory.dir("generated/sharedAssets"))
+dependencies {
+    implementation(project(":core"))
 }
-tasks.named("preBuild") { dependsOn(copySharedPoster) }
+
+// One source of truth, shared with the server and the browser extension: the dashboard (static/),
+// the slide fonts (fonts/) and the TikTok poster (extension/tiktok-inject.js).
+val copySharedAssets by tasks.registering(Copy::class) {
+    into(layout.buildDirectory.dir("generated/sharedAssets"))
+    from(rootProject.file("../extension/tiktok-inject.js"))
+    from(rootProject.file("../static")) { into("static") }
+    from(rootProject.file("../fonts")) { into("fonts") }
+}
+tasks.named("preBuild") { dependsOn(copySharedAssets) }

@@ -5,6 +5,8 @@ on:
     paths:
       - "android/**"
       - "extension/tiktok-inject.js"
+      - "static/**"
+      - "fonts/**"
       - ".github/workflows/android.yml"
   workflow_dispatch:
 
@@ -17,6 +19,9 @@ jobs:
         with:
           distribution: temurin
           java-version: "17"
+      - name: Test the engine
+        working-directory: android
+        run: ./gradlew :core:test --no-daemon
       - name: Build APK
         working-directory: android
         run: ./gradlew assembleRelease --no-daemon

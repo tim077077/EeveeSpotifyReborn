@@ -1,0 +1,16 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<testsuite name="com.slidemill.core.CoreTest" tests="10" skipped="0" failures="0" errors="0" timestamp="2026-10-23T21:35:13.634Z" hostname="vm" time="0.113">
+  <properties/>
+  <testcase name="provider_detection" classname="com.slidemill.core.CoreTest" time="0.002"/>
+  <testcase name="json_round_trip" classname="com.slidemill.core.CoreTest" time="0.002"/>
+  <testcase name="settings_mask_and_encrypt" classname="com.slidemill.core.CoreTest" time="0.01"/>
+  <testcase name="models_apply_defaults_and_reject_bad_values" classname="com.slidemill.core.CoreTest" time="0.002"/>
+  <testcase name="library_parsing" classname="com.slidemill.core.CoreTest" time="0.002"/>
+  <testcase name="similarity_matches_python_difflib" classname="com.slidemill.core.CoreTest" time="0.005"/>
+  <testcase name="cron_weekdays_use_standard_numbering" classname="com.slidemill.core.CoreTest" time="0.003"/>
+  <testcase name="best_times_match_the_python_engine" classname="com.slidemill.core.CoreTest" time="0.028"/>
+  <testcase name="openai_compatible_json_with_repair_retry" classname="com.slidemill.core.CoreTest" time="0.052"/>
+  <testcase name="anthropic_structured_outputs_and_fallbacks" classname="com.slidemill.core.CoreTest" time="0.007"/>
+  <system-out><![CDATA[]]></system-out>
+  <system-err><![CDATA[]]></system-err>
+</testsuite>

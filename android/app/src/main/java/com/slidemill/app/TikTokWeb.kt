@@ -32,7 +32,7 @@ object TikTokWeb {
     const val HOME = "https://www.tiktok.com/"
     private const val SERVE_PREFIX = "https://www.tiktok.com/__slidemill/"
     // Desktop Chrome: TikTok's web uploader (and the endpoints the poster uses) is the desktop site.
-    private const val DESKTOP_UA =
+    const val DESKTOP_UA =
         "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/130.0.0.0 Safari/537.36"
     private val TIKTOK_HOSTS = listOf("tiktok.com", "tiktokv.com", "tiktokcdn.com", "tiktokcdn-eu.com", "byteimg.com", "ttwstatic.com")
 

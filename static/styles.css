@@ -73,6 +73,8 @@ label { display: block; font-size: 12px; color: var(--muted); margin: 12px 0 4px
 label.check { display: flex; gap: 8px; align-items: center; color: var(--text); font-size: 13px; }
 label.check input { width: auto; }
 .form-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 0 16px; }
+.form-grid > * { min-width: 0; }
+select { max-width: 100%; text-overflow: ellipsis; }
 .slides { display: flex; gap: 10px; overflow-x: auto; padding-bottom: 8px; }
 .slides img { height: 340px; border-radius: 10px; border: 1px solid var(--line); flex: none; }
 .thumbs img { width: 100%; aspect-ratio: 4/5; object-fit: cover; border-radius: 8px; display: block; }
@@ -105,6 +107,19 @@ dialog::backdrop { background: rgba(0, 0, 0, 0.6); }
   nav { flex-direction: row; flex-wrap: wrap; }
   main { padding: 20px 16px; }
   .form-grid, .text-item { grid-template-columns: 1fr; }
+}
+@media (max-width: 820px) {
+  /* phone: one sticky row of scrollable tabs instead of a sidebar */
+  body { grid-template-columns: minmax(0, 1fr); }
+  .sidebar { position: sticky; top: 0; z-index: 5; background: var(--bg); padding: 10px 0 8px; gap: 8px; min-width: 0; }
+  .brand { padding: 0 16px; }
+  nav { flex-wrap: nowrap; overflow-x: auto; scrollbar-width: none; padding: 0 10px; }
+  nav::-webkit-scrollbar { display: none; }
+  nav a { white-space: nowrap; flex: none; }
+  .sidebar-foot { display: none; }
+  .slides img { height: 260px; }
+  .heat { grid-template-columns: 30px repeat(24, minmax(0, 1fr)); gap: 1px; font-size: 9px; }
+  dialog { padding: 16px; }
 }
 [hidden] { display: none !important; }
 

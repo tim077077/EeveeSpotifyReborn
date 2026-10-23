@@ -57,6 +57,35 @@ async function busy(btn, fn) {
 
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
+// ---- phone app mode ------------------------------------------------------------------
+// The Android app runs this same dashboard against its built-in engine (/status.platform ==
+// "android"). There is no TikTok developer app there: posts go out from the app's TikTok tab, or
+// are handed to the TikTok app to finish.
+let PHONE = false;
+const APP = window.SlidemillApp; // native bridge, only inside the Android app
+const PHONE_MODES = {
+  publish: "Post by itself from this phone (TikTok tab)",
+  draft: "Send to the TikTok app at that time (you add a sound, post)",
+};
+function phoneModes(sel) {
+  if (!PHONE || !sel) return;
+  [...sel.options].forEach((o) => {
+    const action = o.value.toLowerCase().startsWith("browser") ? o.value.split(":")[1] || "publish" : null;
+    if (action) o.textContent = PHONE_MODES[action];
+    else o.remove();
+  });
+}
+function hideOnPhone(...els) {
+  if (PHONE) els.filter(Boolean).forEach((el) => (el.closest("div") || el).setAttribute("hidden", ""));
+}
+async function detectPlatform() {
+  try { PHONE = (await api("/status")).platform === "android"; } catch { /* stays false */ }
+  if (PHONE) {
+    document.documentElement.classList.add("phone");
+    $$('nav a[data-view="accounts"]').forEach((a) => a.remove());
+  }
+}
+
 const OPTIONS = {
   font: ["tiktok", "bebas", "anton", "archivo", "cormorant", "cormorant_italic", "playfair_italic"],
   font_size: ["extra_extra_small", "extra_small", "small", "medium", "large", "extra_large"],
@@ -99,7 +128,12 @@ views.home = async () => {
   const [st, autos, shows, posts, accounts] = await Promise.all([
     api("/status"), api("/automations"), api("/slideshows?limit=8"), api("/posts?days=30"), api("/tiktok/accounts"),
   ]);
-  const steps = [
+  const steps = PHONE ? [
+    [st.ai, "Add an AI key in Settings (Claude, OpenAI, Gemini, OpenRouter, Groq, …)"],
+    [st.poster?.logged_in, "Log in to TikTok in the TikTok tab"],
+    [st.poster?.auto_post, "Turn on auto-posting in the Phone tab"],
+    [autos.automations.length > 0, "Create your first automation (or use Studio)"],
+  ] : [
     [st.ai, "Add an AI key in Settings (Claude, OpenAI, Gemini, OpenRouter, Groq, …)"],
     [st.tiktok, "Set TIKTOK_CLIENT_KEY / TIKTOK_CLIENT_SECRET"],
     [accounts.accounts.length > 0, "Connect a TikTok account"],
@@ -108,7 +142,7 @@ views.home = async () => {
   const s = posts.statistics;
   view.innerHTML = `
     <h1>Dashboard</h1>
-    <p class="sub">Last 30 days across all accounts.</p>
+    <p class="sub">Last 30 days${PHONE ? "" : " across all accounts"}.</p>
     <div class="grid">
       <div class="card"><div class="muted small">Views</div><div class="stat">${s.views.toLocaleString()}</div></div>
       <div class="card"><div class="muted small">Likes</div><div class="stat">${s.likes.toLocaleString()}</div></div>
@@ -206,7 +240,9 @@ views.slideshow = async (id) => {
         <div id="direct-opts"></div>
         <div class="row"><button class="primary" id="publish">Send to TikTok</button><button id="save-meta">Save caption</button></div>
         ${s.posts.length ? `<h3 style="margin-top:16px">History</h3>${s.posts
-          .map((p) => `<div class="small">${esc(p.created_at.slice(0, 16))} · ${esc(p.post_mode)} · <b>${esc(p.status)}</b> ${p.error ? `· ${esc(p.error)}` : ""}</div>`).join("")}` : ""}
+          .map((p) => `<div class="small">${esc(p.created_at.slice(0, 16))} · ${esc(PHONE ? (p.action === "draft" ? "TikTok app" : "phone") : p.post_mode)} · <b>${esc(p.status)}</b>
+            ${p.scheduled_for && p.status === "queued" ? `· for ${esc(new Date(p.scheduled_for).toLocaleString())}` : ""} ${p.error ? `· ${esc(p.error)}` : ""}
+            ${PHONE && p.action === "draft" && ["queued", "ready_to_share"].includes(p.status) ? `<button class="small" data-share="${p.id}">Open in TikTok</button>` : ""}</div>`).join("")}` : ""}
       </div>
       <div class="card">
         <h3>Export</h3>
@@ -239,6 +275,13 @@ views.slideshow = async (id) => {
     setTimeout(() => location.hash === `#slideshow/${id}` && route(), 4000);
   }
 
+  phoneModes($("#mode"));
+  if (PHONE) [$("#acct"), $("#acct").previousElementSibling].forEach((el) => (el.hidden = true));
+  view.onclick = async (ev) => {
+    const b = ev.target.closest("[data-share]");
+    if (!b) return;
+    try { await api(`/posts/${b.dataset.share}/share`, { method: "POST" }); route(); } catch (err) { toast(err.message, true); }
+  };
   $("#publish").onclick = (e) =>
     busy(e.currentTarget, async () => {
       const [mode, browserAction] = $("#mode").value.split(":");
@@ -251,8 +294,14 @@ views.slideshow = async (id) => {
           browser_action: browserAction || "publish", sound: $("#sound").checked, ...extra,
         },
       });
+      if (PHONE && p.action === "draft") {
+        await api(`/posts/${p.id}/share`, { method: "POST" });
+        toast("Opening TikTok. The caption is copied: paste it, add a sound and post.");
+        return route();
+      }
       toast(
         p.status === "failed" ? `Failed: ${p.error}`
+          : PHONE ? "Queued. This phone posts it within a minute (auto-posting must be on in the Phone tab)."
           : p.post_mode === "BROWSER" ? "Queued. Your browser extension picks it up within a minute (keep tiktok.com open)."
           : p.post_mode === "DIRECT_POST" ? "Posted. It can take a few minutes to appear on your profile."
           : "Sent to your TikTok drafts — open TikTok's inbox to finish it.",
@@ -263,9 +312,14 @@ views.slideshow = async (id) => {
   const refreshDirect = async () => {
     const box = $("#direct-opts");
     const m = $("#mode").value;
-    $("#publish").textContent = m === "DIRECT_POST" ? "Post to TikTok" : m.startsWith("BROWSER") ? "Queue for my browser" : "Send to drafts";
+    $("#publish").textContent = PHONE ? (m === "BROWSER:draft" ? "Open in TikTok" : "Post from this phone")
+      : m === "DIRECT_POST" ? "Post to TikTok" : m.startsWith("BROWSER") ? "Queue for my browser" : "Send to drafts";
     $("#publish").disabled = false;
     $("#sound-row").hidden = !m.startsWith("BROWSER");
+    if (m === "BROWSER:draft" && PHONE) {
+      box.innerHTML = `<p class="small muted">Opens TikTok's editor with these slides. The caption is copied to your clipboard.</p>`;
+      return;
+    }
     if (m === "BROWSER:draft") {
       box.innerHTML = `<p class="small" style="color:var(--warn)">Browser drafts aren't wired up yet: it waits in the queue (never posted publicly) until they are.</p>`;
       return;
@@ -383,7 +437,8 @@ views.automations = async () => {
         <div class="row"><h3 class="grow">${a.favorite ? "★ " : ""}${esc(a.title)}</h3>
           <span class="pill ${a.paused ? "bad" : a.schedule.length ? "live" : ""}">${a.paused ? "paused" : a.schedule.length ? "live" : "no schedule"}</span></div>
         <div class="small muted">${acct[a.tiktok_account_id] ? "@" + esc(acct[a.tiktok_account_id].username) : "no account"} · ${a.hooks.length} hooks · ${a.schedule.length} posts/day</div>
-        <div class="small muted">${a.target_country ? `🎯 ${esc(a.target_country)} · ` : ""}times in ${esc(a.timezone)} · ${esc({ DIRECT_POST: "auto-publish (API)", BROWSER: a.post_settings.browser_action === "draft" ? "browser drafts" : "browser posting" }[a.post_settings.post_mode] || "drafts (API)")}</div>
+        <div class="small muted">${a.target_country ? `🎯 ${esc(a.target_country)} · ` : ""}times in ${esc(a.timezone)} · ${esc(PHONE ? (a.post_settings.post_mode === "BROWSER" && a.post_settings.browser_action !== "draft" ? "posts from this phone" : "hands off to the TikTok app")
+          : { DIRECT_POST: "auto-publish (API)", BROWSER: a.post_settings.browser_action === "draft" ? "browser drafts" : "browser posting" }[a.post_settings.post_mode] || "drafts (API)")}</div>
         <div class="small muted">Next post: ${a.next_runs[0] ? esc(new Date(a.next_runs[0]).toLocaleString()) : "—"}</div>
         <div class="row" style="margin-top:12px">
           <button data-run="${a.id}">Run now</button>
@@ -481,6 +536,15 @@ async function automationDialog(a) {
       ${a ? `<button class="danger" value="delete" id="del-auto" formnovalidate>Delete</button>` : ""}
     </div>`;
   dlg.showModal();
+  if (PHONE) {
+    const f0 = $("#dialog-body");
+    const pm = f0.elements.post_mode;
+    if (ps.post_mode !== "BROWSER") pm.value = ps.post_mode === "DIRECT_POST" ? "BROWSER:publish" : "BROWSER:draft";
+    phoneModes(pm);
+    hideOnPhone(f0.elements.tiktok_account_id);
+    f0.elements.auto_music.closest("label").lastChild.textContent = " Add a sound from TikTok's library";
+    f0.elements.timezone.placeholder = "blank = this phone's timezone";
+  }
   const showAutoConsent = () => {
     const direct = $("#dialog-body").elements.post_mode.value === "DIRECT_POST";
     $("#auto-consent").innerHTML = direct ? consentBlock("consent-auto", { saved: ps, automatic: true }) : "";
@@ -709,6 +773,8 @@ views.studio = async () => {
         <span class="muted small">About a minute per slideshow, three at a time.</span></div>
     </div>
     <div id="studio-out"></div>`;
+  phoneModes($("#spub"));
+  hideOnPhone($("#acct"));
   $("#auto").onchange = () => ($("#auto-opts").hidden = !$("#auto").checked);
   $("#spub").onchange = () => {
     $("#studio-consent").innerHTML = $("#spub").value === "1" ? consentBlock("consent-studio", { automatic: true }) : "";
@@ -863,8 +929,9 @@ views.settings = async () => {
     Object.entries(data.llm_providers).map(([k, p]) => `<option value="${k}" ${k === cur ? "selected" : ""}>${esc(p.label)}</option>`).join("");
   view.innerHTML = `
     <h1>Settings</h1>
-    <p class="sub">Paste any AI key — the provider is detected from it. Keys are stored in this server's database.</p>
-    <div class="card" id="browser-poster">
+    <p class="sub">Paste any AI key — the provider is detected from it. ${PHONE ? "Keys are encrypted on this phone." : "Keys are stored in this server's database."}</p>
+    ${PHONE ? phoneCard(ext, field) : ""}
+    <div class="card" id="browser-poster" ${PHONE ? "hidden" : ""}>
       <h3>Browser poster (no TikTok developer app needed)</h3>
       <p class="small">
         <span class="pill ${online ? "ok" : "bad"}">${online ? "extension online" : "extension offline"}</span>
@@ -912,6 +979,7 @@ views.settings = async () => {
     </div>
     <div class="row" style="margin-top:16px"><button class="primary" id="save">Save</button><button id="test">Test AI + images</button></div>
     <div id="test-out"></div>`;
+  if (PHONE) wirePhoneCard();
   $("#ext-download").onclick = (e) =>
     busy(e.currentTarget, async () => {
       const res = await fetch("/api/v1/extension/download", { headers: storedKey() ? { Authorization: `Bearer ${storedKey()}` } : {} });
@@ -924,7 +992,7 @@ views.settings = async () => {
     busy(e.currentTarget, async () => {
       const values = {};
       $$("input, select", view).forEach((el) => {
-        if (!el.name) return;
+        if (!el.name || el.closest("[hidden]")) return;
         if (el.type === "password" && !el.value) return; // keep stored secret
         values[el.name] = el.name === "image_provider" && el.value === "auto" ? "" : el.value;
       });
@@ -940,6 +1008,46 @@ views.settings = async () => {
         <div>${r.ai.ok ? "✅" : "❌"} AI: ${esc(r.ai.detail)}</div><div>${r.images.ok ? "✅" : "❌"} Images: ${esc(r.images.detail)}</div></div>`;
     });
 };
+
+function phoneCard(ext, field) {
+  return `<div class="card" id="phone-poster">
+      <h3>Posting from this phone</h3>
+      <p class="small" id="poster-line"><span class="spinner"></span></p>
+      <p class="small">${ext.queued} queued · ${ext.done_last_24h}/${ext.posts_per_day} posted in the last 24h
+        ${ext.waiting_to_share ? ` · ${ext.waiting_to_share} waiting to hand to the TikTok app` : ""}
+        ${ext.next_due_at ? ` · next at ${esc(new Date(ext.next_due_at).toLocaleString())}` : ""}</p>
+      <div class="form-grid">
+        ${field("browser_posts_per_day", "Max posts per 24h", "text", "6")}
+        ${field("browser_min_gap_minutes", "Minimum minutes between posts", "text", "20")}
+        ${field("browser_username", "Your TikTok @username (for view counts, if not detected)", "text", "")}
+      </div>
+      <div class="row" style="margin-top:12px">
+        <button type="button" id="open-tiktok">Open the TikTok tab</button>
+        <button type="button" id="backup">Back up everything</button>
+        <label class="btn" style="margin:0">Restore a backup<input type="file" id="restore" accept=".zip,application/zip" hidden></label>
+      </div>
+      <p class="small muted">Auto-posting uses TikTok's private web endpoints from the TikTok tab, which is against TikTok's terms;
+        keep the limits low. "Send to the TikTok app" posts are finished by you in TikTok and carry no such risk.
+        A backup holds your slideshows and settings; API keys are tied to this phone, so re-enter them after restoring elsewhere.</p>
+    </div>`;
+}
+
+function wirePhoneCard() {
+  api("/status").then((st) => {
+    const p = st.poster || {};
+    $("#poster-line").innerHTML = `<span class="pill ${p.logged_in ? "ok" : "bad"}">${p.logged_in ? `TikTok: @${esc(p.username)}` : "not logged in to TikTok"}</span>
+      <span class="pill ${p.auto_post ? "ok" : "bad"}">${p.auto_post ? "auto-posting on" : "auto-posting off (Phone tab)"}</span> ${esc(p.status || "")}`;
+  }).catch(() => {});
+  $("#open-tiktok").onclick = () => APP?.openTikTok();
+  $("#backup").onclick = () => (APP ? APP.saveBackup() : toast("Only in the app", true));
+  $("#restore").onchange = async (e) => {
+    const file = e.target.files[0];
+    if (!file || !confirm("Replace everything on this phone with this backup?")) return;
+    const form = new FormData();
+    form.append("file", file);
+    try { await api("/backup/restore", { method: "POST", form }); toast("Restored"); route(); } catch (err) { toast(err.message, true); }
+  };
+}
 
 // ---- TikTok direct-post consent (content-sharing guidelines) ---------------------------
 
@@ -1085,6 +1193,8 @@ views.timing = async () => {
       : `<p class="muted">Create an automation first (or use <a href="#studio">Studio</a> and tick "keep it going").</p>`}
     </div>`;
   attachTips(view);
+  phoneModes($("#pub"));
+  hideOnPhone($("#tacct"));
   const load = async () => {
     try { localStorage.setItem("slidemill_country", $("#country").value); } catch { /* ignore */ }
     const qs = new URLSearchParams({ country: $("#country").value, posts_per_day: $("#ppd").value });
@@ -1147,11 +1257,10 @@ async function statusPills() {
     const st = await api("/status");
     $("#status-pills").innerHTML = [
       [st.ai ? `AI: ${st.ai_provider}` : "AI", st.ai], ["Images", !st.image_generation.startsWith("unavailable")],
-      ["TikTok", st.tiktok], ["Apify", st.apify],
+      ["TikTok", PHONE ? st.poster?.logged_in : st.tiktok], ["Apify", st.apify],
     ].map(([k, ok]) => `<span class="pill ${ok ? "ok" : "bad"}">${k}</span>`).join("");
   } catch { /* shown by the view */ }
 }
 
 window.addEventListener("hashchange", route);
-route();
-statusPills();
+detectPlatform().then(() => { route(); statusPills(); });
