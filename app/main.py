@@ -152,7 +152,7 @@ def slideshow_out(s: db.Slideshow, full: bool = False) -> dict[str, Any]:
         out["spec"] = s.spec
     else:
         p = s.prediction or None
-        out["prediction"] = {k: p.get(k) for k in ("viral_potential", "hook_score", "hold_rate", "verdict_tag")} if p else None
+        out["prediction"] = {k: p.get(k) for k in ("viral_potential", "hook_score", "hold_rate", "verdict_tag", "attention")} if p else None
     return out
 
 

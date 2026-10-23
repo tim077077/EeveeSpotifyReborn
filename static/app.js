@@ -48,11 +48,12 @@ function toast(msg, error = false) {
 
 async function busy(btn, fn) {
   btn.disabled = true;
+  btn.setAttribute("aria-busy", "true");
   const label = btn.innerHTML;
   btn.innerHTML = `<span class="spinner"></span> ${label}`;
   try { return await fn(); }
   catch (e) { toast(e.message, true); }
-  finally { btn.disabled = false; btn.innerHTML = label; }
+  finally { btn.disabled = false; btn.removeAttribute("aria-busy"); btn.innerHTML = label; }
 }
 
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
@@ -120,62 +121,164 @@ function cronToTimes(crons) {
   return { times: times.join(", "), days: crons[0]?.split(" ")[4] ?? "*" };
 }
 
+// ---- shared pieces ---------------------------------------------------------------------
+
+const icon = (name, size = 16) => `<svg width="${size}" height="${size}" aria-hidden="true"><use href="#i-${name}"/></svg>`;
+const n0 = (v) => Number(v ?? 0).toLocaleString();
+
+function titleRow(title, sub = "", actions = "") {
+  return `<div class="title-row"><div><h1>${title}</h1>${sub ? `<p class="sub">${sub}</p>` : ""}</div>${actions ? `<div class="actions">${actions}</div>` : ""}</div>`;
+}
+
+const kpi = (label, value, cap) => `<div class="kpi"><div class="label">${label}</div><b>${value}</b><div class="cap">${cap}</div></div>`;
+
+// "Today 17:00", "Tomorrow 09:30", "Thu 20:00", "12 Nov 18:00"
+function whenText(iso) {
+  const d = new Date(iso);
+  if (Number.isNaN(+d)) return { day: "", time: "" };
+  const now = new Date();
+  const day0 = (x) => new Date(x.getFullYear(), x.getMonth(), x.getDate());
+  const diff = Math.round((day0(d) - day0(now)) / 86400000);
+  const time = d.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
+  const day = diff === 0 ? "Today" : diff === 1 ? "Tomorrow" : diff > 1 && diff < 7 ? d.toLocaleDateString([], { weekday: "short" }) : d.toLocaleDateString([], { day: "numeric", month: "short" });
+  return { day, time };
+}
+
+// The signature element: a slideshow's predicted swipe-through (share of viewers left at each slide).
+function swipeStrip(att, cls = "", drop = null) {
+  if (!att?.length) return "";
+  return `<div class="swipe ${cls}" role="img" aria-label="Predicted share of viewers still watching at each slide: ${att.join("%, ")}%">${att
+    .map((a, i) => `<i class="${drop === i + 1 ? "drop" : ""}" style="height:${Math.max(6, a)}%" title="Slide ${i + 1}: ${a}% still watching"></i>`).join("")}</div>`;
+}
+
+function gauge(v) {
+  const r = 38, c = 2 * Math.PI * r;
+  return `<div class="gauge" role="img" aria-label="Viral potential ${v} out of 100">
+    <svg width="84" height="84" viewBox="0 0 84 84" aria-hidden="true"><circle cx="42" cy="42" r="${r}" fill="none" stroke="var(--raised)" stroke-width="5"/>
+    <circle cx="42" cy="42" r="${r}" fill="none" stroke="var(--accent)" stroke-width="5" stroke-linecap="round" stroke-dasharray="${((c * v) / 100).toFixed(1)} ${c.toFixed(1)}"/></svg>
+    <div><b>${v}</b><span>of 100</span></div></div>`;
+}
+
+const POST_LABELS = { queued: "Queued", posting: "Posting", published: "Posted", sent_to_drafts: "Sent to TikTok", ready_to_share: "Ready to post", failed: "Failed", processing: "Processing", pending: "Pending" };
+
+function showStatus(s) {
+  if (s.status === "failed") return `<span class="pill err">Failed</span>`;
+  if (s.status !== "completed") return `<span class="pill"><span class="spinner"></span>${esc(s.status === "queued" ? "Waiting" : "Making")}</span>`;
+  const p = s.posts?.[0];
+  if (!p) return "";
+  return `<span class="pill ${p.status === "published" ? "ok" : p.status === "failed" ? "err" : ""}">${esc(POST_LABELS[p.status] || p.status)}</span>`;
+}
+
+const scorePill = (p) => (p ? `<span class="pill score" title="Predicted viral potential, out of 100">Score ${p.viral_potential}</span>` : "");
+
+function modeLabel(ps = {}) {
+  if (ps.post_mode === "BROWSER") return ps.browser_action === "draft" ? "Hands off to the TikTok app" : PHONE ? "Posts by itself from this phone" : "Posts from your browser";
+  return ps.post_mode === "DIRECT_POST" ? "Posts by itself (TikTok API)" : "Goes to TikTok drafts (API)";
+}
+
 // ---- views ---------------------------------------------------------------------------
 
 const views = {};
 
 views.home = async () => {
-  const [st, autos, shows, posts, accounts] = await Promise.all([
-    api("/status"), api("/automations"), api("/slideshows?limit=8"), api("/posts?days=30"), api("/tiktok/accounts"),
+  const [st, autos, shows, posts, queue, accounts] = await Promise.all([
+    api("/status"), api("/automations"), api("/slideshows?limit=5"), api("/posts?days=30&limit=200"), api("/extension/status"),
+    PHONE ? Promise.resolve({ accounts: [] }) : api("/tiktok/accounts"),
   ]);
   const steps = PHONE ? [
-    [st.ai, "Add an AI key in Settings (Claude, OpenAI, Gemini, OpenRouter, Groq, …)"],
-    [st.poster?.logged_in, "Log in to TikTok in the TikTok tab"],
-    [st.poster?.auto_post, "Turn on auto-posting in the Phone tab"],
-    [autos.automations.length > 0, "Create your first automation (or use Studio)"],
+    [st.ai, "Add an AI key", "#settings"],
+    [st.poster?.logged_in, "Log in on the TikTok tab", null],
+    [st.poster?.auto_post, "Turn on auto-posting (Phone tab)", null],
+    [autos.automations.length > 0, "Create your first automation", "#studio"],
   ] : [
-    [st.ai, "Add an AI key in Settings (Claude, OpenAI, Gemini, OpenRouter, Groq, …)"],
-    [st.tiktok, "Set TIKTOK_CLIENT_KEY / TIKTOK_CLIENT_SECRET"],
-    [accounts.accounts.length > 0, "Connect a TikTok account"],
-    [autos.automations.length > 0, "Create your first automation"],
+    [st.ai, "Add an AI key", "#settings"],
+    [st.tiktok, "Add your TikTok app keys to the server (see README)", null],
+    [accounts.accounts.length > 0, "Connect a TikTok account", "#accounts"],
+    [autos.automations.length > 0, "Create your first automation", "#studio"],
   ];
+  const done = steps.filter(([ok]) => ok).length;
   const s = posts.statistics;
+  const live = autos.automations.filter((a) => !a.paused && a.schedule.length);
+  // Up next: the next runs of every live automation, soonest first.
+  const upcoming = live
+    .flatMap((a) => a.next_runs.slice(0, 3).map((t) => ({ t, a })))
+    .sort((x, y) => new Date(x.t) - new Date(y.t))
+    .slice(0, 6);
+  const next = upcoming[0];
+  const finding = next
+    ? `Next post: ${esc(next.a.title)}, ${esc(whenText(next.t).day.toLowerCase())} at ${esc(whenText(next.t).time)}.${queue.queued ? ` ${queue.queued} already waiting in the queue.` : ""}`
+    : queue.queued ? `${queue.queued} slideshow${queue.queued === 1 ? "" : "s"} waiting in the queue; nothing else scheduled.` : "Nothing scheduled yet.";
+
+  // views per posting day, last 30 days (honest zeros)
+  const days = [...Array(30).keys()].map((i) => { const d = new Date(); d.setHours(0, 0, 0, 0); d.setDate(d.getDate() - 29 + i); return d; });
+  const perDay = days.map((d) => posts.posts.filter((p) => new Date(p.created_at).toDateString() === d.toDateString()).reduce((t, p) => t + p.views, 0));
+
   view.innerHTML = `
-    <h1>Dashboard</h1>
-    <p class="sub">Last 30 days${PHONE ? "" : " across all accounts"}.</p>
-    <div class="grid">
-      <div class="card"><div class="muted small">Views</div><div class="stat">${s.views.toLocaleString()}</div></div>
-      <div class="card"><div class="muted small">Likes</div><div class="stat">${s.likes.toLocaleString()}</div></div>
-      <div class="card"><div class="muted small">Posts</div><div class="stat">${s.total_posts}</div></div>
-      <div class="card"><div class="muted small">Live automations</div><div class="stat">${autos.automations.filter((a) => !a.paused && a.schedule.length).length}</div></div>
+    ${titleRow("Today", finding, `<a class="btn primary" href="#studio">Make slideshows</a>`)}
+    <div class="overview">
+      <div class="stack">
+        <div class="kpis" style="--n:4">
+          ${kpi("Views", n0(s.views), "last 30 days")}
+          ${kpi("Likes", n0(s.likes), "last 30 days")}
+          ${kpi("Posted", n0(s.total_posts), "last 30 days")}
+          ${kpi("Waiting to post", n0(queue.queued), queue.next_due_at ? `next ${esc(whenText(queue.next_due_at).day.toLowerCase())} ${esc(whenText(queue.next_due_at).time)}` : "in the queue now")}
+        </div>
+        <section class="card">
+          <div class="card-head"><h2>Up next</h2><span class="meta">${live.length} live automation${live.length === 1 ? "" : "s"}</span></div>
+          ${upcoming.length ? `<div class="list">${upcoming.map(({ t, a }) => {
+            const w = whenText(t);
+            return `<a class="list-row" href="#automations"><div class="when" style="text-align:left;min-width:84px"><b>${esc(w.time)}</b><small>${esc(w.day)}</small></div>
+              <div class="what"><b>${esc(a.title)}</b><span>${a.target_country ? `${esc(a.target_country)} · ` : ""}${esc(modeLabel(a.post_settings))}${a.min_viral_score ? ` · pre-tested to ${a.min_viral_score}+` : ""}</span></div></a>`;
+          }).join("")}</div>`
+            : `<div class="empty">Nothing scheduled. Make a series in <a href="#studio">Studio</a> and tick “keep it going”, or give an <a href="#automations">automation</a> posting times.</div>`}
+        </section>
+      </div>
+      <aside class="stack rail">
+        ${done < steps.length ? `<section class="card">
+          <div class="card-head"><h2>Finish setting up</h2><span class="meta">${done} of ${steps.length}</span></div>
+          <div class="list">${steps.map(([ok, text, href]) => `<div class="list-row" style="min-height:40px">
+            <span style="color:${ok ? "var(--positive)" : "var(--faint)"};display:inline-flex">${icon(ok ? "check" : "todo")}</span>
+            <div class="what">${href && !ok ? `<a href="${href}">${esc(text)}</a>` : `<span style="color:${ok ? "var(--muted)" : "var(--text)"};font-size:14px">${esc(text)}</span>`}</div></div>`).join("")}</div>
+        </section>` : ""}
+        <section class="card fill">
+          <div class="card-head"><h2>Recent slideshows</h2></div>
+          ${shows.slideshows.length ? `<div class="list">${shows.slideshows.map((x) => `<a class="list-row" href="#slideshow/${x.id}">
+            ${x.slides[0] ? `<img class="thumb" src="${esc(x.slides[0])}" alt="" loading="lazy">` : `<span class="thumb"></span>`}
+            <div class="what"><b>${esc(x.title)}</b><span>${showStatus(x) ? esc(x.posts?.[0] ? POST_LABELS[x.posts[0].status] || x.posts[0].status : x.status) : "Not posted"}</span></div>
+            ${scorePill(x.prediction)}</a>`).join("")}</div>`
+            : `<div class="empty">No slideshows yet. <a href="#studio">Make some in Studio</a>.</div>`}
+          <a class="btn small" href="#slideshows" style="align-self:flex-start;margin-top:12px">View all</a>
+        </section>
+      </aside>
     </div>
-    ${steps.some(([ok]) => !ok) ? `<h2>Setup</h2><div class="card">${steps
-      .map(([ok, text]) => `<div>${ok ? "✅" : "⬜"} ${esc(text)}</div>`).join("")}</div>` : ""}
-    <h2>Recent slideshows</h2>
-    ${showGrid(shows.slideshows)}
-  `;
+    <section class="card" style="margin-top:var(--gap)">
+      <div class="card-head"><h2>Views by posting day</h2><span class="meta">last 30 days, ${n0(s.views)} total</span></div>
+      <div id="views-chart"></div>
+    </section>`;
+  if (window.Charts) {
+    Charts.bars($("#views-chart"), {
+      labels: days.map((d) => d.toLocaleDateString([], { day: "numeric", month: "short" })),
+      values: perDay, height: 180, format: Charts.fmt.int, minTop: 4,
+    });
+  }
 };
 
 function showGrid(list) {
-  if (!list.length) return `<p class="muted">Nothing yet. <a href="#create">Create a slideshow</a>.</p>`;
+  if (!list.length) return `<div class="empty">No slideshows yet. <a href="#studio">Make some in Studio</a> or <a href="#create">write one</a>.</div>`;
   return `<div class="grid thumbs">${list
-    .map(
-      (s) => `<div class="card show-card" onclick="location.hash='#slideshow/${s.id}'">
-        ${s.slides[0] ? `<img src="${esc(s.slides[0])}" loading="lazy" alt="">` : `<div class="placeholder">${s.status === "failed" ? "failed" : '<span class="spinner"></span>'}</div>`}
+    .map((s) => `<a class="show-card" href="#slideshow/${s.id}">
+        ${s.slides[0] ? `<img src="${esc(s.slides[0])}" loading="lazy" alt="">` : `<div class="placeholder">${s.status === "failed" ? "Failed" : '<span class="spinner"></span>'}</div>`}
         <div class="title">${esc(s.title)}</div>
-        <div class="row small muted"><span class="pill ${s.status === "completed" ? "ok" : s.status === "failed" ? "bad" : ""}">${s.status}</span>
-        ${s.posts.length ? `<span class="pill live">${esc(s.posts[0].status)}</span>` : ""}
-        ${s.prediction ? `<span class="pill ${scoreClass(s.prediction.viral_potential)}" title="Predicted viral potential">🔥 ${s.prediction.viral_potential}</span>` : ""}</div>
-      </div>`,
-    )
+        ${swipeStrip(s.prediction?.attention)}
+        <div class="row small">${showStatus(s)}${scorePill(s.prediction)}</div>
+      </a>`)
     .join("")}</div>`;
 }
 
 views.create = async () => {
   const autos = await api("/automations");
   view.innerHTML = `
-    <h1>Create slideshow</h1>
-    <p class="sub">Describe the slideshow. Include topic, slide count, tone, fonts or text placement if you care.</p>
+    ${titleRow("Create slideshow", "Describe one slideshow: topic, slide count, tone, and fonts or text placement if you care.")}
     <div class="card">
       <label>Prompt</label>
       <textarea id="prompt" placeholder="7 slides: morning habits that actually helped my focus. Casual, first person. Hook in big white outline text, body text in white background boxes at the top."></textarea>
@@ -215,71 +318,71 @@ views.create = async () => {
 };
 
 views.slideshow = async (id) => {
-  const [s, accounts] = await Promise.all([api(`/slideshows/${id}`), api("/tiktok/accounts")]);
+  const [s, accounts] = await Promise.all([api(`/slideshows/${id}`), PHONE ? Promise.resolve({ accounts: [] }) : api("/tiktok/accounts")]);
   const spec = s.spec || { slides: [] };
+  const working = s.status === "generating" || s.status === "rendering" || s.status === "queued";
   view.innerHTML = `
-    <div class="row"><h1 class="grow">${esc(s.title)}</h1>
-      <span class="pill ${s.status === "completed" ? "ok" : "bad"}">${s.status}</span></div>
-    <p class="sub">${esc(s.prompt)}</p>
-    ${s.error ? `<div class="card" style="border-color:var(--accent)">${esc(s.error)}</div>` : ""}
-    ${s.status === "generating" || s.status === "rendering" ? `<p><span class="spinner"></span> Working… this page refreshes.</p>` : ""}
-    <div class="slides">${s.slides.map((u) => `<a href="${esc(u)}" target="_blank"><img src="${esc(u)}?v=${Date.now()}" alt=""></a>`).join("")}</div>
-    ${s.status === "completed" ? `<div class="card" id="predict-card" style="margin-bottom:14px">${predictionHtml(s.prediction)}</div>` : ""}
+    ${titleRow(esc(s.title), esc(s.prompt), showStatus(s))}
+    ${s.error ? `<div class="card" role="alert"><b>This slideshow failed.</b> <span class="muted">${esc(s.error)}</span></div>` : ""}
+    ${working ? `<p class="muted"><span class="spinner"></span> Writing the slides and making the images. This page refreshes by itself.</p>` : ""}
+    <div class="slides">${s.slides.map((u, i) => `<a href="${esc(u)}" target="_blank" aria-label="Slide ${i + 1}, full size"><img src="${esc(u)}?v=${Date.now()}" alt="Slide ${i + 1}"></a>`).join("")}</div>
 
-    <div class="form-grid">
-      <div class="card">
-        <h3>Post</h3>
-        <label>Caption (TikTok title, max 89)</label><input id="caption" maxlength="89" value="${esc(s.caption)}">
-        <label>Description</label><textarea id="description">${esc(s.description)}</textarea>
-        <label>Account</label><select id="acct">${accounts.accounts
-          .map((a) => `<option value="${a.id}">@${esc(a.username || a.display_name)}</option>`).join("") || "<option value=''>No accounts connected</option>"}</select>
-        <label>How</label><select id="mode">
-          <option value="BROWSER:publish">Post from my browser (extension)</option>
-          <option value="BROWSER:draft">Save as draft from my browser (extension)</option>
-          <option value="MEDIA_UPLOAD">Send to my TikTok drafts (official API)</option>
-          <option value="DIRECT_POST">Post now (official API)</option></select>
-        <label class="check" id="sound-row"><input type="checkbox" id="sound" checked> Add a sound from TikTok's web library</label>
-        <div id="direct-opts"></div>
-        <div class="row"><button class="primary" id="publish">Send to TikTok</button><button id="save-meta">Save caption</button></div>
-        ${s.posts.length ? `<h3 style="margin-top:16px">History</h3>${s.posts
-          .map((p) => `<div class="small">${esc(p.created_at.slice(0, 16))} · ${esc(PHONE ? (p.action === "draft" ? "TikTok app" : "phone") : p.post_mode)} · <b>${esc(p.status)}</b>
-            ${p.scheduled_for && p.status === "queued" ? `· for ${esc(new Date(p.scheduled_for).toLocaleString())}` : ""} ${p.error ? `· ${esc(p.error)}` : ""}
-            ${PHONE && p.action === "draft" && ["queued", "ready_to_share"].includes(p.status) ? `<button class="small" data-share="${p.id}">Open in TikTok</button>` : ""}</div>`).join("")}` : ""}
+    <div class="detail">
+      <div class="stack">
+        ${s.status === "completed" ? `<section class="card" id="predict-card">${predictionHtml(s.prediction)}</section>` : ""}
+        <section class="card">
+          <div class="card-head"><h2>Edit slides</h2><span class="meta">${spec.slides.length} slides</span></div>
+          <div class="form-grid">
+            <div><label>Aspect ratio</label>${select("aspect_ratio", ["4:5", "9:16", "1:1", "16:9"], spec.aspect_ratio)}</div>
+            <div><label>Default text position</label>${select("text_position", ["top", "center", "bottom"], spec.text_position)}</div>
+            <div><label>Darken the photo (%)</label><input type="number" name="background_opacity" min="0" max="100" value="${spec.background_opacity ?? 20}"></div>
+            <div>
+              <label class="check" style="margin-top:16px"><input type="checkbox" name="overlay_hook" ${spec.overlay_hook ? "checked" : ""}> Darken the hook slide</label>
+              <label class="check"><input type="checkbox" name="overlay_body" ${spec.overlay_body ? "checked" : ""}> Darken the other slides</label>
+              <label class="check"><input type="checkbox" name="keep_original_aspect_ratio" ${spec.keep_original_aspect_ratio ? "checked" : ""}> Keep each photo's own shape</label>
+            </div>
+          </div>
+          <div id="slide-editors" style="margin-top:16px">${spec.slides.map((sl, i) => slideEditor(sl, i, s.slides[i])).join("")}</div>
+          <button id="rerender">Save and re-render</button>
+        </section>
       </div>
-      <div class="card">
-        <h3>Export</h3>
-        <div class="row">
-          ${s.slides.map((u, i) => `<a class="btn small" href="${esc(u)}" download>Slide ${i + 1}</a>`).join("")}
-        </div>
-        <div class="row" style="margin-top:12px"><button id="video">Export MP4</button>
-          ${s.video_url ? `<a class="btn" href="${esc(s.video_url)}" target="_blank">Open video</a>` : ""}</div>
-        <div class="row" style="margin-top:12px"><button class="danger" id="delete">Delete slideshow</button></div>
-      </div>
-    </div>
-
-    <h2>Edit slides</h2>
-    <div class="card">
-      <div class="form-grid">
-        <div><label>Aspect ratio</label>${select("aspect_ratio", ["4:5", "9:16", "1:1", "16:9"], spec.aspect_ratio)}</div>
-        <div><label>Default text position</label>${select("text_position", ["top", "center", "bottom"], spec.text_position)}</div>
-        <div><label>Darken overlay opacity (%)</label><input type="number" name="background_opacity" min="0" max="100" value="${spec.background_opacity ?? 20}"></div>
-        <div><label>&nbsp;</label>
-          <label class="check"><input type="checkbox" name="overlay_hook" ${spec.overlay_hook ? "checked" : ""}> Overlay on hook</label>
-          <label class="check"><input type="checkbox" name="overlay_body" ${spec.overlay_body ? "checked" : ""}> Overlay on body</label>
-          <label class="check"><input type="checkbox" name="keep_original_aspect_ratio" ${spec.keep_original_aspect_ratio ? "checked" : ""}> Keep original image ratio</label>
-        </div>
-      </div>
-      <div id="slide-editors">${spec.slides.map((sl, i) => slideEditor(sl, i, s.slides[i])).join("")}</div>
-      <button class="primary" id="rerender">Save & re-render</button>
+      <aside class="stack">
+        <section class="card" id="post-card">
+          <h2>Post</h2>
+          <label for="caption">Title on TikTok<span class="hint">At most 89 characters.</span></label><input id="caption" maxlength="89" value="${esc(s.caption)}">
+          <label for="description">Caption and hashtags</label><textarea id="description">${esc(s.description)}</textarea>
+          <label for="acct">Account</label><select id="acct">${accounts.accounts
+            .map((a) => `<option value="${a.id}">@${esc(a.username || a.display_name)}</option>`).join("") || "<option value=''>No accounts connected</option>"}</select>
+          <label for="mode">How</label><select id="mode">
+            <option value="BROWSER:publish">Post from my browser (extension)</option>
+            <option value="BROWSER:draft">Save as draft from my browser (extension)</option>
+            <option value="MEDIA_UPLOAD">Send to my TikTok drafts (official API)</option>
+            <option value="DIRECT_POST">Post now (official API)</option></select>
+          <label class="check" id="sound-row"><input type="checkbox" id="sound" checked> Add a sound from TikTok's library</label>
+          <div id="direct-opts"></div>
+          <div class="row" style="margin-top:16px"><button class="primary" id="publish">Send to TikTok</button><button id="save-meta">Save caption</button></div>
+          ${s.posts.length ? `<h3 style="margin-top:22px">History</h3><div class="list">${s.posts
+            .map((p) => `<div class="list-row" style="min-height:44px"><div class="what"><b>${esc(POST_LABELS[p.status] || p.status)}</b>
+              <span>${esc(new Date(p.created_at).toLocaleString())} · ${esc(PHONE ? (p.action === "draft" ? "TikTok app" : "from this phone") : p.post_mode)}${p.scheduled_for && p.status === "queued" ? ` · for ${esc(new Date(p.scheduled_for).toLocaleString())}` : ""}${p.error ? ` · ${esc(p.error)}` : ""}</span></div>
+              ${PHONE && p.action === "draft" && ["queued", "ready_to_share"].includes(p.status) ? `<button class="small" data-share="${p.id}">Open in TikTok</button>` : ""}</div>`).join("")}</div>` : ""}
+        </section>
+        <section class="card">
+          <h2>Export</h2>
+          <div class="row">${s.slides.map((u, i) => `<a class="btn small" href="${esc(u)}" download>Slide ${i + 1}</a>`).join("")}</div>
+          <div class="row" style="margin-top:12px"><button id="video">Export MP4</button>
+            ${s.video_url ? `<a class="btn" href="${esc(s.video_url)}" target="_blank">Open video</a>` : ""}</div>
+          <div class="row" style="margin-top:12px"><button class="danger" id="delete">Delete slideshow</button></div>
+        </section>
+      </aside>
     </div>`;
 
-  if (s.status === "generating" || s.status === "rendering") {
+  if (working) {
     setTimeout(() => location.hash === `#slideshow/${id}` && route(), 4000);
   }
 
   wirePrediction(id, spec);
   phoneModes($("#mode"));
-  if (PHONE) [$("#acct"), $("#acct").previousElementSibling].forEach((el) => (el.hidden = true));
+  if (PHONE) [$("#acct"), $("label[for=acct]")].forEach((el) => (el.hidden = true));
   view.onclick = async (ev) => {
     const b = ev.target.closest("[data-share]");
     if (!b) return;
@@ -307,7 +410,7 @@ views.slideshow = async (id) => {
           : PHONE ? "Queued. This phone posts it within a minute (auto-posting must be on in the Phone tab)."
           : p.post_mode === "BROWSER" ? "Queued. Your browser extension picks it up within a minute (keep tiktok.com open)."
           : p.post_mode === "DIRECT_POST" ? "Posted. It can take a few minutes to appear on your profile."
-          : "Sent to your TikTok drafts — open TikTok's inbox to finish it.",
+          : "Sent to your TikTok drafts. Open TikTok's inbox to finish it.",
         p.status === "failed",
       );
       route();
@@ -404,16 +507,16 @@ function textItemEditor(t, idx = -1) {
     <input name="text" value="${esc(t.text)}" placeholder="Text">
     ${select("font", OPTIONS.font, t.font)}${select("font_size", OPTIONS.font_size, t.font_size)}
     ${select("text_style", OPTIONS.text_style, t.text_style)}
-    <div class="row" style="flex-wrap:nowrap">${select("text_color", OPTIONS.text_color, t.text_color)}<button type="button" data-remove-text title="Remove">✕</button></div>
+    ${select("text_color", OPTIONS.text_color, t.text_color)}<button type="button" class="icon" data-remove-text aria-label="Remove this text">${icon("close")}</button>
   </div>`;
 }
 
 function slideEditor(sl, i, url) {
   return `<div class="slide-edit">
-    <div>${url ? `<img src="${esc(url)}?v=${Date.now()}" alt="">` : ""}<div class="small muted">#${i + 1} · ${esc(sl.role)}</div></div>
+    <div>${url ? `<img src="${esc(url)}?v=${Date.now()}" alt="">` : ""}<div class="small muted" style="margin-top:6px">Slide ${i + 1}${sl.role !== "body" ? ` · ${esc(sl.role)}` : ""}</div></div>
     <div>
       <div>${sl.text_items.map((t, j) => textItemEditor(t, j)).join("")}</div>
-      <button type="button" class="small" data-add-text>+ text</button>
+      <button type="button" class="small" data-add-text>Add text</button>
       <div class="form-grid">
         <div><label>Background (media path or URL)</label><input name="image" value="${esc(sl.image || "")}"></div>
         <div><label>Text position override</label>${select("slide_pos", ["", "top", "center", "bottom"], sl.text_position || "")}</div>
@@ -424,33 +527,50 @@ function slideEditor(sl, i, url) {
 
 views.slideshows = async () => {
   const data = await api("/slideshows?limit=100");
-  view.innerHTML = `<div class="row"><h1 class="grow">Slideshows</h1><a class="btn" href="#create">New</a></div>
-    <p class="sub">${data.total} total.</p>${showGrid(data.slideshows)}`;
+  const scored = data.slideshows.filter((x) => x.prediction);
+  view.innerHTML = `${titleRow("Slideshows", `${data.total} made${scored.length ? `, ${scored.length} with a virality score` : ""}.`,
+    `<a class="btn" href="#create">Write one</a><a class="btn primary" href="#studio">Make slideshows</a>`)}${showGrid(data.slideshows)}`;
 };
 
 views.automations = async () => {
-  const [data, accounts] = await Promise.all([api("/automations"), api("/tiktok/accounts")]);
+  const [data, accounts, made] = await Promise.all([api("/automations"), PHONE ? Promise.resolve({ accounts: [] }) : api("/tiktok/accounts"), api("/slideshows?limit=60")]);
   const acct = Object.fromEntries(accounts.accounts.map((a) => [a.id, a]));
+  const titles = Object.fromEntries(data.automations.map((a) => [a.id, a.title]));
+  const runs = made.slideshows.filter((x) => titles[x.automation_id]).slice(0, 6);
+  const live = data.automations.filter((a) => !a.paused && a.schedule.length).length;
   view.innerHTML = `
-    <div class="row"><h1 class="grow">Automations</h1><button class="primary" id="new">New automation</button></div>
-    <p class="sub">Each automation writes a fresh slideshow on schedule from its hooks and style, then posts it.</p>
-    <div class="grid">${data.automations
-      .map(
-        (a) => `<div class="card">
-        <div class="row"><h3 class="grow">${a.favorite ? "★ " : ""}${esc(a.title)}</h3>
-          <span class="pill ${a.paused ? "bad" : a.schedule.length ? "live" : ""}">${a.paused ? "paused" : a.schedule.length ? "live" : "no schedule"}</span></div>
-        <div class="small muted">${acct[a.tiktok_account_id] ? "@" + esc(acct[a.tiktok_account_id].username) : "no account"} · ${a.hooks.length} hooks · ${a.schedule.length} posts/day</div>
-        <div class="small muted">${a.target_country ? `🎯 ${esc(a.target_country)} · ` : ""}times in ${esc(a.timezone)} · ${esc(PHONE ? (a.post_settings.post_mode === "BROWSER" && a.post_settings.browser_action !== "draft" ? "posts from this phone" : "hands off to the TikTok app")
-          : { DIRECT_POST: "auto-publish (API)", BROWSER: a.post_settings.browser_action === "draft" ? "browser drafts" : "browser posting" }[a.post_settings.post_mode] || "drafts (API)")}</div>
-        <div class="small muted">Next post: ${a.next_runs[0] ? esc(new Date(a.next_runs[0]).toLocaleString()) : "—"}</div>
-        <div class="row" style="margin-top:12px">
-          <button data-run="${a.id}">Run now</button>
-          <button data-edit="${a.id}">Edit</button>
-          <button data-toggle="${a.id}" data-paused="${a.paused}">${a.paused ? "Resume" : "Pause"}</button>
-          <a class="btn" href="#slideshows-of/${a.id}">Slideshows</a>
-        </div></div>`,
-      )
-      .join("") || `<p class="muted">No automations yet.</p>`}</div>`;
+    ${titleRow("Automations", `Each one writes a fresh slideshow from its hooks before every posting time, then posts it. ${live} of ${data.automations.length} live.`,
+      `<button class="primary" id="new">New automation</button>`)}
+    <section class="card">${data.automations.length ? `<div class="list">${data.automations
+      .map((a) => {
+        const w = a.next_runs[0] ? whenText(a.next_runs[0]) : null;
+        const state = a.paused ? `<span class="pill bad">Paused</span>` : a.schedule.length ? `<span class="pill ok">Live</span>` : `<span class="pill">No times set</span>`;
+        const meta = [
+          PHONE ? null : acct[a.tiktok_account_id] ? "@" + acct[a.tiktok_account_id].username : "no account",
+          `${a.hooks.length} hooks`, `${a.schedule.length} post${a.schedule.length === 1 ? "" : "s"} a day`,
+          a.target_country ? `for ${a.target_country}` : null, modeLabel(a.post_settings),
+          a.min_viral_score ? `pre-tested to ${a.min_viral_score}+` : null,
+        ].filter(Boolean).join(" · ");
+        return `<div class="list-row" style="min-height:72px;flex-wrap:wrap">
+          <div class="what" style="min-width:220px"><b>${a.favorite ? `<span style="color:var(--warning)">${icon("star", 12)}</span> ` : ""}${esc(a.title)}</b><span>${esc(meta)}</span></div>
+          <div class="when" style="min-width:96px">${w ? `<b>${esc(w.time)}</b><small>${esc(w.day)}</small>` : `<small>No next post</small>`}</div>
+          ${state}
+          <div class="acts">
+            <button class="small" data-run="${a.id}">Run now</button>
+            <button class="small" data-edit="${a.id}">Edit</button>
+            <button class="small" data-toggle="${a.id}" data-paused="${a.paused}">${a.paused ? "Resume" : "Pause"}</button>
+            <a class="btn small" href="#slideshows-of/${a.id}">Slideshows</a>
+          </div></div>`;
+      }).join("")}</div>`
+      : `<div class="empty">No automations yet. The quickest start is <a href="#studio">Studio</a>: describe a series and tick “keep it going”.</div>`}</section>
+    ${data.automations.length ? `<section class="card" style="margin-top:var(--gap)">
+      <div class="card-head"><h2>Latest slideshows they made</h2><a class="btn small" href="#slideshows">View all</a></div>
+      ${runs.length ? `<div class="list">${runs.map((x) => `<a class="list-row" href="#slideshow/${x.id}">
+        ${x.slides[0] ? `<img class="thumb" src="${esc(x.slides[0])}" alt="" loading="lazy">` : `<span class="thumb"></span>`}
+        <div class="what"><b>${esc(x.title)}</b><span>${esc(titles[x.automation_id])} · ${esc(new Date(x.created_at).toLocaleString([], { day: "numeric", month: "short", hour: "2-digit", minute: "2-digit" }))}</span></div>
+        ${showStatus(x)}${scorePill(x.prediction)}</a>`).join("")}</div>`
+        : `<div class="empty">None yet. Use Run now, or wait for the next posting time.</div>`}
+    </section>` : ""}`;
   $("#new").onclick = () => automationDialog(null);
   view.onclick = async (ev) => {
     const b = ev.target.closest("button");
@@ -471,7 +591,7 @@ views.automations = async () => {
 
 views["slideshows-of"] = async (id) => {
   const [a, data] = await Promise.all([api(`/automations/${id}`), api(`/slideshows?automation_id=${id}&limit=100`)]);
-  view.innerHTML = `<h1>${esc(a.title)}</h1><p class="sub">${data.total} slideshows.</p>${showGrid(data.slideshows)}`;
+  view.innerHTML = `${titleRow(esc(a.title), `${data.total} slideshows made by this automation.`, `<a class="btn" href="#automations">All automations</a>`)}${showGrid(data.slideshows)}`;
 };
 
 async function automationDialog(a) {
@@ -487,18 +607,18 @@ async function automationDialog(a) {
     <h2 style="margin-top:0">${a ? "Edit" : "New"} automation</h2>
     <div class="form-grid">
       <div><label>Title</label><input name="title" value="${esc(a?.title ?? "")}" required></div>
-      <div><label>TikTok account</label><select name="tiktok_account_id">${opt(accounts.accounts, a?.tiktok_account_id, "— none —")}</select></div>
-      <div><label>Product (soft CTA)</label><select name="product_id">${opt(products.products, a?.product_id, "— none —")}</select></div>
+      <div><label>TikTok account</label><select name="tiktok_account_id">${opt(accounts.accounts, a?.tiktok_account_id, "None")}</select></div>
+      <div><label>Product (soft CTA)</label><select name="product_id">${opt(products.products, a?.product_id, "None")}</select></div>
       <div><label>Language</label><input name="language" value="${esc(a?.language ?? "English")}"></div>
     </div>
-    <label>Hooks / topics — one per line, rotated each run</label>
+    <label>Hooks or topics, one per line<span class="hint">One is used per run, least-used first.</span></label>
     <textarea name="hooks" placeholder="5 habits that quietly fixed my sleep&#10;things I stopped buying in my 20s">${esc((a?.hooks ?? []).join("\n"))}</textarea>
-    <label>Style (creative direction for Claude)</label>
+    <label>Style (directions for the AI)</label>
     <textarea name="style" placeholder="6 slides. Casual first-person. Hook big white outline text; body slides black text on white boxes at the top.">${esc(a?.style ?? "")}</textarea>
     <div class="form-grid">
-      <div><label>Posting times (HH:MM, comma-separated)</label><input name="times" value="${esc(sched.times)}" placeholder="09:00, 18:30"></div>
-      <div><label>Days (cron day-of-week: * = every day, 1-5 = weekdays)</label><input name="days" value="${esc(sched.days)}"></div>
-      <div><label>Timezone for these times (IANA, blank = server)</label><input name="timezone" value="${esc(a?.timezone ?? "")}" placeholder="Europe/London"></div>
+      <div><label>Posting times, 24-hour, separated by commas</label><input name="times" value="${esc(sched.times)}" placeholder="09:00, 18:30"></div>
+      <div><label>Days (* every day, 1-5 Monday to Friday, 0 Sunday)</label><input name="days" value="${esc(sched.days)}"></div>
+      <div><label>Time zone (blank uses the clock Slidemill runs on)</label><input name="timezone" value="${esc(a?.timezone ?? "")}" placeholder="Europe/London"></div>
       <div><label>&nbsp;</label><a class="btn" href="#timing">Pick best times by country →</a></div>
     </div>
     ${a && !sched.simple ? `<p class="small muted">This automation uses a per-day schedule (${a.schedule.length} slots${a.target_country ? ` for ${esc(a.target_country)}` : ""}). Leave the times field empty to keep it.</p>` : ""}
@@ -522,9 +642,9 @@ async function automationDialog(a) {
     <h3 style="margin-top:18px">Images</h3>
     <div class="form-grid">
       <div><label>Source</label>${select("source", ["auto", "ai", "stock", "collection"], is.source ?? "auto")}</div>
-      <div><label>Body collection</label><select name="collection_id">${opt(collections.collections, is.collection_id, "— none —")}</select></div>
-      <div><label>Hook (first slide) collection</label><select name="hook_collection_id">${opt(collections.collections, is.hook_collection_id, "— same as body —")}</select></div>
-      <div><label>CTA collection</label><select name="cta_collection_id">${opt(collections.collections, is.cta_collection_id, "— none —")}</select></div>
+      <div><label>Body collection</label><select name="collection_id">${opt(collections.collections, is.collection_id, "None")}</select></div>
+      <div><label>Hook (first slide) collection</label><select name="hook_collection_id">${opt(collections.collections, is.hook_collection_id, "Same as the body slides")}</select></div>
+      <div><label>CTA collection</label><select name="cta_collection_id">${opt(collections.collections, is.cta_collection_id, "None")}</select></div>
       <div><label>Aspect ratio</label>${select("aspect_ratio", ["4:5", "9:16", "1:1", "16:9"], is.aspect_ratio ?? "4:5")}</div>
       <div><label>Overlay opacity %</label><input type="number" name="background_opacity" min="0" max="100" value="${is.background_opacity ?? 30}"></div>
     </div>
@@ -616,11 +736,10 @@ async function automationDialog(a) {
 views.collections = async () => {
   const data = await api("/collections");
   view.innerHTML = `
-    <h1>Image collections</h1>
-    <p class="sub">Backgrounds for automations. Upload your own or import from stock photos. Images are used least-used first, so a collection cycles before repeating.</p>
+    ${titleRow("Image collections", "Your own backgrounds for automations. Images are used least-used first, so a collection cycles through before anything repeats.")}
     <div class="card row"><input id="cname" class="grow" placeholder="New collection name"><button class="primary" id="cadd">Create</button></div>
     <div class="grid" style="margin-top:14px">${data.collections
-      .map((c) => `<a class="card" href="#collection/${c.id}" style="color:inherit;text-decoration:none"><h3>${esc(c.name)}</h3><div class="muted small">${c.image_count} images</div></a>`)
+      .map((c) => `<a class="card" href="#collection/${c.id}" style="color:inherit;text-decoration:none"><h2>${esc(c.name)}</h2><div class="muted small">${c.image_count} images</div></a>`)
       .join("")}</div>`;
   $("#cadd").onclick = (e) =>
     busy(e.currentTarget, async () => {
@@ -635,15 +754,14 @@ views.collection = async (id) => {
   const [cols, imgs] = await Promise.all([api("/collections"), api(`/collections/${id}/images`)]);
   const c = cols.collections.find((x) => x.id === id) ?? { name: "Collection" };
   view.innerHTML = `
-    <div class="row"><h1 class="grow">${esc(c.name)}</h1><button class="danger" id="cdel">Delete collection</button></div>
-    <p class="sub">${imgs.images.length} images.</p>
+    ${titleRow(esc(c.name), `${imgs.images.length} images.`, `<button class="danger" id="cdel">Delete collection</button>`)}
     <div class="form-grid">
-      <div class="card"><h3>Upload</h3><input type="file" id="files" multiple accept="image/*"><div class="row" style="margin-top:10px"><button class="primary" id="up">Upload</button></div></div>
-      <div class="card"><h3>Import stock photos</h3><div class="row"><input id="q" class="grow" placeholder="aesthetic bedroom night lamp"><input id="n" type="number" value="12" min="1" max="40" style="width:80px"></div>
+      <div class="card"><h2>Upload</h2><input type="file" id="files" multiple accept="image/*"><div class="row" style="margin-top:10px"><button class="primary" id="up">Upload</button></div></div>
+      <div class="card"><h2>Import stock photos</h2><div class="row"><input id="q" class="grow" placeholder="aesthetic bedroom night lamp"><input id="n" type="number" value="12" min="1" max="40" style="width:80px"></div>
         <div class="row" style="margin-top:10px"><button class="primary" id="imp">Import</button></div></div>
     </div>
     <div class="img-grid" style="margin-top:16px">${imgs.images
-      .map((i) => `<figure><img src="${esc(i.url)}" loading="lazy" alt=""><button data-del="${i.id}">✕</button></figure>`).join("")}</div>`;
+      .map((i) => `<figure><img src="${esc(i.url)}" loading="lazy" alt=""><button class="icon" data-del="${i.id}" aria-label="Delete this image">${icon("close")}</button></figure>`).join("")}</div>`;
   $("#up").onclick = (e) =>
     busy(e.currentTarget, async () => {
       const files = $("#files").files;
@@ -674,15 +792,14 @@ views.collection = async (id) => {
 views.products = async () => {
   const data = await api("/products");
   view.innerHTML = `
-    <h1>Products</h1>
-    <p class="sub">Attach a product to an automation and Claude works it in as a soft call-to-action.</p>
+    ${titleRow("Products", "Attach a product to an automation and the writer works it in once, as a soft mention.")}
     <div class="card">
       <div class="form-grid"><div><label>Name</label><input id="pname"></div><div><label>URL</label><input id="purl"></div></div>
       <label>What it is / why people like it</label><textarea id="pdesc"></textarea>
       <button class="primary" id="padd" style="margin-top:10px">Add product</button>
     </div>
     <div class="grid" style="margin-top:14px">${data.products
-      .map((p) => `<div class="card"><h3>${esc(p.name)}</h3><div class="small muted">${esc(p.description)}</div>
+      .map((p) => `<div class="card"><h2>${esc(p.name)}</h2><div class="small muted">${esc(p.description)}</div>
         <button class="danger small" data-pdel="${p.id}" style="margin-top:10px">Delete</button></div>`).join("")}</div>`;
   $("#padd").onclick = (e) =>
     busy(e.currentTarget, async () => {
@@ -699,8 +816,7 @@ views.accounts = async () => {
   const data = await api("/tiktok/accounts");
   const err = new URLSearchParams(location.hash.split("?")[1] || "").get("error");
   view.innerHTML = `
-    <h1>TikTok accounts</h1>
-    <p class="sub">Connect as many as you like. To add another, log out of tiktok.com in this browser first, then connect again.</p>
+    ${titleRow("TikTok accounts", "Connect as many as you like. To add another, log out of tiktok.com in this browser first, then connect again.")}
     ${err ? `<div class="card" style="border-color:var(--accent)">${esc(err)}</div>` : ""}
     <button class="primary" id="connect">Connect TikTok</button>
     <div class="grid" style="margin-top:14px">${data.accounts
@@ -722,25 +838,27 @@ views.analytics = async () => {
   const sort = new URLSearchParams(location.hash.split("?")[1] || "").get("sort") || "recent";
   const [data, cal] = await Promise.all([api(`/posts?days=90&sort=${sort}&limit=200`), api("/virality/calibration").catch(() => null)]);
   const s = data.statistics;
+  const SORTS = { recent: "Newest", views: "Most views", likes: "Most likes", shares: "Most shares" };
   view.innerHTML = `
-    <div class="row"><h1 class="grow">Analytics</h1><button id="refresh">Refresh from TikTok</button></div>
-    <p class="sub">Last 90 days. Metrics sync every 10 minutes for published posts.</p>
-    <div class="grid">
-      ${["views", "likes", "comments", "shares"].map((k) => `<div class="card"><div class="muted small">${k}</div><div class="stat">${s[k].toLocaleString()}</div></div>`).join("")}
+    ${titleRow("Analytics", "Last 90 days. Views and likes for posted slideshows refresh every 10 minutes.", `<button id="refresh">Refresh now</button>`)}
+    <div class="kpis" style="--n:4">
+      ${kpi("Views", n0(s.views), `${s.total_posts} posts`)}${kpi("Likes", n0(s.likes), "last 90 days")}
+      ${kpi("Comments", n0(s.comments), "last 90 days")}${kpi("Shares", n0(s.shares), "last 90 days")}
     </div>
-    ${cal ? `<div class="card" style="margin-top:14px"><h3>Does the virality prediction work for you?</h3>
-      <p class="small">${esc(cal.summary)}</p>
-      <p class="small muted">Compares each posted slideshow's predicted score with its real views (rank correlation over ${cal.posts} posts).
-      Higgsfield-style predictors publish no such check; this one grades itself on your account.</p></div>` : ""}
-    <h2>Posts</h2>
-    <div class="row small">Sort: ${["recent", "views", "likes", "shares"].map((k) => `<a href="#analytics?sort=${k}" class="pill ${k === sort ? "live" : ""}">${k}</a>`).join("")}</div>
-    <div class="card" style="margin-top:10px;overflow-x:auto"><table>
-      <tr><th></th><th>Slideshow</th><th>Status</th><th>Views</th><th>Likes</th><th>Comments</th><th>Shares</th><th>Posted</th></tr>
-      ${data.posts.map((p) => `<tr onclick="location.hash='#slideshow/${p.slideshow_id}'" style="cursor:pointer">
-        <td>${p.thumb ? `<img src="${esc(p.thumb)}" alt="">` : ""}</td><td>${esc(p.title)}</td><td>${esc(p.status)}</td>
-        <td>${p.views.toLocaleString()}</td><td>${p.likes.toLocaleString()}</td><td>${p.comments}</td><td>${p.shares}</td>
-        <td class="small muted">${esc(p.created_at.slice(0, 16).replace("T", " "))}</td></tr>`).join("")}
-    </table></div>`;
+    ${cal ? `<section class="card" style="margin-top:var(--gap)"><h2>Does the virality score predict your views?</h2>
+      <p style="margin:0 0 6px">${esc(cal.summary)}</p>
+      <p class="small faint" style="margin:0">Rank correlation between each posted slideshow's predicted score and its real views, over ${cal.posts} post${cal.posts === 1 ? "" : "s"}.</p></section>` : ""}
+    <section class="card" style="margin-top:var(--gap)">
+      <div class="card-head"><h2>Posts</h2><div class="row">${Object.entries(SORTS).map(([k, label]) => `<a href="#analytics?sort=${k}" class="pill ${k === sort ? "on" : ""}">${label}</a>`).join("")}</div></div>
+      ${data.posts.length ? `<div style="overflow-x:auto"><table>
+        <thead><tr><th></th><th>Slideshow</th><th>Status</th><th class="num">Views</th><th class="num">Likes</th><th class="num">Comments</th><th class="num">Shares</th><th class="num">Posted</th></tr></thead>
+        <tbody>${data.posts.map((p) => `<tr onclick="location.hash='#slideshow/${p.slideshow_id}'">
+          <td>${p.thumb ? `<img src="${esc(p.thumb)}" alt="">` : ""}</td><td>${esc(p.title)}</td>
+          <td><span class="pill ${p.status === "published" ? "ok" : p.status === "failed" ? "err" : ""}">${esc(POST_LABELS[p.status] || p.status)}</span></td>
+          <td class="num">${n0(p.views)}</td><td class="num">${n0(p.likes)}</td><td class="num">${n0(p.comments)}</td><td class="num">${n0(p.shares)}</td>
+          <td class="num faint">${esc(new Date(p.created_at).toLocaleDateString([], { day: "numeric", month: "short" }))}</td></tr>`).join("")}</tbody>
+      </table></div>` : `<div class="empty">Nothing posted in the last 90 days. Posts appear here as soon as one goes out.</div>`}
+    </section>`;
   $("#refresh").onclick = (e) =>
     busy(e.currentTarget, async () => {
       await api("/posts/refresh", { method: "POST" });
@@ -749,13 +867,12 @@ views.analytics = async () => {
 };
 
 views.studio = async () => {
-  const [st, accounts, products] = await Promise.all([api("/status"), api("/tiktok/accounts"), api("/products")]);
+  const [st, accounts, products, recent] = await Promise.all([api("/status"), PHONE ? Promise.resolve({ accounts: [] }) : api("/tiktok/accounts"), api("/products"), api("/slideshows?limit=6")]);
   view.innerHTML = `
-    <h1>Studio</h1>
-    <p class="sub">Describe the kind of slideshows you want. It plans the format, writes every slide, makes the images and renders them.</p>
-    ${st.ai ? "" : `<div class="card" style="border-color:var(--accent)">Add an AI key in <a href="#settings">Settings</a> first — any provider works.</div>`}
-    <div class="card">
-      <label>What do you want to make?</label>
+    ${titleRow("Studio", "Describe the kind of slideshows you want. Studio plans the format, writes every slide, makes the images, renders them and scores each one.")}
+    ${st.ai ? "" : `<div class="card" role="alert" style="margin-bottom:var(--gap)"><b>Add an AI key first.</b> <span class="muted">Any provider works: <a href="#settings">Settings</a>.</span></div>`}
+    <section class="card">
+      <label for="brief" style="margin-top:0">What do you want to make?</label>
       <textarea id="brief" style="min-height:120px" placeholder="Glow-up slideshows for girls 16-22: realistic self-care habits, aesthetic soft pink vibes, first person, 6 slides each, text in white boxes at the top."></textarea>
       <div class="form-grid">
         <div><label>How many slideshows</label><input id="count" type="number" min="1" max="10" value="3"></div>
@@ -767,11 +884,11 @@ views.studio = async () => {
       </div>
       <label class="check" style="margin-top:14px"><input type="checkbox" id="auto"> Keep it going: save as an automation that makes and posts new ones on a schedule</label>
       <div class="form-grid" id="auto-opts" hidden>
-        <div><label>TikTok account</label><select id="acct"><option value="">— none (drafts only) —</option>${accounts.accounts
+        <div><label>TikTok account</label><select id="acct"><option value="">None (drafts only)</option>${accounts.accounts
           .map((a) => `<option value="${a.id}">@${esc(a.username)}</option>`).join("")}</select></div>
-        <div><label>Post for this country's best times</label><select id="scountry"><option value="">— use the times below —</option></select></div>
+        <div><label>Post for this country's best times</label><select id="scountry"><option value="">Use the times below</option></select></div>
         <div><label>Posts per day</label><input id="sppd" type="number" min="1" max="6" value="2"></div>
-        <div><label>Posting times if no country (HH:MM, comma-separated)</label><input id="times" value="09:00, 18:00"></div>
+        <div><label>Posting times if no country (24-hour, separated by commas)</label><input id="times" value="09:00, 18:00"></div>
         <div><label>Mode</label><select id="spub">
           <option value="browser:publish">Post from my browser (extension)</option>
           <option value="browser:draft">Save drafts from my browser (extension)</option>
@@ -781,8 +898,9 @@ views.studio = async () => {
       <div id="studio-consent"></div>
       <div class="row" style="margin-top:16px"><button class="primary" id="make">Make slideshows</button>
         <span class="muted small">About a minute per slideshow, three at a time.</span></div>
-    </div>
-    <div id="studio-out"></div>`;
+    </section>
+    <div id="studio-out"></div>
+    ${recent.slideshows.length ? `<h2>Recently made</h2>${showGrid(recent.slideshows)}` : ""}`;
   phoneModes($("#spub"));
   hideOnPhone($("#acct"));
   $("#auto").onchange = () => ($("#auto-opts").hidden = !$("#auto").checked);
@@ -838,17 +956,16 @@ views.library = async () => {
   const qs = new URLSearchParams({ q: params.get("q") || "", niche: params.get("niche") || "", sort: params.get("sort") || "followers", limit: "48" });
   const [data, niches, st] = await Promise.all([api(`/library?${qs}`), api("/library/niches"), api("/status")]);
   view.innerHTML = `
-    <h1>Slideshow library</h1>
-    <p class="sub">Real TikTok slideshow accounts and their best posts, scraped into your own database. Remix any post into your own slideshows.</p>
-    <div class="form-grid">
-      <div class="card"><h3>Add accounts or posts</h3>
+    ${titleRow("Slideshow library", `${data.total} TikTok slideshow accounts and their best posts, in your own database. Remix any post into your own version.`)}
+    <section class="card"><div class="form-grid" style="gap:0 28px">
+      <div><h2>Add accounts or posts</h2>
         <textarea id="items" placeholder="@username&#10;https://www.tiktok.com/@user/photo/123…"></textarea>
-        <div class="row" style="margin-top:8px"><button class="primary" id="import">Scrape</button><span class="small muted">Profiles list posts via a headless browser${st.apify ? " or Apify" : ""}.</span></div></div>
-      <div class="card"><h3>Discover by keyword or #hashtag</h3>
+        <div class="row" style="margin-top:8px"><button class="primary" id="import">Add to the library</button><span class="small muted">${PHONE ? "Profiles are read through the TikTok tab" : "Profiles list posts via a headless browser"}${st.apify ? " or Apify" : ""}.</span></div></div>
+      <div><h2>Discover by keyword or #hashtag</h2>
         <input id="disc" placeholder="#studytok or 'morning routine slideshow'">
         <div class="row" style="margin-top:8px"><button class="primary" id="discover" ${st.apify ? "" : "disabled"}>Discover</button>
         ${st.apify ? "" : `<span class="small muted">Needs an Apify token in <a href="#settings">Settings</a>.</span>`}</div></div>
-    </div>
+    </div></section>
     <div id="lib-job"></div>
     <div class="row" style="margin:16px 0 8px">
       <input id="q" class="grow" placeholder="Search accounts, bios, captions" value="${esc(params.get("q") || "")}">
@@ -860,7 +977,7 @@ views.library = async () => {
     <div class="grid" style="margin-top:14px;grid-template-columns:repeat(auto-fill,minmax(300px,1fr))">${data.profiles
       .map((p) => `<a class="card" href="#libprofile/${p.id}" style="color:inherit;text-decoration:none">
         <div class="row">${p.avatar ? `<img src="${esc(p.avatar)}" width="40" height="40" style="border-radius:50%">` : ""}
-          <div class="grow"><b>@${esc(p.username)}</b> ${p.verified ? "✔" : ""}<div class="small muted">${fmt(p.followers)} followers · ${p.slideshow_count} slideshows</div></div>
+          <div class="grow"><b>@${esc(p.username)}</b> ${p.verified ? `<span class="pill" title="Verified on TikTok">Verified</span>` : ""}<div class="small muted">${fmt(p.followers)} followers · ${p.slideshow_count} slideshows</div></div>
           ${p.niche ? `<span class="pill">${esc(p.niche)}</span>` : ""}</div>
         <div class="row" style="margin-top:10px;gap:6px;flex-wrap:nowrap">${p.top_slideshows
           .map((x) => `<img src="${esc(x.cover)}" style="width:24%;aspect-ratio:3/4;object-fit:cover;border-radius:6px">`).join("")}</div>
@@ -886,7 +1003,7 @@ const fmt = (n) => (n >= 1e6 ? (n / 1e6).toFixed(1) + "M" : n >= 1e3 ? (n / 1e3)
 views.libprofile = async (id) => {
   const p = await api(`/library/profiles/${id}`);
   view.innerHTML = `
-    <div class="row">${p.avatar ? `<img src="${esc(p.avatar)}" width="56" height="56" style="border-radius:50%">` : ""}
+    <div class="row" style="margin-bottom:16px">${p.avatar ? `<img src="${esc(p.avatar)}" width="56" height="56" style="border-radius:50%" alt="">` : ""}
       <div class="grow"><h1>@${esc(p.username)}</h1><div class="muted">${esc(p.nickname)} · ${fmt(p.followers)} followers · ${fmt(p.total_likes)} likes
       ${p.niche ? ` · ${esc(p.niche)}` : ""}${p.product_medium ? ` · promotes: ${esc(p.product_medium)}` : ""}</div></div>
       <a class="btn" href="${esc(p.url)}" target="_blank">Open on TikTok</a><button class="danger" id="pdel">Remove</button></div>
@@ -937,57 +1054,46 @@ views.settings = async () => {
     <input name="${key}" type="${type}" placeholder="${esc(v[key].set && type === "password" ? v[key].value : ph)}" ${type === "password" ? "" : `value="${esc(v[key].value)}"`}></div>`;
   const provOpts = (cur) => `<option value="">auto-detect from key</option>` +
     Object.entries(data.llm_providers).map(([k, p]) => `<option value="${k}" ${k === cur ? "selected" : ""}>${esc(p.label)}</option>`).join("");
+  const setRow = (title, desc, inner, attrs = "") => `<div class="set-row" ${attrs}><div><h2>${title}</h2><p>${desc}</p></div><div class="card">${inner}</div></div>`;
   view.innerHTML = `
-    <h1>Settings</h1>
-    <p class="sub">Paste any AI key — the provider is detected from it. ${PHONE ? "Keys are encrypted on this phone." : "Keys are stored in this server's database."}</p>
-    ${PHONE ? phoneCard(ext, field) : ""}
-    <div class="card" id="browser-poster" ${PHONE ? "hidden" : ""}>
-      <h3>Browser poster (no TikTok developer app needed)</h3>
-      <p class="small">
-        <span class="pill ${online ? "ok" : "bad"}">${online ? "extension online" : "extension offline"}</span>
-        ${seen ? `last check-in ${esc(seen.toLocaleString())}` : "never checked in"}
-        ${ext.extension?.username ? ` · posting as @${esc(ext.extension.username)}` : ""}
-        · ${ext.queued} queued · ${ext.done_last_24h}/${ext.posts_per_day} in the last 24h
-        ${ext.waiting_for_draft_support ? ` · <b>${ext.waiting_for_draft_support} draft(s) waiting for draft support</b>` : ""}
+    ${titleRow("Settings", `Paste any AI key and the provider is detected from it. ${PHONE ? "Keys are encrypted on this phone." : "Keys are stored in this server's database."}`,
+      `<button id="test">Test AI and images</button><button class="primary" id="save">Save</button>`)}
+    ${PHONE ? phoneCard(ext, field, setRow) : ""}
+    ${setRow("Browser poster", "Posts your queue from a logged-in tiktok.com tab with the Slidemill extension. No TikTok developer app needed.", `
+      <p class="small" style="display:flex;flex-wrap:wrap;gap:8px;align-items:center">
+        <span class="pill ${online ? "ok" : "bad"}">${online ? "Extension online" : "Extension offline"}</span>
+        <span class="muted">${seen ? `last check-in ${esc(seen.toLocaleString())}` : "never checked in"}${ext.extension?.username ? ` · posting as @${esc(ext.extension.username)}` : ""}
+        · ${ext.queued} queued · ${ext.done_last_24h} of ${ext.posts_per_day} posted in 24 hours${ext.waiting_for_draft_support ? ` · ${ext.waiting_for_draft_support} draft(s) waiting for draft support` : ""}</span>
       </p>
       <div class="form-grid">
-        ${field("browser_posts_per_day", "Max posts per 24h", "text", "6")}
-        ${field("browser_min_gap_minutes", "Minimum minutes between posts", "text", "20")}
-        ${field("browser_username", "Your TikTok @username (for view counts, if the extension can't detect it)", "text", "")}
-        <div><label>&nbsp;</label><button type="button" id="ext-download">Download extension</button></div>
+        ${field("browser_posts_per_day", "Most posts per 24 hours", "text", "6")}
+        ${field("browser_min_gap_minutes", "Minutes between posts, at least", "text", "20")}
+        ${field("browser_username", "Your TikTok @username (for view counts)", "text", "")}
+        <div><label>Extension</label><button type="button" id="ext-download">Download extension</button></div>
       </div>
-      <p class="small muted">Install: unzip → chrome://extensions → Developer mode → Load unpacked. In the extension popup enter
+      <p class="small muted" style="margin:14px 0 0">Install: unzip, open chrome://extensions, turn on Developer mode, Load unpacked. In the extension popup enter
         this address (${esc(location.origin)}) and your Slidemill password, then keep a logged-in tiktok.com tab open.
-        Posting this way uses TikTok's private web endpoints and is against TikTok's terms; keep the limits low.</p>
-    </div>
-    <div class="card" style="margin-top:14px">
-      <h3>AI for writing (and reading slides)</h3>
+        Posting this way uses TikTok's private web endpoints and is against TikTok's terms, so keep the limits low.</p>`, PHONE ? "hidden" : "")}
+    ${setRow("AI for writing", "Writes every slideshow, plans Studio series, reads library slides and predicts virality.", `
       <div class="form-grid">
         <div><label>Provider</label><select name="llm_provider">${provOpts(v.llm_provider.value)}</select></div>
-        ${field("llm_api_key", "API key", "password", "sk-ant-… / sk-… / AIza… / sk-or-… / gsk_…")}
-        ${field("llm_model", "Model (blank = provider default)", "text", "")}
-        ${field("llm_base_url", "Base URL (custom / Ollama / proxies)", "text", "")}
+        ${field("llm_api_key", "API key", "password", "sk-ant-…, sk-…, AIza…, sk-or-… or gsk_…")}
+        ${field("llm_model", "Model (blank for the provider's default)", "text", "")}
+        ${field("llm_base_url", "Base URL (custom, Ollama or a proxy)", "text", "")}
       </div>
-      <p class="small muted">Defaults: ${Object.entries(data.llm_providers).filter(([, p]) => p.default_model).map(([k, p]) => `${esc(k)} → ${esc(p.default_model)}`).join(" · ")}</p>
-    </div>
-    <div class="card" style="margin-top:14px">
-      <h3>AI images</h3>
+      <p class="small faint" style="margin:14px 0 0">Defaults: ${Object.entries(data.llm_providers).filter(([, p]) => p.default_model).map(([k, p]) => `${esc(k)} ${esc(p.default_model)}`).join(" · ")}</p>`)}
+    ${setRow("AI images", "Backgrounds for every slide. Without an image key, an OpenAI or Gemini writing key is reused, or Pollinations makes them for free with a watermark.", `
       <div class="form-grid">
         <div><label>Image provider</label>${select("image_provider", ["auto", ...Object.keys(data.image_providers)], v.image_provider.value || "auto")}</div>
-        ${field("image_api_key", "Image API key (blank = reuse the AI key when it can make images)", "password")}
-        ${field("image_model", "Image model (blank = default)")}
+        ${field("image_model", "Image model (blank for the default)")}
       </div>
-      <p class="small muted">auto: OpenAI or Gemini keys make images too; otherwise Pollinations is used for free (watermarked).</p>
-    </div>
-    <div class="card" style="margin-top:14px">
-      <h3>Stock photos & scraping</h3>
+      ${field("image_api_key", "Image API key (blank to reuse the writing key when it can make images)", "password")}`)}
+    ${setRow("Stock photos and scraping", "Optional. Stock photos as backgrounds, and keyword or hashtag discovery for the library.", `
       <div class="form-grid">
         ${field("pexels_api_key", "Pexels API key", "password")}
         ${field("unsplash_access_key", "Unsplash access key", "password")}
-        ${field("apify_token", "Apify token (library discovery)", "password")}
       </div>
-    </div>
-    <div class="row" style="margin-top:16px"><button class="primary" id="save">Save</button><button id="test">Test AI + images</button></div>
+      ${field("apify_token", "Apify token (library discovery)", "password")}`)}
     <div id="test-out"></div>`;
   if (PHONE) wirePhoneCard();
   $("#ext-download").onclick = (e) =>
@@ -1014,39 +1120,35 @@ views.settings = async () => {
   $("#test").onclick = (e) =>
     busy(e.currentTarget, async () => {
       const r = await api("/settings/test", { method: "POST" });
-      $("#test-out").innerHTML = `<div class="card" style="margin-top:14px">
-        <div>${r.ai.ok ? "✅" : "❌"} AI: ${esc(r.ai.detail)}</div><div>${r.images.ok ? "✅" : "❌"} Images: ${esc(r.images.detail)}</div></div>`;
+      const line = (ok, what, detail) => `<div class="list-row" style="min-height:40px"><span class="pill ${ok ? "ok" : "err"}">${ok ? "Works" : "Failed"}</span><div class="what"><b>${what}</b><span>${esc(detail)}</span></div></div>`;
+      $("#test-out").innerHTML = `<section class="card" style="margin-top:var(--gap)"><h2>Test results</h2><div class="list">${line(r.ai.ok, "AI for writing", r.ai.detail)}${line(r.images.ok, "AI images", r.images.detail)}</div></section>`;
+      $("#test-out").scrollIntoView({ behavior: "smooth", block: "nearest" });
     });
 };
 
-function phoneCard(ext, field) {
-  return `<div class="card" id="phone-poster">
-      <h3>Posting from this phone</h3>
-      <p class="small" id="poster-line"><span class="spinner"></span></p>
-      <p class="small">${ext.queued} queued · ${ext.done_last_24h}/${ext.posts_per_day} posted in the last 24h
-        ${ext.waiting_to_share ? ` · ${ext.waiting_to_share} waiting to hand to the TikTok app` : ""}
-        ${ext.next_due_at ? ` · next at ${esc(new Date(ext.next_due_at).toLocaleString())}` : ""}</p>
+function phoneCard(ext, field, setRow) {
+  return setRow("Posting from this phone", "The TikTok tab posts your queue by itself, within the limits below. “Send to the TikTok app” posts open TikTok's own editor instead, for you to finish.", `
+      <p class="small" id="poster-line" style="display:flex;flex-wrap:wrap;gap:8px;align-items:center"><span class="spinner"></span></p>
+      <p class="small muted">${ext.queued} queued · ${ext.done_last_24h} of ${ext.posts_per_day} posted in 24 hours${ext.waiting_to_share ? ` · ${ext.waiting_to_share} waiting to hand to the TikTok app` : ""}${ext.next_due_at ? ` · next ${esc(new Date(ext.next_due_at).toLocaleString())}` : ""}</p>
       <div class="form-grid">
-        ${field("browser_posts_per_day", "Max posts per 24h", "text", "6")}
-        ${field("browser_min_gap_minutes", "Minimum minutes between posts", "text", "20")}
-        ${field("browser_username", "Your TikTok @username (for view counts, if not detected)", "text", "")}
+        ${field("browser_posts_per_day", "Most posts per 24 hours", "text", "6")}
+        ${field("browser_min_gap_minutes", "Minutes between posts, at least", "text", "20")}
       </div>
-      <div class="row" style="margin-top:12px">
+      ${field("browser_username", "Your TikTok @username (for view counts, if not detected)", "text", "")}
+      <div class="row" style="margin-top:16px">
         <button type="button" id="open-tiktok">Open the TikTok tab</button>
         <button type="button" id="backup">Back up everything</button>
         <label class="btn" style="margin:0">Restore a backup<input type="file" id="restore" accept=".zip,application/zip" hidden></label>
       </div>
-      <p class="small muted">Auto-posting uses TikTok's private web endpoints from the TikTok tab, which is against TikTok's terms;
-        keep the limits low. "Send to the TikTok app" posts are finished by you in TikTok and carry no such risk.
-        A backup holds your slideshows and settings; API keys are tied to this phone, so re-enter them after restoring elsewhere.</p>
-    </div>`;
+      <p class="small faint" style="margin:14px 0 0">Posting by itself uses TikTok's private web endpoints, which is against TikTok's terms, so keep the limits low.
+        A backup holds your slideshows and settings. API keys are locked to this phone, so enter them again after restoring on another one.</p>`, 'id="phone-poster"');
 }
 
 function wirePhoneCard() {
   api("/status").then((st) => {
     const p = st.poster || {};
-    $("#poster-line").innerHTML = `<span class="pill ${p.logged_in ? "ok" : "bad"}">${p.logged_in ? `TikTok: @${esc(p.username)}` : "not logged in to TikTok"}</span>
-      <span class="pill ${p.auto_post ? "ok" : "bad"}">${p.auto_post ? "auto-posting on" : "auto-posting off (Phone tab)"}</span> ${esc(p.status || "")}`;
+    $("#poster-line").innerHTML = `<span class="pill ${p.logged_in ? "ok" : "bad"}">${p.logged_in ? `Logged in as @${esc(p.username)}` : "Not logged in to TikTok"}</span>
+      <span class="pill ${p.auto_post ? "ok" : "bad"}">${p.auto_post ? "Auto-posting on" : "Auto-posting off (Phone tab)"}</span> <span class="muted">${esc(p.status || "")}</span>`;
   }).catch(() => {});
   $("#open-tiktok").onclick = () => APP?.openTikTok();
   $("#backup").onclick = () => (APP ? APP.saveBackup() : toast("Only in the app", true));
@@ -1066,28 +1168,30 @@ const scoreClass = (v) => (v >= 70 ? "ok" : v >= 55 ? "live" : "bad");
 
 function predictionHtml(p) {
   if (!p) {
-    return `<div class="row"><div class="grow"><h3>Virality prediction</h3>
-      <p class="small muted">Before you post: hook strength, how many viewers swipe to the end, and what to fix. Uses your AI key (one call).</p></div>
-      <button class="primary" id="predict">Predict viral potential</button></div>`;
+    return `<div class="row" style="align-items:flex-start"><div class="grow"><h2>Virality prediction</h2>
+      <p class="muted" style="margin:0">Before you post: how hard the hook stops the scroll, how many viewers swipe to the last slide, and what to fix first. Uses your AI key once.</p></div>
+      <button id="predict">Predict</button></div>`;
   }
-  const bars = (p.slides || []).map((sl, i) => `<div class="att" title="Slide ${i + 1}: ${sl.attention}% still watching${sl.note ? " · " + esc(sl.note) : ""}">
-      <div class="att-fill ${p.biggest_drop === i + 1 ? "drop" : ""}" style="height:${Math.max(4, sl.attention)}%"></div><span>${i + 1}</span></div>`).join("");
-  return `<div class="row" style="align-items:flex-start">
-      <div class="gauge ${scoreClass(p.viral_potential)}"><b>${p.viral_potential}</b><span>/100</span></div>
-      <div class="grow"><h3 style="margin:0">${esc(p.verdict)} <span class="pill ${scoreClass(p.viral_potential)}">${esc(p.verdict_tag)}</span></h3>
-        <div class="row small" style="margin-top:6px;gap:18px">
-          <span>Hook score <b>${p.hook_score}</b></span><span>Hold rate <b>${p.hold_rate}%</b> reach the last slide</span>
-          ${p.biggest_drop ? `<span>Biggest drop after slide <b>${p.biggest_drop}</b></span>` : ""}</div></div>
+  const att = (p.slides || []).map((sl) => sl.attention);
+  return `<div class="row" style="align-items:center;gap:18px">
+      ${gauge(p.viral_potential)}
+      <div class="grow"><h2 style="margin:0 0 4px">${esc(p.verdict)} <span class="pill" style="vertical-align:2px">${esc(p.verdict_tag)}</span></h2>
+        <div class="row" style="gap:18px;color:var(--muted)">
+          <span>Hook <b style="color:var(--text)" class="num">${p.hook_score}</b></span>
+          <span><b style="color:var(--text)" class="num">${p.hold_rate}%</b> reach the last slide</span>
+          ${p.biggest_drop ? `<span>Most viewers leave after slide <b style="color:var(--text)">${p.biggest_drop}</b></span>` : ""}</div></div>
       <button id="predict">Predict again</button></div>
     <div class="pred-grid">
-      <div><div class="small muted">Attention by slide</div><div class="att-row">${bars}</div></div>
+      <div><div class="small muted">Viewers still watching, by slide</div>
+        ${swipeStrip(att, "big", p.biggest_drop)}
+        <div class="swipe-labels">${att.map((a, i) => `<span>${i + 1}</span>`).join("")}</div></div>
       <div>${Object.entries(p.dimensions || {}).map(([k, v]) => `<div class="dim"><span>${esc(DIM_LABELS[k] || k)}</span>
         <div class="dim-bar"><div style="width:${v}%"></div></div><b>${v}</b></div>`).join("")}</div>
     </div>
-    ${p.tips?.length ? `<div class="small" style="margin-top:10px"><b>Fix first</b><ul style="margin:4px 0 0 18px;padding:0">${p.tips.map((t) => `<li>${esc(t)}</li>`).join("")}</ul></div>` : ""}
-    ${p.better_hook ? `<div class="row small" style="margin-top:10px"><span class="grow">Stronger hook: <b>“${esc(p.better_hook)}”</b></span>
+    ${p.tips?.length ? `<h3 style="margin-top:18px">Fix first</h3><ul class="tips">${p.tips.map((t) => `<li>${esc(t)}</li>`).join("")}</ul>` : ""}
+    ${p.better_hook ? `<div class="nested row" style="margin-top:14px"><span class="grow">A stronger hook: <b>“${esc(p.better_hook)}”</b></span>
       <button class="small" id="use-hook">Use this hook</button></div>` : ""}
-    <p class="small muted" style="margin:10px 0 0">${esc(p.basis)}. A prediction, not a promise: check Analytics to see if it tracks your real views.</p>`;
+    <p class="small faint" style="margin:12px 0 0">${esc(p.basis)}. A prediction, not a promise: Analytics checks whether it tracks your real views.</p>`;
 }
 
 function wirePrediction(id, spec) {
@@ -1139,8 +1243,8 @@ function consentBlock(id, { creator = null, saved = null, automatic = false } = 
       ${creator?.comment_disabled ? "disabled" : ""}> Allow comments${creator?.comment_disabled ? " (turned off in your TikTok settings)" : ""}</label>
     <label class="check"><input type="checkbox" data-c="disclose" ${saved?.brand_organic || saved?.branded_content ? "checked" : ""}> Disclose commercial content</label>
     <div data-c="disclose-opts" ${saved?.brand_organic || saved?.branded_content ? "" : "hidden"} style="padding-left:24px">
-      <label class="check"><input type="checkbox" data-c="own" ${saved?.brand_organic ? "checked" : ""}> Your brand — promoting yourself or your own business</label>
-      <label class="check"><input type="checkbox" data-c="branded" ${saved?.branded_content ? "checked" : ""}> Branded content — paid partnership or a third party's brand</label>
+      <label class="check"><input type="checkbox" data-c="own" ${saved?.brand_organic ? "checked" : ""}> Your brand: promoting yourself or your own business</label>
+      <label class="check"><input type="checkbox" data-c="branded" ${saved?.branded_content ? "checked" : ""}> Branded content: a paid partnership or a third party's brand</label>
     </div>
     <p class="small" data-c="label-notice" hidden></p>
     <label class="check" style="margin-top:10px"><input type="checkbox" data-c="consent" ${saved?.consented ? "checked" : ""}>
@@ -1196,8 +1300,8 @@ function readConsent(root) {
 // ---- best times to post ---------------------------------------------------------------
 
 const DAY_LABELS = { mon: "Mon", tue: "Tue", wed: "Wed", thu: "Thu", fri: "Fri", sat: "Sat", sun: "Sun" };
-// Sequential blue ramp, dark surface: low = deep (recedes), high = light.
-const RAMP = ["#0d366b", "#104281", "#184f95", "#1c5cab", "#256abf", "#2a78d6", "#3987e5", "#5598e7", "#6da7ec", "#86b6ef", "#9ec5f4", "#b7d3f6", "#cde2fb"];
+// Quiet hours are greys that recede into the ground; only the busiest hours take the data cyan.
+const RAMP = ["#121212", "#171717", "#1d1d1d", "#242424", "#2c2c2c", "#363636", "#414141", "#155f5d", "#1a8582", "#1faba7", "#22cfca", "#25f4ee"];
 const heatColor = (v) => RAMP[Math.min(RAMP.length - 1, Math.max(0, Math.round(v * (RAMP.length - 1))))];
 
 function heatmap(plan) {
@@ -1205,7 +1309,7 @@ function heatmap(plan) {
   Object.entries(plan.schedule).forEach(([d, times]) => times.forEach((t) => picks.add(`${d}-${parseInt(t, 10)}`)));
   const days = Object.keys(DAY_LABELS);
   let html = `<div class="heat" role="img" aria-label="Audience activity by day and hour in ${esc(plan.timezone)}"><div></div>`;
-  for (let h = 0; h < 24; h++) html += `<div class="hr">${h % 3 === 0 ? h : ""}</div>`;
+  for (let h = 0; h < 24; h++) html += `<div class="hr ${h % 6 ? "minor" : ""}">${h % 3 === 0 ? h : ""}</div>`;
   days.forEach((d, di) => {
     html += `<div class="lab">${DAY_LABELS[d]}${plan.weekend.includes(d) ? "*" : ""}</div>`;
     plan.heatmap[di].forEach((v, h) => {
@@ -1213,7 +1317,10 @@ function heatmap(plan) {
       html += `<div class="cell ${pick ? "pick" : ""}" style="background:${heatColor(v)}" data-tip="${DAY_LABELS[d]} ${String(h).padStart(2, "0")}:00 · reach score ${Math.round(v * 100)}${pick ? " · scheduled" : ""}"></div>`;
     });
   });
-  html += `</div><div class="heat-legend">low <span class="ramp"></span> high · ringed = scheduled post · * = weekend</div>`;
+  html += `</div><div class="heat-legend">
+    <span class="row" style="gap:8px;flex-wrap:nowrap">Fewer viewers <span class="steps">${RAMP.filter((_, i) => i % 2).map((c) => `<i style="background:${c}"></i>`).join("")}</span> more</span>
+    <span class="row" style="gap:8px;flex-wrap:nowrap"><span class="ring" aria-hidden="true"></span> scheduled post</span>
+    <span>* weekend</span></div>`;
   return html;
 }
 
@@ -1234,13 +1341,12 @@ views.timing = async () => {
   const [countries, autos, accounts] = await Promise.all([api("/timing/countries"), api("/automations"), api("/tiktok/accounts")]);
   const saved = (() => { try { return localStorage.getItem("slidemill_country") || "US"; } catch { return "US"; } })();
   view.innerHTML = `
-    <h1>Best times to post</h1>
-    <p class="sub">Pick the country you want to reach. Slidemill builds a weekly schedule in that country's local time and can post on its own at those hours.</p>
+    ${titleRow("Best times to post", "Pick the country you want to reach. Slidemill builds a weekly schedule in that country's local time and can post at those hours by itself.")}
     <div class="card"><div class="form-grid">
       <div><label>Target country</label><select id="country">${countries.countries
         .map((c) => `<option value="${c.code}" ${c.code === saved ? "selected" : ""}>${esc(c.name)}${c.multi_zone ? " (all time zones)" : ""}</option>`).join("")}</select></div>
       <div><label>Posts per day</label><input id="ppd" type="number" min="1" max="6" value="3"></div>
-      <div><label>Learn from this account's results (optional)</label><select id="tacct"><option value="">—</option>${accounts.accounts
+      <div><label>Learn from this account's results (optional)</label><select id="tacct"><option value="">None</option>${accounts.accounts
         .map((a) => `<option value="${a.id}">@${esc(a.username)}</option>`).join("")}</select></div>
     </div></div>
     <div id="plan"></div>
@@ -1304,8 +1410,9 @@ views.timing = async () => {
           },
         });
         const next = r.automation.next_runs.slice(0, 3).map((t) => new Date(t).toLocaleString()).join(" · ");
-        $("#apply-out").innerHTML = `<p>✅ <b>${esc(r.automation.title)}</b> now posts ${r.plan.posts_per_day}×/day for ${esc(r.plan.name)}. Next: ${esc(next || "—")} (your local time)</p>
-          ${r.warnings.map((w) => `<p class="small" style="color:var(--warn)">⚠ ${esc(w)}</p>`).join("")}`;
+        $("#apply-out").innerHTML = `<div class="nested" style="margin-top:14px"><p style="margin:0 0 4px"><span style="color:var(--positive);display:inline-flex;vertical-align:-3px">${icon("check")}</span> <b>${esc(r.automation.title)}</b> now posts ${r.plan.posts_per_day} times a day for ${esc(r.plan.name)}.</p>
+          <p class="small muted" style="margin:0">Next, in your time: ${esc(next || "none yet")}</p>
+          ${r.warnings.map((w) => `<p class="small warn-text" style="margin:6px 0 0">${esc(w)}</p>`).join("")}</div>`;
       });
 };
 
@@ -1315,20 +1422,52 @@ async function route() {
   view.onclick = null;
   const [name, arg] = (location.hash.slice(1).split("?")[0] || "home").split("/");
   $$("nav a").forEach((a) => a.classList.toggle("active", a.dataset.view === name));
+  const navName = $(`nav a[data-view="${name}"]`)?.textContent.trim();
+  $("#crumb").textContent = navName || { slideshow: "Slideshow", collection: "Collection", libprofile: "Library", "slideshows-of": "Automation" }[name] || "Today";
+  document.body.classList.remove("menu-open");
+  window.scrollTo(0, 0);
   const fn = views[name] || views.home;
+  // A slow load shows the screen's shape (title, then blocks) instead of the previous screen.
+  const skeleton = setTimeout(() => {
+    view.innerHTML = `<div class="title-row" aria-hidden="true"><div><span class="skeleton" style="height:28px;width:200px"></span>
+      <span class="skeleton" style="height:16px;width:min(420px,80%);margin-top:10px"></span></div></div>
+      <div class="stack" aria-busy="true" aria-label="Loading">${[96, 220, 160].map((h) => `<span class="skeleton" style="height:${h}px;border-radius:var(--radius-card)"></span>`).join("")}</div>`;
+  }, 180);
+  // The view's first write cancels it (some views render, then keep loading).
+  const firstPaint = new MutationObserver(() => { clearTimeout(skeleton); firstPaint.disconnect(); });
+  firstPaint.observe(view, { childList: true });
   try { await fn(arg); }
-  catch (e) { view.innerHTML = `<h1>Something went wrong</h1><p class="muted">${esc(e.message)}</p>`; }
+  catch (e) {
+    view.innerHTML = `${titleRow("This page didn't load", esc(e.message), `<button id="retry">Try again</button>`)}`;
+    $("#retry").onclick = route;
+  } finally {
+    clearTimeout(skeleton);
+    firstPaint.disconnect();
+  }
 }
 
 async function statusPills() {
   try {
     const st = await api("/status");
+    const item = (ok, label, href) => `<a href="${href}"><span class="dot ${ok ? "on" : "off"}"></span>${esc(label)}</a>`;
     $("#status-pills").innerHTML = [
-      [st.ai ? `AI: ${st.ai_provider}` : "AI", st.ai], ["Images", !st.image_generation.startsWith("unavailable")],
-      ["TikTok", PHONE ? st.poster?.logged_in : st.tiktok], ["Apify", st.apify],
-    ].map(([k, ok]) => `<span class="pill ${ok ? "ok" : "bad"}">${k}</span>`).join("");
-  } catch { /* shown by the view */ }
+      item(st.ai, st.ai ? `AI: ${st.ai_provider}` : "No AI key", "#settings"),
+      item(!st.image_generation.startsWith("unavailable"), `Images: ${st.image_generation.split(" ")[0]}`, "#settings"),
+      st.apify ? item(true, "Apify", "#settings") : "",
+    ].join("");
+    const p = st.poster || {};
+    $("#who").innerHTML = PHONE
+      ? `<span class="dot ${p.logged_in ? "on" : "off"}"></span><span class="label">${p.logged_in ? "Posting as" : "TikTok"}</span><b>${p.logged_in ? "@" + esc(p.username) : "not logged in"}</b>`
+      : `<span class="dot ${st.tiktok ? "on" : "off"}"></span><span class="label">TikTok API</span><b>${st.tiktok ? "connected" : "not set up"}</b>`;
+  } catch { /* the view shows the error */ }
 }
+
+document.addEventListener("click", (e) => {
+  if (e.target.closest("[data-menu]")) document.body.classList.toggle("menu-open");
+});
+document.addEventListener("keydown", (e) => {
+  if (e.key === "Escape") document.body.classList.remove("menu-open");
+});
 
 window.addEventListener("hashchange", route);
 detectPlatform().then(() => { route(); statusPills(); });

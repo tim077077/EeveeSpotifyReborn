@@ -205,7 +205,10 @@ class Api(private val e: Engine, private val token: String, port: Int) : NanoHTT
         )
         val prediction = s.objOrNull("prediction")
         out["prediction"] = if (full) prediction else prediction?.let {
-            obj("viral_potential" to it["viral_potential"], "hook_score" to it["hook_score"], "hold_rate" to it["hold_rate"], "verdict_tag" to it["verdict_tag"])
+            obj(
+                "viral_potential" to it["viral_potential"], "hook_score" to it["hook_score"], "hold_rate" to it["hold_rate"],
+                "verdict_tag" to it["verdict_tag"], "attention" to it["attention"],
+            )
         }
         if (full) out["spec"] = s.objAt("spec")
         return out

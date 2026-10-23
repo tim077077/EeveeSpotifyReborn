@@ -2,36 +2,73 @@
 <html lang="en">
 <head>
   <meta charset="utf-8" />
-  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
+  <meta name="theme-color" content="#000000" />
   <title>Slidemill</title>
   <link rel="icon" href="/static/favicon.svg" type="image/svg+xml" />
+  <link rel="preload" href="/static/montserrat-ui.woff2" as="font" type="font/woff2" crossorigin />
   <link rel="stylesheet" href="/static/styles.css" />
 </head>
 <body>
-  <aside class="sidebar">
-    <div class="brand">Slidemill</div>
-    <nav>
-      <a href="#home" data-view="home">Dashboard</a>
-      <a href="#studio" data-view="studio">✨ Studio</a>
-      <a href="#create" data-view="create">Create slideshow</a>
-      <a href="#automations" data-view="automations">Automations</a>
-      <a href="#timing" data-view="timing">Best times to post</a>
-      <a href="#slideshows" data-view="slideshows">Slideshows</a>
-      <a href="#collections" data-view="collections">Image collections</a>
-      <a href="#products" data-view="products">Products</a>
-      <a href="#accounts" data-view="accounts">TikTok accounts</a>
-      <a href="#library" data-view="library">Slideshow library</a>
-      <a href="#analytics" data-view="analytics">Analytics</a>
-      <a href="#settings" data-view="settings">Settings</a>
+  <svg width="0" height="0" style="position:absolute" aria-hidden="true">
+    <defs>
+      <symbol id="i-home" viewBox="0 0 16 16"><path d="M2.5 7 8 2.5 13.5 7v6.5h-3.5V10H6v3.5H2.5z" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linejoin="round"/></symbol>
+      <symbol id="i-studio" viewBox="0 0 16 16"><path d="M8 1.8 9.4 6.6 14.2 8 9.4 9.4 8 14.2 6.6 9.4 1.8 8 6.6 6.6z" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linejoin="round"/></symbol>
+      <symbol id="i-create" viewBox="0 0 16 16"><rect x="2.5" y="2.5" width="11" height="11" rx="2" fill="none" stroke="currentColor" stroke-width="1.5"/><path d="M8 5.5v5M5.5 8h5" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/></symbol>
+      <symbol id="i-auto" viewBox="0 0 16 16"><path d="M13 6.5A5 5 0 0 0 3.6 5M3 9.5A5 5 0 0 0 12.4 11" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/><path d="M3.5 2.5V5H6M12.5 13.5V11H10" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/></symbol>
+      <symbol id="i-clock" viewBox="0 0 16 16"><circle cx="8" cy="8" r="5.75" fill="none" stroke="currentColor" stroke-width="1.5"/><path d="M8 5v3.2l2.2 1.4" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/></symbol>
+      <symbol id="i-stack" viewBox="0 0 16 16"><rect x="4.5" y="3.5" width="8" height="10" rx="1.5" fill="none" stroke="currentColor" stroke-width="1.5"/><path d="M2.5 11.5V3.5a1.5 1.5 0 0 1 1.5-1.5h6" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/></symbol>
+      <symbol id="i-image" viewBox="0 0 16 16"><rect x="2.5" y="3" width="11" height="10" rx="1.5" fill="none" stroke="currentColor" stroke-width="1.5"/><path d="m3 11.5 3-3 2.5 2.5L10.5 9l2.5 2.5" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linejoin="round"/><circle cx="10.5" cy="6" r="1" fill="currentColor"/></symbol>
+      <symbol id="i-tag" viewBox="0 0 16 16"><path d="M2.5 2.5h5.2l5.8 5.8-5.2 5.2-5.8-5.8z" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linejoin="round"/><circle cx="5.5" cy="5.5" r="1" fill="currentColor"/></symbol>
+      <symbol id="i-book" viewBox="0 0 16 16"><path d="M3 2.5h7.5a1.5 1.5 0 0 1 1.5 1.5v9.5H4.5A1.5 1.5 0 0 1 3 12zM3 12a1.5 1.5 0 0 1 1.5-1.5H12" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linejoin="round"/></symbol>
+      <symbol id="i-chart" viewBox="0 0 16 16"><path d="M2.5 13.5h11M4.5 11V8M8 11V4M11.5 11V6.5" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/></symbol>
+      <symbol id="i-gear" viewBox="0 0 16 16"><circle cx="8" cy="8" r="2" fill="none" stroke="currentColor" stroke-width="1.5"/><path d="M8 1.8v2M8 12.2v2M1.8 8h2M12.2 8h2M3.6 3.6 5 5M11 11l1.4 1.4M3.6 12.4 5 11M11 5l1.4-1.4" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/></symbol>
+      <symbol id="i-user" viewBox="0 0 16 16"><circle cx="8" cy="5.5" r="2.75" fill="none" stroke="currentColor" stroke-width="1.5"/><path d="M2.75 13.5c.6-2.6 2.7-4 5.25-4s4.65 1.4 5.25 4" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/></symbol>
+      <symbol id="i-menu" viewBox="0 0 20 20"><path d="M3 6h14M3 10h14M3 14h14" stroke="currentColor" stroke-width="1.6" stroke-linecap="round"/></symbol>
+      <symbol id="i-close" viewBox="0 0 16 16"><path d="m4 4 8 8M12 4l-8 8" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/></symbol>
+      <symbol id="i-check" viewBox="0 0 16 16"><circle cx="8" cy="8" r="6" fill="none" stroke="currentColor" stroke-width="1.5"/><path d="m5.5 8.2 1.7 1.7 3.3-3.6" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/></symbol>
+      <symbol id="i-todo" viewBox="0 0 16 16"><circle cx="8" cy="8" r="6" fill="none" stroke="currentColor" stroke-width="1.5" stroke-dasharray="2.4 2"/></symbol>
+      <symbol id="i-star" viewBox="0 0 16 16"><path d="m8 2.2 1.8 3.7 4 .6-2.9 2.8.7 4L8 11.4l-3.6 1.9.7-4L2.2 6.5l4-.6z" fill="currentColor"/></symbol>
+      <symbol id="i-mark" viewBox="0 0 24 24"><rect x="3" y="4" width="11" height="15" rx="2.5" fill="#3a3a3a"/><rect x="7" y="3" width="11" height="16" rx="2.5" fill="#6b6b6b"/><rect x="10" y="5" width="11" height="16" rx="2.5" fill="#25f4ee"/></symbol>
+    </defs>
+  </svg>
+
+  <aside class="sidebar" id="sidebar">
+    <a class="brand" href="#home"><svg width="24" height="24" aria-hidden="true"><use href="#i-mark"/></svg>Slidemill</a>
+    <button class="menu-btn" type="button" data-menu aria-label="Close menu"><svg width="18" height="18" aria-hidden="true"><use href="#i-close"/></svg></button>
+    <nav aria-label="Main">
+      <div class="group">Make</div>
+      <a href="#home" data-view="home"><svg width="16" height="16" aria-hidden="true"><use href="#i-home"/></svg>Today</a>
+      <a href="#studio" data-view="studio"><svg width="16" height="16" aria-hidden="true"><use href="#i-studio"/></svg>Studio</a>
+      <a href="#create" data-view="create"><svg width="16" height="16" aria-hidden="true"><use href="#i-create"/></svg>Create slideshow</a>
+      <a href="#slideshows" data-view="slideshows"><svg width="16" height="16" aria-hidden="true"><use href="#i-stack"/></svg>Slideshows</a>
+      <div class="group">Post</div>
+      <a href="#automations" data-view="automations"><svg width="16" height="16" aria-hidden="true"><use href="#i-auto"/></svg>Automations</a>
+      <a href="#timing" data-view="timing"><svg width="16" height="16" aria-hidden="true"><use href="#i-clock"/></svg>Best times</a>
+      <a href="#analytics" data-view="analytics"><svg width="16" height="16" aria-hidden="true"><use href="#i-chart"/></svg>Analytics</a>
+      <a href="#accounts" data-view="accounts"><svg width="16" height="16" aria-hidden="true"><use href="#i-user"/></svg>TikTok accounts</a>
+      <div class="group">Research and assets</div>
+      <a href="#library" data-view="library"><svg width="16" height="16" aria-hidden="true"><use href="#i-book"/></svg>Slideshow library</a>
+      <a href="#collections" data-view="collections"><svg width="16" height="16" aria-hidden="true"><use href="#i-image"/></svg>Image collections</a>
+      <a href="#products" data-view="products"><svg width="16" height="16" aria-hidden="true"><use href="#i-tag"/></svg>Products</a>
+      <a href="#settings" data-view="settings"><svg width="16" height="16" aria-hidden="true"><use href="#i-gear"/></svg>Settings</a>
     </nav>
-    <div class="sidebar-foot" id="status-pills"></div>
+    <div class="sidebar-foot" id="sidebar-foot"></div>
   </aside>
 
+  <header class="topbar">
+    <button class="menu-btn" type="button" data-menu aria-label="Open menu" aria-controls="sidebar"><svg width="20" height="20" aria-hidden="true"><use href="#i-menu"/></svg></button>
+    <span class="crumb" id="crumb">Slidemill</span>
+    <div class="status" id="status-pills"></div>
+    <div class="who" id="who"></div>
+  </header>
+
   <main id="view"></main>
-  <div id="toast" class="toast" hidden></div>
+  <div id="toast" class="toast" role="status" aria-live="polite" hidden></div>
 
   <dialog id="dialog"><form method="dialog" id="dialog-body"></form></dialog>
 
+  <script src="/static/charts.js"></script>
   <script src="/static/app.js" type="module"></script>
 </body>
 </html>
