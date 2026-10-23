@@ -16,6 +16,7 @@ It was built by tearing down how reel.farm works; see [docs/REELFARM_TEARDOWN.md
 - **Automations.** Each automation has a list of hooks that it rotates through, a style prompt, a language, an optional product for a soft CTA, image settings and posting times (cron). Automations can be paused, resumed or run now.
 - **Images.** Upload your own image collections or import them from Pexels/Unsplash. You can also let it search stock photos for each slide automatically. Collections are cycled least-used first so images don't repeat.
 - **Browser poster (no developer app).** The Chrome extension in `extension/` posts Slidemill's queue from your logged-in tiktok.com tab, using the same internal endpoints TikTok Studio's web uploader uses. Pick "Post from my browser" anywhere you choose how to post: one slideshow, an automation, Best times or Studio. Slidemill caps posts per day (6 by default) and spaces them out (20 min by default), and view counts come from each post's public page. "Save drafts from my browser" is a placeholder: those jobs wait in the queue, never posted publicly, until the "Save draft" request is captured. Download the extension in **Settings → Browser poster** and read `extension/HOW-TO-USE.txt`. This route is against TikTok's terms, so use an account you can afford to lose.
+- **Android app.** `android/` holds the browser poster as a phone app: the dashboard, a TikTok tab where you log in once, and a background poster service that runs the same `tiktok-inject.js`. The APK is built by the "Android APK" GitHub workflow. See [android/README.md](android/README.md).
 - **TikTok posting.** Connect any number of accounts with OAuth. Posts go out as photo carousels, either straight to your TikTok drafts (`MEDIA_UPLOAD`) or published directly (`DIRECT_POST`). The direct-post daily limit is enforced, with automatic fallback to drafts.
 - **Analytics.** It polls each post's publish status and syncs views, likes, comments and shares every 10 minutes.
 - **MP4 export** for Reels and Shorts, plus a **REST API** (`/api/v1`, docs at `/docs`).
@@ -115,6 +116,7 @@ app/
   main.py        REST API + dashboard
 deploy/          install.sh, backup.sh, update.sh, Caddyfile
 extension/       Chrome extension: posts the queue from your tiktok.com tab
+android/         Android app: dashboard + TikTok login + background poster (shares extension/tiktok-inject.js)
 static/          dashboard (vanilla JS)
 fonts/           open-licence fonts (OFL)
 ```

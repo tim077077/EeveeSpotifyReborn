@@ -775,9 +775,11 @@ EXTENSION_DIR = STATIC_DIR.parent / "extension"
 
 
 @api.get("/extension/next")
-def extension_next(version: str = "", username: str = "", draft: str = "0") -> dict[str, Any]:
-    """Called by the browser extension about once a minute: the next post to make, if any."""
-    return browser_queue.claim_next(client={"version": version, "username": username, "draft": draft})
+def extension_next(request: Request, version: str = "", username: str = "", draft: str = "0") -> dict[str, Any]:
+    """Called by the browser extension / Android app about once a minute: the next post to make, if any."""
+    return browser_queue.claim_next(
+        client={"version": version, "username": username, "draft": draft}, base_url=str(request.base_url)
+    )
 
 
 @api.post("/extension/jobs/{post_id}/result")

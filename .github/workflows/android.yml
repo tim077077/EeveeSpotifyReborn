@@ -1,0 +1,26 @@
+name: Android APK
+
+on:
+  push:
+    paths:
+      - "android/**"
+      - "extension/tiktok-inject.js"
+      - ".github/workflows/android.yml"
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "17"
+      - name: Build APK
+        working-directory: android
+        run: ./gradlew assembleRelease --no-daemon
+      - uses: actions/upload-artifact@v4
+        with:
+          name: slidemill-android
+          path: android/app/build/outputs/apk/release/app-release.apk

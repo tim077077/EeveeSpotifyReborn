@@ -102,12 +102,15 @@ def status(now: datetime | None = None) -> dict:
     }
 
 
-def claim_next(now: datetime | None = None, client: dict | None = None) -> dict:
+def claim_next(now: datetime | None = None, client: dict | None = None, base_url: str | None = None) -> dict:
     """Hand the extension its next post, or explain why there's nothing to do yet.
 
     `client` is what the extension reports: version, the logged-in username, and whether it can
     save drafts yet ("draft": "1"). Draft posts stay queued until an extension that can do them asks.
+    `base_url` is the address the client reached Slidemill at (a phone on Wi-Fi can't use "localhost"),
+    so slide links work wherever the poster runs.
     """
+    base = (base_url or settings.public_base_url).rstrip("/")
     now = now or datetime.now(timezone.utc)
     client = {k: str(v)[:128] for k, v in (client or {}).items() if v not in (None, "")}
     last_seen.clear()
@@ -151,7 +154,7 @@ def claim_next(now: datetime | None = None, client: dict | None = None) -> dict:
                 # TikTok's photo-post "title" is the line shown on the carousel; the caption carries hashtags.
                 "title": (show.caption or show.title)[:90],
                 "caption": show.description or "",
-                "images": [f"{settings.public_base_url}/media/{rel}" for rel in show.rendered],
+                "images": [f"{base}/media/{rel}" for rel in show.rendered],
                 "sound": bool(options.get("sound", True)),
             },
             "reason": "",

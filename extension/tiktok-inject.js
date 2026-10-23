@@ -237,7 +237,8 @@
       };
       window.addEventListener("message", onMsg);
       window.postMessage({ __vbtt: "upload", id, url, crc, storageU: storageU || "", b64: bytesToB64(bytes) }, "*");
-      setTimeout(() => { if (!done) { window.removeEventListener("message", onMsg); reject(new Error("no bridge")); } }, 4000);
+      // 60s: a relayed upload of a full-size slide can take longer than a few seconds on mobile data.
+      setTimeout(() => { if (!done) { window.removeEventListener("message", onMsg); reject(new Error("no bridge")); } }, 60000);
     });
   }
 

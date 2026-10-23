@@ -57,6 +57,7 @@ def test_publish_and_report(client):
     assert job["id"] == pid and job["action"] == "publish" and job["sound"] is True
     assert job["title"] == "5 habits that fixed my sleep" and job["caption"] == "#sleep #habits"
     assert len(job["images"]) == 2 and job["images"][0].endswith(".jpg")
+    assert job["images"][0].startswith("http://testserver/media/")  # the address the client used
     # one at a time
     assert client.get("/api/v1/extension/next", headers=AUTH).json()["reason"] == "a post is already in progress"
     res = client.post(f"/api/v1/extension/jobs/{pid}/result", json={"ok": True, "item_id": "7400000000000000009", "username": "tim"}, headers=AUTH)
