@@ -17,14 +17,10 @@ import kotlin.math.ln
 class Virality(private val db: Db, private val llm: Llm, private val mediaDir: File) {
     companion object {
         const val BACKTEST_MIN = 8
-        const val NOISE_POSTS = 3
+        const val NOISE_POSTS = 2
+        const val BACKTEST_VERSION = 2 // results measured before the read and the ranking shared one call don't pick a method
         const val LETTERS = "ABCDEFG"
-        const val RANK_PROMPT = """You compare TikTok photo-carousel (slideshow) posts. Rank every slideshow you are given from the one that will perform best to the one that will perform worst, where performing means beating the views its account usually gets: a hook that stops the scroll, slides that earn each swipe, a payoff, and something people relate to, save or share. Judge only what is in front of you; you are not told how any of them did."""
-        val RANK = Schema.obj(
-            "RankRead",
-            "order" to Schema.Array(Schema.Str(), "Every slideshow's letter, best first."),
-            "reason" to Schema.Str("At most 25 words on what separates the best from the worst."),
-        )
+        const val MAX_IMAGES = 12 // some vision APIs cap images per request (Mistral: reportedly 8-12); past this, rank by text alone
 
         const val SYSTEM_PROMPT = """You are a TikTok photo-carousel (slideshow) performance analyst. You predict how real viewers on the For You feed react to a slideshow before it is posted.
 
@@ -51,6 +47,15 @@ For each slide in order, give swipe_on: the percent of viewers who reach this sl
             "tips" to Schema.Array(Schema.Str(), "2-4 concrete edits that would raise the score most."),
             "better_hook" to Schema.Str("A stronger slide-1 hook for this exact slideshow, same language, under 10 words."),
         )
+
+        /** The read schema, plus a blind ranking and/or a transcription when this call carries them. */
+        fun readSchema(rank: Boolean, transcribe: Boolean): Schema.Object {
+            if (!rank && !transcribe) return READ
+            val props = LinkedHashMap(READ.props)
+            if (transcribe) props["slide_texts"] = Schema.Array(Schema.Str(), "The overlay text on each slide, in order, exactly as written ('' if none).")
+            if (rank) props["rank_order"] = Schema.Array(Schema.Str(), "Every slideshow's letter in the comparison, best first.")
+            return Schema.Object("ViralityReadPlus", props)
+        }
 
         val DIMENSIONS = listOf("visual_pull", "curiosity", "clarity", "relatability", "shareability")
 
@@ -162,7 +167,7 @@ For each slide in order, give swipe_on: the percent of viewers who reach this sl
                 val texts = p.strings("slide_texts").filter { it.isNotBlank() }
                 val hook = texts.firstOrNull() ?: p.str("description").replace(Regex("#\\S+"), "").trim()
                 out += obj(
-                    "id" to p.str("id"), "username" to username, "url" to p.str("url"), "hook" to hook,
+                    "id" to p.str("id"), "read" to texts.isNotEmpty(), "username" to username, "url" to p.str("url"), "hook" to hook,
                     "texts" to (texts.ifEmpty { if (hook.isEmpty()) emptyList() else listOf(hook) }).toMutableList<Any?>(),
                     "images" to p.strings("images").toMutableList<Any?>(), "views" to p.long("views"),
                     "lift" to ln(p.long("views") / median),
@@ -172,34 +177,19 @@ For each slide in order, give swipe_on: the percent of viewers who reach this sl
         out
     }
 
-    /**
-     * Rank a slideshow blind among up to 6 real library posts spread from flops to hits; its place among
-     * them (whose real results are known) is the score. Null when the library has fewer than 4 posts.
-     */
-    fun rankScore(texts: List<String>, cover: String?, rows: List<Obj>, seed: String, exclude: String = ""): Obj? {
-        val refs = Methods.spread(rows.filter { it.str("id") != exclude && it.strings("texts").isNotEmpty() }, 6)
-        if (refs.size < 4) return null
-        val cfg = llm.resolve() ?: throw LlmError("Add an AI key in Settings first.")
-        // Where the new one sits, so position bias can't favour it (same as Python's zlib.crc32).
-        val pos = (java.util.zip.CRC32().apply { update(seed.toByteArray()) }.value % (refs.size + 1)).toInt()
-        val items: List<Obj?> = refs.take(pos) + listOf(null) + refs.drop(pos)
-        val lines = mutableListOf<String>()
-        val covers = mutableListOf<String?>()
-        items.forEachIndexed { i, it ->
-            val slides = it?.strings("texts") ?: texts
-            lines += "Slideshow ${LETTERS[i]}: " + slides.take(10).joinToString(" / ") { t -> t.take(160) }
-            covers += if (it == null) cover else it.strings("images").firstOrNull()
-        }
-        val images = if (cfg.vision && covers.all { it != null }) covers.map {
-            "data:image/jpeg;base64," + Base64.getEncoder().encodeToString(File(mediaDir, it!!).readBytes())
-        } else null
-        var user = lines.joinToString("\n") + "\n\nRank all ${items.size} (${LETTERS.take(items.size).toList().joinToString(", ")}), best first."
-        if (images != null) user += " Their cover slides (slide 1) are attached in the same order."
-        val read = llm.completeJson(RANK_PROMPT, user, RANK, images = images, cfg = cfg)
-        val order = read.strings("order").map { it.trim().uppercase().take(1) }
+    /** Up to 6 read library posts spread from flops to hits to rank a slideshow against (null if under 4). */
+    fun references(rows: List<Obj>, exclude: String = ""): List<Obj>? {
+        var pool = rows.filter { it.str("id") != exclude && it.bool("read") }
+        if (pool.size < 4) pool = rows.filter { it.str("id") != exclude && it.strings("texts").isNotEmpty() }
+        return Methods.spread(pool, 6).takeIf { it.size >= 4 }
+    }
+
+    /** Where the slideshow (letter `pos`) landed among the references, whose real results are known. */
+    private fun rankFromOrder(order: List<String>, refs: List<Obj>, pos: Int): Obj? {
+        val letters = order.map { it.trim().uppercase().take(1) }
         val me = LETTERS[pos].toString()
-        if (me !in order) return null
-        val above = order.take(order.indexOf(me)).toSet()
+        if (me !in letters) return null
+        val above = letters.take(letters.indexOf(me)).toSet()
         val beats = refs.indices.count { i -> LETTERS[if (i < pos) i else i + 1].toString() !in above }
         val lifts = refs.map { it.dbl("lift") }.sorted()
         val at = beats.toDouble() / refs.size * (lifts.size - 1)
@@ -207,7 +197,7 @@ For each slide in order, give swipe_on: the percent of viewers who reach this sl
         val lift = lifts[lo] + (lifts[minOf(lo + 1, lifts.size - 1)] - lifts[lo]) * (at - lo)
         return obj(
             "score" to Math.round(100.0 * (beats + 0.5) / (refs.size + 1)).toInt(), "lift" to Methods.round2(Math.exp(lift)),
-            "beats" to beats, "references" to refs.size, "reason" to read.str("reason"),
+            "beats" to beats, "references" to refs.size,
         )
     }
 
@@ -223,26 +213,34 @@ For each slide in order, give swipe_on: the percent of viewers who reach this sl
     private fun slideTexts(spec: Map<String, Any?>): List<String> =
         spec.objs("slides").map { s -> s.objs("text_items").joinToString(" ") { it.str("text") }.trim() }.filter { it.isNotEmpty() }
 
-    /** Predict and store the result on the slideshow, scored with the method the library test picked. */
+    private fun picked(bt: Obj?): Pair<Obj, String> {
+        val b = bt ?: obj()
+        return b to if (b.long("version") == BACKTEST_VERSION.toLong()) b.str("method").ifEmpty { "current" } else "current"
+    }
+
+    /**
+     * One AI call: the viewer read plus a blind ranking among real library posts; the final score uses
+     * the method the library test picked. Unchanged slideshows return the stored prediction (no call).
+     */
     fun predict(showId: String): Obj {
         val show = db.tx { get("slideshows", showId)?.copyObj() } ?: throw PipelineError("slideshow not found")
         if (show.str("status") != "completed" || show.strings("rendered").isEmpty()) throw PipelineError("Render the slideshow first.")
         val spec = Models.SPEC.of(show.objAt("spec"))
-        val result = read(spec, show.str("caption"), show.str("description"), show.strings("rendered"))
         val rows = libraryRows()
+        val (bt, method) = picked(lastBacktest())
         val texts = slideTexts(spec)
+        val fingerprint = java.security.MessageDigest.getInstance("SHA-1").digest(Json.write(listOf(
+            texts, show.strings("rendered"), show.str("caption"), show.str("description"), bt["ran_at"], method, rows.size,
+        )).toByteArray()).joinToString("") { "%02x".format(it) }
+        val stored = show.objAt("prediction")
+        if (stored.str("fingerprint") == fingerprint) return stored.also { it["cached"] = true }
+        val (result, rank, _) = read(spec, show.str("caption"), show.str("description"), show.strings("rendered"), refs = references(rows), seed = showId)
         val similar = Methods.similarEvidence(texts.joinToString(" "), rows)
         if (similar != null) result["similar"] = similar
-        val bt = lastBacktest() ?: obj()
-        val method = bt.str("method").ifEmpty { "current" }
-        var rank: Obj? = null
-        if (method in setOf("rank", "blend", "learned")) {
-            // A failed ranking falls back to the AI score rather than failing the prediction.
-            rank = try { rankScore(texts, show.strings("rendered").first(), rows, showId) } catch (e: RuntimeException) { null }
-            if (rank != null) result["rank"] = rank
-        }
+        if (rank != null) result["rank"] = rank
         val value = if (method != "current") Methods.methodValue(method, features(result, rank, similar), bt) else null
         result["ai_score"] = result.int("viral_potential")
+        result["method"] = "current"
         if (value != null) {
             result["viral_potential"] = value
             val (v, tag) = verdict(value)
@@ -251,22 +249,35 @@ For each slide in order, give swipe_on: the percent of viewers who reach this sl
             val rho = bt.objs("methods").firstOrNull { it.str("method") == method }?.get("spearman")
             result["basis"] = result.str("basis") + "; final score from ${Methods.LABELS[method]!!.lowercase()} (the library test's pick, ρ = $rho)"
             result["method"] = method
-        } else {
-            result["method"] = "current"
         }
+        result["fingerprint"] = fingerprint
         db.tx { get("slideshows", showId)?.set("prediction", result) }
         return result
     }
 
-    /** Ask the AI to read one slideshow (`images` = media-relative files) and score it. */
-    private fun read(spec: Obj, caption: String, description: String, images: List<String>, exclude: String = ""): Obj {
+    private fun dataUrl(path: String) = "data:image/jpeg;base64," + Base64.getEncoder().encodeToString(File(mediaDir, path).readBytes())
+
+    /**
+     * One AI call: read the slideshow like a viewer and score it, rank it blind among `refs` (real library
+     * posts) when given, and transcribe its slide text when `transcribe`. Returns (result, rank, slide texts).
+     */
+    private fun read(
+        spec0: Obj, caption: String, description: String, images: List<String>, exclude: String = "",
+        refs: List<Obj>? = null, seed: String = "", transcribe: Boolean = false,
+    ): Triple<Obj, Obj?, List<String>> {
+        var spec = spec0
         val slides = spec.objs("slides")
         val cfg = llm.resolve() ?: throw LlmError("Add an AI key in Settings first.")
+        if (transcribe && !cfg.vision) throw LlmError("Reading slide text needs a vision-capable AI key.")
         val (good, bad) = calibrationExamples(exclude = exclude)
+        val dataUrls = if (cfg.vision) images.take(10).map { dataUrl(it) }.toMutableList() else null
+        // Where this slideshow sits among the references is fixed per slideshow, so position bias can't favour it.
+        val pos = if (refs == null) 0 else (java.util.zip.CRC32().apply { update(seed.toByteArray()) }.value % (refs.size + 1)).toInt()
         val user = buildString {
             append("Caption: $caption\nDescription: $description\n\nSlides (text as written on each image):\n")
             slides.forEachIndexed { i, s ->
-                append("${i + 1}. [${s.str("role")}] ${s.objs("text_items").joinToString(" / ") { it.str("text") }}\n")
+                val text = if (transcribe) "(unknown: read it off the attached slide)" else s.objs("text_items").joinToString(" / ") { it.str("text") }
+                append("${i + 1}. [${s.str("role")}] $text\n")
             }
             if (good.isNotEmpty() || bad.isNotEmpty()) {
                 append("\nCalibration from real slideshows in this creator's research library:\n")
@@ -274,13 +285,39 @@ For each slide in order, give swipe_on: the percent of viewers who reach this sl
                 bad.forEach { append("- under-performed: $it\n") }
             }
             append("\nThere are ${slides.size} slides; return exactly ${slides.size} entries in `slides`.")
-            if (cfg.vision) append(" The rendered slides are attached in order: judge the actual images and how readable the text is on them.")
+            if (transcribe) append(" Also return `slide_texts`: the overlay text of each slide, in order.")
+            if (dataUrls != null) append(" The rendered slides are attached in order: judge the actual images and how readable the text is on them.")
+            if (refs != null) {
+                val names = LETTERS.take(refs.size + 1).toList()
+                val own = if (transcribe) "its slides are attached" else slideTexts(spec).take(10).joinToString(" / ") { it.take(160) }
+                append("\n\nComparison: rank this slideshow (Slideshow ${LETTERS[pos]}) together with ${refs.size} real slideshows from the " +
+                    "research library, best to worst, by how far each would beat the views its account usually gets. " +
+                    "You are not told how any of them did. Return `rank_order`: all ${names.size} letters (${names.joinToString(", ")}), best first.")
+                var k = 0
+                for (letter in names) {
+                    if (letter == LETTERS[pos]) append("\nSlideshow $letter (this one): $own")
+                    else append("\nSlideshow $letter: " + refs[k++].strings("texts").take(10).joinToString(" / ") { it.take(160) })
+                }
+                val covers = refs.map { it.strings("images").firstOrNull() }
+                if (dataUrls != null && covers.all { it != null } && dataUrls.size + covers.size <= MAX_IMAGES) {
+                    covers.forEach { dataUrls += dataUrl(it!!) }
+                    append("\nAfter this slideshow's slides, the cover slide of each other slideshow is attached in letter order.")
+                }
+            }
         }
-        val dataUrls = if (cfg.vision) images.take(10).map {
-            "data:image/jpeg;base64," + Base64.getEncoder().encodeToString(File(mediaDir, it).readBytes())
-        } else null
-        val read = llm.completeJson(SYSTEM_PROMPT, user, READ, images = dataUrls, cfg = cfg)
-        return score(read, spec, visionUsed = cfg.vision, calibrated = good.size + bad.size)
+        val read = llm.completeJson(SYSTEM_PROMPT, user, readSchema(refs != null, transcribe), images = dataUrls, cfg = cfg)
+        var texts = slideTexts(spec)
+        if (transcribe) {
+            val got = read.strings("slide_texts").map { it.trim() }.take(slides.size)
+            spec = Models.SPEC.of(spec.copyObj().also { sp ->
+                sp["slides"] = sp.objs("slides").mapIndexed { i, sl ->
+                    sl.also { it["text_items"] = got.getOrNull(i)?.takeIf { t -> t.isNotEmpty() }?.let { t -> arr(obj("text" to t)) } ?: arr() }
+                }.toMutableList<Any?>()
+            })
+            texts = got.filter { it.isNotEmpty() }
+        }
+        val rank = refs?.let { rankFromOrder(read.strings("rank_order"), it, pos) }
+        return Triple(score(read, spec, visionUsed = cfg.vision, calibrated = good.size + bad.size), rank, texts)
     }
 
     /** Turn the model's read plus the rule checks into the numbers shown in the app. */
@@ -377,13 +414,15 @@ For each slide in order, give swipe_on: the percent of viewers who reach this sl
     }
 
     /**
-     * Score real library slideshows blind with every method (each post is left out of its own
-     * calibration examples, references and look-alikes), measure how well each ranks them like their
-     * real views did, and pick the method the app should use. `analyze` reads slide text off a post
-     * that hasn't been read yet. Throws PipelineError when the library is too small.
+     * Score real library slideshows blind with every method (each post is left out of its own calibration
+     * examples, references and look-alikes), measure how well each ranks them like their real views did,
+     * and pick the method the app should use. One AI call per post: the read, the ranking and, for posts
+     * not read yet, the slide text all come back together. Throws PipelineError when the library is too small.
      */
-    fun backtest(limit: Int = 20, analyze: (String) -> Unit, progress: (Int, Int) -> Unit = { _, _ -> }): Obj {
-        val sample = Methods.spread(libraryRows().filter { it.strings("images").isNotEmpty() }, limit)
+    fun backtest(limit: Int = 20, progress: (Int, Int) -> Unit = { _, _ -> }): Obj {
+        val all = libraryRows().filter { it.strings("images").isNotEmpty() }
+        val alreadyRead = all.filter { it.bool("read") }
+        val sample = Methods.spread(if (alreadyRead.size >= limit) alreadyRead else all, limit) // read posts need no transcription
         if (sample.size < BACKTEST_MIN) throw PipelineError(
             "The library has ${sample.size} usable slideshows; it needs $BACKTEST_MIN. " +
                 "Add accounts in your niche (3+ slideshow posts each) to the Slideshow library first.",
@@ -393,18 +432,17 @@ For each slide in order, give swipe_on: the percent of viewers who reach this sl
         sample.forEachIndexed { n, row ->
             val postId = row.str("id")
             progress(n, sample.size)
-            if (db.tx { get("library_posts", postId)?.strings("slide_texts") }.isNullOrEmpty()) {
-                if (!cfg.vision) return@forEachIndexed // neither the slide text nor a way to read it
-                try { analyze(postId) } catch (e: RuntimeException) { return@forEachIndexed }
-            }
+            if (!row.bool("read") && !cfg.vision) return@forEachIndexed // neither the slide text nor a way to read it
             val post = db.tx { get("library_posts", postId)?.copyObj() } ?: return@forEachIndexed
-            val spec = librarySpec(post)
-            val texts = slideTexts(spec)
             val others = libraryRows().filter { it.str("id") != postId }
             val images = post.strings("images")
-            val (result, rank) = try {
-                read(spec, post.str("description"), "", images, exclude = postId) to rankScore(texts, images.first(), others, postId)
+            val (result, rank, texts) = try {
+                read(librarySpec(post), post.str("description"), "", images, exclude = postId,
+                    refs = references(others), seed = postId, transcribe = !row.bool("read"))
             } catch (e: RuntimeException) { return@forEachIndexed }
+            if (!row.bool("read") && texts.isNotEmpty()) {
+                db.tx { get("library_posts", postId)?.set("slide_texts", texts.toMutableList<Any?>()) } // the library gets read for free
+            }
             val similar = Methods.similarEvidence(texts.joinToString(" "), others)
             rows += obj(
                 "post_id" to postId, "url" to row.str("url"), "username" to row.str("username"),
@@ -415,9 +453,12 @@ For each slide in order, give swipe_on: the percent of viewers who reach this sl
         }
         // Noise: the same slideshow read twice should get about the same score.
         val drifts = rows.take(NOISE_POSTS).mapNotNull { r ->
-            val post = db.tx { get("library_posts", r.str("post_id"))?.copyObj() } ?: return@mapNotNull null
+            val id = r.str("post_id")
+            val post = db.tx { get("library_posts", id)?.copyObj() } ?: return@mapNotNull null
+            val others = libraryRows().filter { it.str("id") != id }
             try {
-                Math.abs(read(librarySpec(post), post.str("description"), "", post.strings("images"), exclude = r.str("post_id")).int("viral_potential") - r.int("score")).toDouble()
+                val again = read(librarySpec(post), post.str("description"), "", post.strings("images"), exclude = id, refs = references(others), seed = id).first
+                Math.abs(again.int("viral_potential") - r.int("score")).toDouble()
             } catch (e: RuntimeException) { null }
         }
         progress(sample.size, sample.size)
@@ -434,7 +475,7 @@ For each slide in order, give swipe_on: the percent of viewers who reach this sl
             }
         }
         val out = obj(
-            "posts" to rows.size, "spearman" to rho, "summary" to summary,
+            "version" to BACKTEST_VERSION, "posts" to rows.size, "spearman" to rho, "summary" to summary,
             "method" to (cmp?.winner ?: "current"), "methods" to (cmp?.methods ?: emptyList()).toMutableList<Any?>(),
             "model" to cmp?.model, "populations" to (cmp?.populations ?: obj()),
             "noise" to if (drifts.isEmpty()) null else Math.round(drifts.average() * 10) / 10.0,

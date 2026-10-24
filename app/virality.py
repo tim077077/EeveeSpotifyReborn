@@ -10,6 +10,7 @@ prediction is stored, so analytics can later show whether it actually tracks you
 from __future__ import annotations
 
 import base64
+import hashlib
 import json
 import math
 import re
@@ -17,11 +18,12 @@ import statistics
 import zlib
 from datetime import datetime, timezone
 
+from pydantic import Field, create_model
 from sqlalchemy import select
 
 from . import db, llm
 from .config import settings
-from .schemas import RankRead, SlideshowSpec, ViralityRead
+from .schemas import SlideshowSpec, ViralityRead
 
 SYSTEM_PROMPT = """You are a TikTok photo-carousel (slideshow) performance analyst. You predict how real viewers on the For You feed react to a slideshow before it is posted.
 
@@ -193,29 +195,81 @@ def score(read: ViralityRead, spec: SlideshowSpec, vision_used: bool, calibrated
     }
 
 
-def _read(spec: SlideshowSpec, caption: str, description: str, rendered: list[str], exclude: str = "") -> dict:
-    """Ask the AI to read one slideshow (`rendered` = media-relative images) and score it."""
+def _read_model(rank: bool, transcribe: bool) -> type[ViralityRead]:
+    """The read schema, plus a blind ranking and/or a transcription when this call carries them."""
+    extra: dict = {}
+    if transcribe:
+        extra["slide_texts"] = (list[str], Field(description="The overlay text on each slide, in order, exactly as written ('' if none)."))
+    if rank:
+        extra["rank_order"] = (list[str], Field(description="Every slideshow's letter in the comparison, best first."))
+    return create_model("ViralityReadPlus", __base__=ViralityRead, **extra) if extra else ViralityRead
+
+
+def _data_url(path: str) -> str:
+    return "data:image/jpeg;base64," + base64.b64encode((settings.media_dir / path).read_bytes()).decode()
+
+
+def _read(spec: SlideshowSpec, caption: str, description: str, rendered: list[str], exclude: str = "",
+          refs: list[dict] | None = None, seed: str = "", transcribe: bool = False) -> tuple[dict, dict | None, list[str]]:
+    """One AI call: read the slideshow like a viewer and score it, rank it blind among `refs` (real
+    library posts) when given, and transcribe its slide text when `transcribe`. Returns (result, rank,
+    slide texts)."""
     cfg = llm.resolve()
     if cfg is None:
         raise PredictError("Add an AI key in Settings first.")
+    if transcribe and not cfg.vision:
+        raise PredictError("Reading slide text needs a vision-capable AI key.")
     good, bad = calibration_examples(exclude=exclude)
     lines = [f"Caption: {caption}", f"Description: {description}", "", "Slides (text as written on each image):"]
-    lines += [f"{i + 1}. [{s.role}] " + " / ".join(t.text for t in s.text_items) for i, s in enumerate(spec.slides)]
+    if transcribe:
+        lines += [f"{i + 1}. [{s.role}] (unknown: read it off the attached slide)" for i, s in enumerate(spec.slides)]
+    else:
+        lines += [f"{i + 1}. [{s.role}] " + " / ".join(t.text for t in s.text_items) for i, s in enumerate(spec.slides)]
     if good or bad:
         lines += ["", "Calibration from real slideshows in this creator's research library:"]
         lines += [f"- over-performed: {g}" for g in good] + [f"- under-performed: {b}" for b in bad]
     tail = f"\nThere are {len(spec.slides)} slides; return exactly {len(spec.slides)} entries in `slides`."
-    if cfg.vision:
+    if transcribe:
+        tail += " Also return `slide_texts`: the overlay text of each slide, in order."
+    images = [_data_url(r) for r in rendered[:10]] if cfg.vision else None
+    if images:
         tail += " The rendered slides are attached in order: judge the actual images and how readable the text is on them."
-    images = (
-        ["data:image/jpeg;base64," + base64.b64encode((settings.media_dir / r).read_bytes()).decode() for r in rendered[:10]]
-        if cfg.vision else None
-    )
+    pos = 0
+    if refs:
+        # Where this slideshow sits among the references is fixed per slideshow, so position bias can't favour it.
+        pos = zlib.crc32(seed.encode()) % (len(refs) + 1)
+        me = LETTERS[pos]
+        own = " / ".join(t[:160] for t in _slide_texts(spec)[:10]) if not transcribe else "its slides are attached"
+        names = list(LETTERS[: len(refs) + 1])
+        comp = ["", f"Comparison: rank this slideshow (Slideshow {me}) together with {len(refs)} real slideshows from the "
+                f"research library, best to worst, by how far each would beat the views its account usually gets. "
+                f"You are not told how any of them did. Return `rank_order`: all {len(names)} letters ({', '.join(names)}), best first."]
+        k = 0
+        for letter in names:
+            if letter == me:
+                comp.append(f"Slideshow {letter} (this one): {own}")
+            else:
+                comp.append(f"Slideshow {letter}: " + " / ".join(t[:160] for t in refs[k]["texts"][:10]))
+                k += 1
+        covers = [r["images"][0] if r["images"] else None for r in refs]
+        if images is not None and all(covers) and len(images) + len(covers) <= MAX_IMAGES:
+            images += [_data_url(c) for c in covers]
+            comp.append("After this slideshow's slides, the cover slide of each other slideshow is attached in letter order.")
+        tail += "\n" + "\n".join(comp)
     try:
-        read = llm.complete_json(SYSTEM_PROMPT, "\n".join(lines) + tail, ViralityRead, images=images, cfg=cfg)
+        read = llm.complete_json(SYSTEM_PROMPT, "\n".join(lines) + tail, _read_model(bool(refs), transcribe), images=images, cfg=cfg)
     except llm.LLMError as exc:
         raise PredictError(str(exc)) from exc
-    return score(read, spec, cfg.vision, len(good) + len(bad))
+    texts = _slide_texts(spec)
+    if transcribe:
+        texts = [str(t).strip() for t in (getattr(read, "slide_texts", None) or [])][: len(spec.slides)]
+        data = spec.model_dump()
+        for i, sl in enumerate(data["slides"]):
+            sl["text_items"] = [{"text": texts[i]}] if i < len(texts) and texts[i] else []
+        spec = SlideshowSpec.model_validate(data)
+        texts = [t for t in texts if t]
+    rank = _rank_from_order(getattr(read, "rank_order", None) or [], refs, pos) if refs else None
+    return score(read, spec, cfg.vision, len(good) + len(bad)), rank, texts
 
 
 # --- the library: real slideshows whose views are known --------------------------------------
@@ -234,7 +288,7 @@ def library_rows() -> list[dict]:
                 texts = [str(t) for t in (x.slide_texts or []) if t]
                 hook = texts[0] if texts else re.sub(r"#\S+", "", x.description).strip()
                 rows.append({
-                    "id": x.id, "niche": p.niche, "username": p.username, "url": x.url, "hook": hook,
+                    "id": x.id, "read": bool(texts), "niche": p.niche, "username": p.username, "url": x.url, "hook": hook,
                     "texts": texts or ([hook] if hook else []), "images": list(x.images), "views": x.views,
                     "lift": math.log(x.views / median),
                 })
@@ -314,48 +368,33 @@ def similar_evidence(text: str, rows: list[dict]) -> dict | None:
 
 # --- method A: rank blind against real posts -------------------------------------------------------
 
-RANK_PROMPT = """You compare TikTok photo-carousel (slideshow) posts. Rank every slideshow you are given from the one that will perform best to the one that will perform worst, where performing means beating the views its account usually gets: a hook that stops the scroll, slides that earn each swipe, a payoff, and something people relate to, save or share. Judge only what is in front of you; you are not told how any of them did."""
 LETTERS = "ABCDEFG"
+MAX_IMAGES = 12  # some vision APIs cap images per request (Mistral: reportedly 8-12); past this, rank by text alone
 
 
-def rank_score(texts: list[str], cover: str | None, rows: list[dict], seed: str, exclude: str = "") -> dict | None:
-    """Rank a slideshow blind among up to 6 real library posts spread from flops to hits; its place
-    among them (whose real results are known) is the score."""
-    refs = _spread([r for r in rows if r["id"] != exclude and r["texts"]], 6)
-    if len(refs) < 4:
-        return None
-    cfg = llm.resolve()
-    if cfg is None:
-        raise PredictError("Add an AI key in Settings first.")
-    pos = zlib.crc32(seed.encode()) % (len(refs) + 1)  # where the new one sits, so position bias can't favour it
-    items: list[dict | None] = refs[:pos] + [None] + refs[pos:]
-    lines, covers = [], []
-    for letter, it in zip(LETTERS, items):
-        slides = texts if it is None else it["texts"]
-        lines.append(f"Slideshow {letter}: " + " / ".join(t[:160] for t in slides[:10]))
-        covers.append(cover if it is None else (it["images"][0] if it["images"] else None))
-    images = None
-    if cfg.vision and all(covers):
-        images = ["data:image/jpeg;base64," + base64.b64encode((settings.media_dir / c).read_bytes()).decode() for c in covers]
-    user = "\n".join(lines) + f"\n\nRank all {len(items)} ({', '.join(LETTERS[:len(items)])}), best first."
-    if images:
-        user += " Their cover slides (slide 1) are attached in the same order."
-    try:
-        read = llm.complete_json(RANK_PROMPT, user, RankRead, images=images, cfg=cfg)
-    except llm.LLMError as exc:
-        raise PredictError(str(exc)) from exc
-    order = [str(x).strip().upper()[:1] for x in read.order]
+def references(rows: list[dict], exclude: str = "") -> list[dict] | None:
+    """Up to 6 read library posts spread from flops to hits to rank a slideshow against (None if under 4)."""
+    pool = [r for r in rows if r["id"] != exclude and r["read"]]
+    if len(pool) < 4:
+        pool = [r for r in rows if r["id"] != exclude and r["texts"]]
+    refs = _spread(pool, 6)
+    return refs if len(refs) >= 4 else None
+
+
+def _rank_from_order(order: list[str], refs: list[dict], pos: int) -> dict | None:
+    """Where the slideshow (letter `pos`) landed among the references, whose real results are known."""
+    order = [str(x).strip().upper()[:1] for x in order]
     me = LETTERS[pos]
     if me not in order:
         return None
-    above = {x for x in order[: order.index(me)]}
-    beats = sum(1 for i, _ in enumerate(refs) if LETTERS[i if i < pos else i + 1] not in above)
+    above = set(order[: order.index(me)])
+    beats = sum(1 for i in range(len(refs)) if LETTERS[i if i < pos else i + 1] not in above)
     lifts = sorted(r["lift"] for r in refs)
     at = beats / len(refs) * (len(lifts) - 1)
     lo = int(at)
     lift = lifts[lo] + (lifts[min(lo + 1, len(lifts) - 1)] - lifts[lo]) * (at - lo)
     return {"score": round(100 * (beats + 0.5) / (len(refs) + 1)), "lift": round(math.exp(lift), 2),
-            "beats": beats, "references": len(refs), "reason": read.reason}
+            "beats": beats, "references": len(refs)}
 
 
 # --- combining methods ------------------------------------------------------------------------------
@@ -471,7 +510,17 @@ def _slide_texts(spec: SlideshowSpec) -> list[str]:
     return [" ".join(t.text for t in s.text_items).strip() for s in spec.slides]
 
 
+BACKTEST_VERSION = 2  # results measured before the read and the ranking shared one call don't pick a method
+
+
+def _picked(bt: dict | None) -> tuple[dict, str]:
+    bt = bt or {}
+    return bt, (bt.get("method", "current") if bt.get("version") == BACKTEST_VERSION else "current")
+
+
 def predict(slideshow_id: str) -> dict:
+    """One AI call: the viewer read plus a blind ranking among real library posts; the final score uses
+    the method the library test picked. Unchanged slideshows return the stored prediction (no call)."""
     with db.session_scope() as session:
         show = session.get(db.Slideshow, slideshow_id)
         if show is None:
@@ -480,32 +529,30 @@ def predict(slideshow_id: str) -> dict:
             raise PredictError("Render the slideshow first.")
         spec = SlideshowSpec.model_validate(show.spec)
         caption, description, rendered = show.caption, show.description, list(show.rendered)
-    result = _read(spec, caption, description, rendered)
+        stored = dict(show.prediction or {})
     rows = library_rows()
-    texts = [t for t in _slide_texts(spec) if t]
+    bt, method = _picked(last_backtest())
+    texts = _slide_texts(spec)
+    fingerprint = hashlib.sha1(json.dumps(
+        [texts, rendered, caption, description, bt.get("ran_at"), method, len(rows)]).encode()).hexdigest()
+    if stored.get("fingerprint") == fingerprint:
+        return {**stored, "cached": True}
+    result, rank, _ = _read(spec, caption, description, rendered, refs=references(rows), seed=slideshow_id)
     similar = similar_evidence(" ".join(texts), rows)
     if similar:
         result["similar"] = similar
-    bt = last_backtest() or {}
-    method = bt.get("method", "current")
-    rank = None
-    if method in ("rank", "blend", "learned"):
-        try:
-            rank = rank_score(texts, rendered[0], rows, slideshow_id)
-        except PredictError:
-            rank = None  # fall back to the AI score below rather than failing the prediction
-        if rank:
-            result["rank"] = rank
+    if rank:
+        result["rank"] = rank
     value = method_value(method, features(result, rank, similar), bt) if method != "current" else None
     result["ai_score"] = result["viral_potential"]
+    result["method"] = "current"
     if value is not None:
         result["viral_potential"] = value
         result["verdict"], result["verdict_tag"] = verdict(value)
         rho = next((m["spearman"] for m in bt.get("methods", []) if m["method"] == method), None)
         result["basis"] += f"; final score from {METHODS[method].lower()} (the library test's pick, ρ = {rho})"
         result["method"] = method
-    else:
-        result["method"] = "current"
+    result["fingerprint"] = fingerprint
     with db.session_scope() as session:
         session.get(db.Slideshow, slideshow_id).prediction = result
     return result
@@ -545,7 +592,7 @@ def calibration() -> dict:
 
 BACKTEST_KEY = "virality_backtest"
 BACKTEST_MIN = 8
-NOISE_POSTS = 3
+NOISE_POSTS = 2
 
 
 def _library_spec(post: db.LibraryPost) -> SlideshowSpec:
@@ -560,10 +607,11 @@ def _library_spec(post: db.LibraryPost) -> SlideshowSpec:
 def backtest(limit: int = 20, progress=lambda done, total: None) -> dict:
     """Score real library slideshows blind with every method (each post is left out of its own
     calibration examples, references and look-alikes), measure how well each ranks them like their
-    real views did, and pick the method the app should use."""
-    from . import library  # library imports llm; keep this module's imports light
-
-    sample = _spread([r for r in library_rows() if r["images"]], limit)
+    real views did, and pick the method the app should use. One AI call per post: the read, the
+    ranking and, for posts not read yet, the slide text all come back together."""
+    rows_all = [r for r in library_rows() if r["images"]]
+    read = [r for r in rows_all if r["read"]]
+    sample = _spread(read if len(read) >= limit else rows_all, limit)  # already-read posts need no transcription
     if len(sample) < BACKTEST_MIN:
         raise PredictError(
             f"The library has {len(sample)} usable slideshows; it needs {BACKTEST_MIN}. "
@@ -575,25 +623,20 @@ def backtest(limit: int = 20, progress=lambda done, total: None) -> dict:
     rows: list[dict] = []
     for n, row in enumerate(sample):
         progress(n, len(sample))
-        with db.session_scope() as session:
-            analyzed = bool(session.get(db.LibraryPost, row["id"]).slide_texts)
-        if not analyzed:
-            if not cfg.vision:
-                continue  # neither the slide text nor a way to read it
-            try:
-                library.analyze_post(row["id"])
-            except library.LibraryError:
-                continue
+        if not row["read"] and not cfg.vision:
+            continue  # neither the slide text nor a way to read it
         with db.session_scope() as session:
             post = session.get(db.LibraryPost, row["id"])
             spec, caption = _library_spec(post), post.description
-        texts = [t for t in _slide_texts(spec) if t]
         others = [r for r in library_rows() if r["id"] != row["id"]]
         try:
-            result = _read(spec, caption, "", row["images"], exclude=row["id"])
-            rank = rank_score(texts, row["images"][0], others, row["id"])
+            result, rank, texts = _read(spec, caption, "", row["images"], exclude=row["id"],
+                                        refs=references(others), seed=row["id"], transcribe=not row["read"])
         except PredictError:
             continue
+        if not row["read"] and texts:
+            with db.session_scope() as session:
+                session.get(db.LibraryPost, row["id"]).slide_texts = texts  # the library gets read for free
         similar = similar_evidence(" ".join(texts), others)
         rows.append({
             "post_id": row["id"], "url": row["url"], "username": row["username"],
@@ -606,8 +649,10 @@ def backtest(limit: int = 20, progress=lambda done, total: None) -> dict:
         with db.session_scope() as session:
             post = session.get(db.LibraryPost, r["post_id"])
             spec, caption, images = _library_spec(post), post.description, list(post.images)
+        others = [x for x in library_rows() if x["id"] != r["post_id"]]
         try:
-            drifts.append(abs(_read(spec, caption, "", images, exclude=r["post_id"])["viral_potential"] - r["score"]))
+            again = _read(spec, caption, "", images, exclude=r["post_id"], refs=references(others), seed=r["post_id"])[0]
+            drifts.append(abs(again["viral_potential"] - r["score"]))
         except PredictError:
             pass
     progress(len(sample), len(sample))
@@ -624,8 +669,8 @@ def backtest(limit: int = 20, progress=lambda done, total: None) -> dict:
         elif (rho is None or rho < USEFUL) and all((m["spearman"] or 0) < USEFUL for m in methods):
             summary += " No other method tracked views either, so treat every score as a guess for now."
     out = {
-        "posts": len(rows), "spearman": rho, "summary": summary, "method": winner, "methods": methods,
-        "model": model, "populations": pops,
+        "version": BACKTEST_VERSION, "posts": len(rows), "spearman": rho, "summary": summary, "method": winner,
+        "methods": methods, "model": model, "populations": pops,
         "noise": round(statistics.mean(drifts), 1) if drifts else None,
         "rows": sorted(
             [{**{k: v for k, v in r.items() if k not in ("f", "lift_log")}, "rank": r["f"]["rank"], "similar": r["f"]["similar"]}

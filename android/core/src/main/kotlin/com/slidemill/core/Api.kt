@@ -429,7 +429,7 @@ class Api(private val e: Engine, private val token: String, port: Int) : NanoHTT
             e.pipeline.jobExecutor.submit {
                 e.pipeline.job(jobId, status = "running", message = "Scoring library slideshows…")
                 try {
-                    val out = e.virality.backtest(limit, analyze = { e.library.analyzePost(it) }) { done, total ->
+                    val out = e.virality.backtest(limit) { done, total ->
                         e.pipeline.job(jobId, message = "Scored $done of $total library slideshows…")
                     }
                     e.pipeline.job(jobId, status = "completed", message = out.str("summary"), result = obj("backtest" to out))

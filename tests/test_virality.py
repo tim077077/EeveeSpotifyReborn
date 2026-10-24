@@ -11,7 +11,7 @@ from fastapi.testclient import TestClient
 import tests.test_flow  # noqa: F401 - sets up env before app import
 from app import db, generator, imagegen, llm, pipeline, store, virality
 from app.main import app
-from app.schemas import RankRead, SlideshowSpec, ViralityRead
+from app.schemas import SlideshowSpec, ViralityRead
 from tests.test_flow import AUTH, fake_image, fake_plan
 
 SCORES: list[int] = []
@@ -19,27 +19,33 @@ SEEN: dict = {}
 
 
 def rank_by(true_value):
-    """A fake blind ranker: orders the slideshows in the prompt by true_value(their slide text)."""
+    """A fake blind ranker: orders the comparison's slideshows by true_value(their slide text)."""
     def rank(user):
-        items = re.findall(r"^Slideshow ([A-G]): (.*)$", user, re.M)
-        return RankRead(order=[x for x, _ in sorted(items, key=lambda t: -true_value(t[1]))], reason="clearer hooks win")
+        items = re.findall(r"^Slideshow ([A-G])(?: \(this one\))?: (.*)$", user, re.M)
+        return [x for x, _ in sorted(items, key=lambda t: -true_value(t[1]))]
     return rank
 
 
-RANKER = {"fn": None}
+RANKER = {"fn": None, "transcribe": None}
+CALLS: list[str] = []
 
 
 def fake_complete(system, user, model, images=None, cfg=None):
-    if model is RankRead:
-        return RANKER["fn"](user) if RANKER["fn"] else RankRead(order=list("ABCDEFG"), reason="")
-    assert model is ViralityRead
+    assert issubclass(model, ViralityRead)
+    CALLS.append(user)
     n = int(user.split("There are ")[1].split(" slides")[0])
     SEEN["images"] = len(images or [])
     hook = SCORES.pop(0) if SCORES else 64
-    return ViralityRead(
+    extra = {}
+    if "rank_order" in model.model_fields:
+        letters = re.findall(r"^Slideshow ([A-G])", user, re.M)
+        extra["rank_order"] = RANKER["fn"](user) if RANKER["fn"] else letters
+    if "slide_texts" in model.model_fields:
+        extra["slide_texts"] = RANKER["transcribe"](user) if RANKER["transcribe"] else [f"read {i}" for i in range(n)]
+    return model(
         hook_score=hook, curiosity=70, relatability=60, payoff=55, shareability=50,
         slides=[{"swipe_on": 80, "visual_pull": 60, "clarity": 70, "note": "ok"} for _ in range(n)],
-        tips=["Make slide 2 more specific."], better_hook="the sleep habit nobody tells you",
+        tips=["Make slide 2 more specific."], better_hook="the sleep habit nobody tells you", **extra,
     )
 
 
@@ -50,7 +56,9 @@ def client(monkeypatch):
     monkeypatch.setattr(llm, "complete_json", fake_complete)
     store.set_many({"llm_provider": "openai", "llm_api_key": "sk-test"})
     SCORES.clear()
+    CALLS.clear()
     RANKER["fn"] = None
+    RANKER["transcribe"] = None
     with TestClient(app) as c:
         yield c
     store.set_many({"llm_provider": "", "llm_api_key": ""})
@@ -138,12 +146,10 @@ def _n(text: str) -> int:
 
 def _backtest_fake(order):
     def fake(system, user, model, images=None, cfg=None):
-        if model is RankRead:
-            mine = [line for line in user.splitlines() if line.startswith("Slideshow ")]
-            assert len({_n(x) for x in mine}) == len(mine), "a post must not be ranked against itself"
-            return fake_complete(system, user, model, images, cfg)
         own = user.split("1. [hook] ")[1].split("\n")[0]
         assert f'"{own}" (' not in user, "a post must not see its own result as a calibration example"
+        comp = [line for line in user.splitlines() if line.startswith("Slideshow ")]
+        assert len({_n(x) for x in comp}) == len(comp), "a post must not be ranked against itself"
         r = fake_complete(system, user, model, images, cfg)
         r.hook_score = order(_n(own))
         return r
@@ -241,3 +247,55 @@ def test_backtest_job_and_small_library(client, monkeypatch):
             break
         time.sleep(0.05)
     assert j["status"] == "completed" and j["result"]["backtest"]["posts"] == 12
+
+
+def test_one_call_per_prediction_and_none_when_unchanged(client):
+    _library(10)
+    sid = make(client, ["the sleep habit nobody tells you", "a", "b", "c", "d"])
+    CALLS.clear()
+    p = client.post(f"/api/v1/slideshows/{sid}/predict", headers=AUTH).json()
+    assert len(CALLS) == 1 and p["rank"]["references"] == 6  # the ranking came in the same call
+    again = client.post(f"/api/v1/slideshows/{sid}/predict", headers=AUTH).json()
+    assert len(CALLS) == 1 and again["cached"] and again["viral_potential"] == p["viral_potential"]
+    with db.session_scope() as s:
+        show = s.get(db.Slideshow, sid)
+        spec = dict(show.spec)
+        spec["slides"] = [dict(x) for x in spec["slides"]]
+        spec["slides"][1]["text_items"] = [{"text": "a sharper second slide"}]
+        show.spec = spec
+    fresh = client.post(f"/api/v1/slideshows/{sid}/predict", headers=AUTH).json()
+    assert len(CALLS) == 2 and not fresh.get("cached")
+
+
+def test_backtest_is_one_call_per_post_and_reads_unread_posts_in_it(client):
+    _library(10, texts=lambda i: [f"post{i} hook", "b", "c", "d"] if i % 2 else [])
+    out = virality.backtest()
+    assert out["posts"] == 10 and out["version"] == virality.BACKTEST_VERSION
+    assert len(CALLS) <= 10 + virality.NOISE_POSTS
+    with db.session_scope() as s:
+        assert s.get(db.LibraryPost, "bt0").slide_texts == ["read 0", "read 1", "read 2", "read 3"]  # read for free
+    transcribing = [c for c in CALLS if "(unknown: read it off" in c]
+    assert len(transcribing) == 5
+
+
+def test_an_old_library_test_does_not_pick_the_method(client):
+    import json
+
+    _library(10)
+    with db.session_scope() as s:
+        s.merge(db.Setting(key=virality.BACKTEST_KEY, value=json.dumps({"method": "rank", "methods": [], "populations": {}})))
+    sid = make(client, ["the sleep habit nobody tells you", "a", "b", "c", "d"])
+    p = client.post(f"/api/v1/slideshows/{sid}/predict", headers=AUTH).json()
+    assert p["method"] == "current" and p["viral_potential"] == p["ai_score"]
+    with db.session_scope() as s:
+        s.query(db.Setting).filter(db.Setting.key == virality.BACKTEST_KEY).delete()
+
+
+def test_reference_covers_only_when_the_call_stays_small(client):
+    _library(10)
+    sid = make(client, ["the sleep habit nobody tells you", "a", "b", "c", "d"])
+    client.post(f"/api/v1/slideshows/{sid}/predict", headers=AUTH)
+    assert SEEN["images"] == 5 + 6  # 5 slides + 6 reference covers
+    long_sid = make(client, ["the sleep habit nobody tells you"] + [f"tip {i}" for i in range(9)])
+    client.post(f"/api/v1/slideshows/{long_sid}/predict", headers=AUTH)
+    assert SEEN["images"] == 10  # 10 slides; covers would pass the cap, so the ranking is by text

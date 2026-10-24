@@ -892,11 +892,13 @@ function scoreCheckCard(cal) {
     <div class="card-head"><h2>Does the virality score predict views?</h2>
       <button id="backtest" class="small">${b ? "Test again" : "Test the score on the library"}</button></div>
     <div class="verdict"><b>Library test</b>
-      <p class="sub">${b ? `${esc(b.summary)} ${b.posts} real slideshows, scored without seeing their views.` : "Not run yet. Scores up to 20 real slideshows from your library three ways without seeing their views, checks each against what they actually got, and switches the app to whichever tracks best. Uses about 45 AI calls."}</p></div>
+      <p class="sub">${b && b.version !== 2 ? "This result came from an older version of the test and no longer picks how the app scores. Run it again (about 22 AI calls)."
+        : b ? `${esc(b.summary)} ${b.posts} real slideshows, scored without seeing their views.`
+        : "Not run yet. Scores up to 20 real slideshows from your library three ways without seeing their views, checks each against what they actually got, and switches the app to whichever tracks best. About 22 AI calls: one per slideshow, plus 2 to measure noise."}</p></div>
     ${b?.methods?.length ? `<div class="verdict"><b>Which way of scoring works best on your library</b>
       <table style="margin-top:6px"><thead><tr><th>Method</th><th class="num">Posts</th><th class="num">ρ</th><th></th></tr></thead>
       <tbody>${b.methods.map((m) => `<tr><td>${esc(m.label)}</td><td class="num">${m.posts}</td>
-        <td class="num">${m.spearman ?? "–"}</td><td>${m.method === b.method ? `<span class="pill score">In use</span>` : ""}</td></tr>`).join("")}</tbody></table>
+        <td class="num">${m.spearman ?? "–"}</td><td>${m.method === b.method && b.version === 2 ? `<span class="pill score">In use</span>` : ""}</td></tr>`).join("")}</tbody></table>
       <p class="small faint" style="margin:6px 0 0">ρ runs from −1 to 1: above 0.4 is useful, below 0.15 is noise. A method only takes over when it tracks views and beats the AI score by 0.05.${b.noise !== null && b.noise !== undefined ? ` The same slideshow scored twice moved ${b.noise} points on average${b.noise > 8 ? ", which is a lot: treat small score gaps as ties" : ""}.` : ""}</p></div>` : ""}
     <div class="verdict"><b>Your posts</b><p class="sub">${esc(cal.summary)}</p></div>
     <p class="small faint" id="backtest-note" aria-live="polite" style="margin:8px 0 0"></p>
@@ -1265,6 +1267,7 @@ function wirePrediction(id, spec) {
       busy(btn, async () => {
         const p = await api(`/slideshows/${id}/predict`, { method: "POST" });
         card.innerHTML = predictionHtml(p);
+        if (p.cached) toast("Nothing changed since the last prediction, so no AI call was made.");
       });
     } else if (btn.id === "use-hook") {
       busy(btn, async () => {

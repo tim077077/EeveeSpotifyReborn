@@ -77,16 +77,18 @@ class FakeAi {
         "performance analyst" in system -> {
             val n = Regex("There are (\\d+) slides").find(user)?.groupValues?.get(1)?.toInt() ?: 3
             val hook = scoreFor?.invoke(user) ?: hookScores.poll() ?: 64
-            obj(
+            val extra = obj()
+            if ("Comparison:" in user) {
+                val items = Regex("^Slideshow ([A-G])(?: \\(this one\\))?: (.*)$", RegexOption.MULTILINE).findAll(user).map { it.groupValues[1] to it.groupValues[2] }.toList()
+                val by = rankBy
+                extra["rank_order"] = (if (by == null) items else items.sortedByDescending { by(it.second) }).map { it.first }.toMutableList<Any?>()
+            }
+            if ("(unknown: read it off" in user) extra["slide_texts"] = (0 until n).map { "read $it" }.toMutableList<Any?>()
+            (extra + obj(
                 "hook_score" to hook, "curiosity" to "70", "relatability" to 60, "payoff" to 55, "shareability" to 50,
                 "slides" to (1..n).map { obj("swipe_on" to 80, "visual_pull" to 60, "clarity" to 70, "note" to "ok") }.toMutableList<Any?>(),
                 "tips" to arr("Make slide 2 more specific."), "better_hook" to "the sleep habit nobody tells you",
-            )
-        }
-        "You compare TikTok photo-carousel" in system -> {
-            val items = Regex("^Slideshow ([A-G]): (.*)$", RegexOption.MULTILINE).findAll(user).map { it.groupValues[1] to it.groupValues[2] }.toList()
-            val by = rankBy
-            obj("order" to (if (by == null) items else items.sortedByDescending { by(it.second) }).map { it.first }.toMutableList<Any?>(), "reason" to "clearer hooks win")
+            )).toMutableMap()
         }
         "categorize TikTok accounts" in system -> obj("niche" to "Skincare", "product_medium" to "creator")
         "Transcribe the overlay text" in system -> obj("slides" to arr("things that changed my skin", "1. double cleanse", "2. spf daily"))

@@ -84,7 +84,7 @@ class ViralityTest {
     }
 
     /** One library account with n slideshows; post i has (i+1)k views and hook "post{i} hook". */
-    private fun library(n: Int) {
+    private fun library(n: Int, texts: (Int) -> List<String> = { listOf("post$it hook", "b", "c", "d") }) {
         java.io.File(e.mediaDir, "library").mkdirs()
         java.io.File(e.mediaDir, "library/bt.jpg").writeBytes(TestKit.jpeg(40, 50))
         e.db.tx {
@@ -95,7 +95,7 @@ class ViralityTest {
                 insert("library_posts", obj(
                     "id" to "bt$i", "profile_id" to prof.str("id"), "is_slideshow" to true, "views" to 1000L * (i + 1),
                     "images" to arr("library/bt.jpg", "library/bt.jpg", "library/bt.jpg", "library/bt.jpg"),
-                    "slide_texts" to arr("post$i hook", "b", "c", "d"),
+                    "slide_texts" to texts(i).toMutableList<Any?>(),
                 ))
             }
         }
@@ -115,7 +115,7 @@ class ViralityTest {
         library(10)
         ai.scoreFor = scoreBy { 20 + it * 7 }
         ai.rankBy = { n(it).toDouble() }
-        val out = e.virality.backtest(analyze = {})
+        val out = e.virality.backtest()
         assertEquals(10L, out.long("posts"))
         assertEquals(1.0, out.dbl("spearman"))
         assertTrue("real views in your library" in out.str("summary"))
@@ -132,7 +132,7 @@ class ViralityTest {
         library(10)
         ai.scoreFor = scoreBy { listOf(60, 20, 80, 40, 30, 90, 10, 70, 50, 35)[it] }
         ai.rankBy = { n(it).toDouble() }
-        val out = e.virality.backtest(analyze = {})
+        val out = e.virality.backtest()
         val rho = out.objs("methods").associate { it.str("method") to it["spearman"] }
         assertTrue(out.dbl("spearman") < 0.15)
         assertTrue((rho["rank"] as Double) >= 0.9, rho.toString())
@@ -188,5 +188,48 @@ class ViralityTest {
         repeat(100) { j = c.get("/api/v1/jobs/$job"); if (j.str("status") in setOf("completed", "failed")) return@repeat; Thread.sleep(50) }
         assertEquals("failed", j.str("status"))
         assertTrue("needs 8" in j.str("message"), j.str("message"))
+    }
+
+    private fun reads() = ai.requests.count { (_, body) -> "performance analyst" in Json.write(body) }
+
+    @Test fun one_call_per_prediction_and_none_when_unchanged() {
+        library(10)
+        val id = show(listOf("the sleep habit nobody tells you", "a", "b", "c", "d"))
+        val before = reads()
+        val p = c.post("/api/v1/slideshows/$id/predict")
+        assertEquals(before + 1, reads())
+        assertEquals(6L, p.objAt("rank").long("references")) // the ranking came in the same call
+        val again = c.post("/api/v1/slideshows/$id/predict")
+        assertEquals(before + 1, reads())
+        assertTrue(again.bool("cached"))
+        e.db.tx {
+            val spec = get("slideshows", id)!!.objAt("spec") // copies: write the edited slides back explicitly
+            val slides = spec.objs("slides")
+            slides[1]["text_items"] = arr(obj("text" to "a sharper second slide"))
+            spec["slides"] = slides.toMutableList<Any?>()
+            get("slideshows", id)!!["spec"] = spec
+        }
+        val fresh = c.post("/api/v1/slideshows/$id/predict")
+        assertEquals(before + 2, reads())
+        assertTrue(!fresh.bool("cached"))
+    }
+
+    @Test fun backtest_is_one_call_per_post_and_reads_unread_posts_in_it() {
+        library(10) { if (it % 2 == 1) listOf("post$it hook", "b", "c", "d") else emptyList() }
+        val before = reads()
+        val out = e.virality.backtest()
+        assertEquals(10L, out.long("posts"))
+        assertEquals(Virality.BACKTEST_VERSION.toLong(), out.long("version"))
+        assertTrue(reads() - before <= 10 + Virality.NOISE_POSTS, "${reads() - before} calls")
+        assertEquals(listOf("read 0", "read 1", "read 2", "read 3"), e.db.tx { get("library_posts", "bt0")!!.strings("slide_texts") })
+    }
+
+    @Test fun an_old_library_test_does_not_pick_the_method() {
+        library(10)
+        e.db.tx { insert("state", obj("id" to "virality_backtest", "result" to obj("method" to "rank", "methods" to arr(), "populations" to obj()))) }
+        val id = show(listOf("the sleep habit nobody tells you", "a", "b", "c", "d"))
+        val p = c.post("/api/v1/slideshows/$id/predict")
+        assertEquals("current", p.str("method"))
+        assertEquals(p.long("ai_score"), p.long("viral_potential"))
     }
 }
