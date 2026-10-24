@@ -348,6 +348,16 @@ def virality_calibration() -> dict[str, Any]:
     return virality.calibration()
 
 
+@api.post("/virality/backtest", status_code=202)
+def virality_backtest(limit: int = Query(20, ge=8, le=40), session: Session = Depends(get_session)) -> dict[str, Any]:
+    """Score real library slideshows blind and check the score against their real views (a background job)."""
+    if not llm.configured():
+        raise HTTPException(422, {"error": "Add an AI key in Settings first.", "code": "VALIDATION_ERROR"})
+    job = _new_job(session, "backtest")
+    pipeline.job_executor.submit(virality.backtest_job, job.id, limit)
+    return {"job_id": job.id}
+
+
 @api.delete("/slideshows/{slideshow_id}")
 def delete_slideshow(slideshow_id: str, session: Session = Depends(get_session)) -> dict[str, Any]:
     show = session.get(db.Slideshow, slideshow_id)

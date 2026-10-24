@@ -10,6 +10,7 @@ prediction is stored, so analytics can later show whether it actually tracks you
 from __future__ import annotations
 
 import base64
+import json
 import math
 import re
 import statistics
@@ -119,8 +120,8 @@ def spearman(xs: list[float], ys: list[float]) -> float | None:
     return num / math.sqrt(dx * dy)
 
 
-def calibration_examples(limit: int = 6) -> tuple[list[str], list[str]]:
-    """Real library hooks that beat or missed their account's usual views."""
+def calibration_examples(limit: int = 6, exclude: str = "") -> tuple[list[str], list[str]]:
+    """Real library hooks that beat or missed their account's usual views (minus the `exclude` post)."""
     scored: list[tuple[float, str]] = []
     with db.session_scope() as session:
         for p in session.scalars(select(db.LibraryProfile)).all():
@@ -129,6 +130,8 @@ def calibration_examples(limit: int = 6) -> tuple[list[str], list[str]]:
                 continue
             median = statistics.median(x.views for x in posts) or 1
             for x in posts:
+                if x.id == exclude:
+                    continue
                 hook = (x.slide_texts[0] if x.slide_texts and x.slide_texts[0] else re.sub(r"#\S+", "", x.description).strip())
                 if hook:
                     scored.append((math.log(x.views / median), f'"{hook[:120]}" ({x.views / median:.1f}x the account\'s usual views)'))
@@ -189,19 +192,12 @@ def score(read: ViralityRead, spec: SlideshowSpec, vision_used: bool, calibrated
     }
 
 
-def predict(slideshow_id: str) -> dict:
-    with db.session_scope() as session:
-        show = session.get(db.Slideshow, slideshow_id)
-        if show is None:
-            raise PredictError("slideshow not found")
-        if show.status != "completed" or not show.rendered:
-            raise PredictError("Render the slideshow first.")
-        spec = SlideshowSpec.model_validate(show.spec)
-        caption, description, rendered = show.caption, show.description, list(show.rendered)
+def _read(spec: SlideshowSpec, caption: str, description: str, rendered: list[str], exclude: str = "") -> dict:
+    """Ask the AI to read one slideshow (`rendered` = media-relative images) and score it."""
     cfg = llm.resolve()
     if cfg is None:
         raise PredictError("Add an AI key in Settings first.")
-    good, bad = calibration_examples()
+    good, bad = calibration_examples(exclude=exclude)
     lines = [f"Caption: {caption}", f"Description: {description}", "", "Slides (text as written on each image):"]
     lines += [f"{i + 1}. [{s.role}] " + " / ".join(t.text for t in s.text_items) for i, s in enumerate(spec.slides)]
     if good or bad:
@@ -218,10 +214,32 @@ def predict(slideshow_id: str) -> dict:
         read = llm.complete_json(SYSTEM_PROMPT, "\n".join(lines) + tail, ViralityRead, images=images, cfg=cfg)
     except llm.LLMError as exc:
         raise PredictError(str(exc)) from exc
-    result = score(read, spec, cfg.vision, len(good) + len(bad))
+    return score(read, spec, cfg.vision, len(good) + len(bad))
+
+
+def predict(slideshow_id: str) -> dict:
+    with db.session_scope() as session:
+        show = session.get(db.Slideshow, slideshow_id)
+        if show is None:
+            raise PredictError("slideshow not found")
+        if show.status != "completed" or not show.rendered:
+            raise PredictError("Render the slideshow first.")
+        spec = SlideshowSpec.model_validate(show.spec)
+        caption, description, rendered = show.caption, show.description, list(show.rendered)
+    result = _read(spec, caption, description, rendered)
     with db.session_scope() as session:
         session.get(db.Slideshow, slideshow_id).prediction = result
     return result
+
+
+def _summary(rho: float | None, what: str) -> str:
+    if rho is None:
+        return "Not enough variation in views yet."
+    if rho >= 0.4:
+        return f"The score tracks {what} well (ρ = {rho:.2f}): trust it to pick between drafts."
+    if rho >= 0.15:
+        return f"The score weakly tracks {what} (ρ = {rho:.2f}): use it as a tiebreaker."
+    return f"The score isn't tracking {what} (ρ = {rho:.2f}): don't rely on it yet."
 
 
 def calibration() -> dict:
@@ -236,12 +254,126 @@ def calibration() -> dict:
     rho = spearman([a for a, _ in pairs], [b for _, b in pairs])
     if len(pairs) < 8:
         summary = f"Post at least 8 predicted slideshows to see whether the score tracks your views ({len(pairs)} so far)."
-    elif rho is None:
-        summary = "Not enough variation in views yet."
-    elif rho >= 0.4:
-        summary = f"The score tracks your views well (ρ = {rho:.2f}): trust it to pick between drafts."
-    elif rho >= 0.15:
-        summary = f"The score weakly tracks your views (ρ = {rho:.2f}): use it as a tiebreaker."
     else:
-        summary = f"The score isn't tracking your views (ρ = {rho:.2f}): don't rely on it for this account yet."
-    return {"posts": len(pairs), "spearman": round(rho, 2) if rho is not None else None, "summary": summary}
+        summary = _summary(rho, "your views")
+    return {
+        "posts": len(pairs), "spearman": round(rho, 2) if rho is not None else None, "summary": summary,
+        "backtest": last_backtest(),
+    }
+
+
+# --- backtest: score real library posts whose views are already known -----------------------
+
+BACKTEST_KEY = "virality_backtest"
+BACKTEST_MIN = 8
+
+
+def backtest_sample(limit: int = 20) -> list[tuple[str, float]]:
+    """(post id, log of views vs the account's median) for library slideshows, spread from flops to hits."""
+    rows: list[tuple[str, float]] = []
+    with db.session_scope() as session:
+        for p in session.scalars(select(db.LibraryProfile)).all():
+            posts = [x for x in p.posts if x.is_slideshow and x.views]
+            if len(posts) < 3:
+                continue
+            median = statistics.median(x.views for x in posts) or 1
+            rows += [(x.id, math.log(x.views / median)) for x in posts if x.images]
+    rows.sort(key=lambda r: r[1])
+    if len(rows) <= limit:
+        return rows
+    # Evenly spaced through the ranking, so the test sees hits, flops and the middle.
+    return [rows[round(i * (len(rows) - 1) / (limit - 1))] for i in range(limit)]
+
+
+def _library_spec(post: db.LibraryPost) -> SlideshowSpec:
+    texts = list(post.slide_texts or [])
+    slides = []
+    for i, path in enumerate(post.images[:10]):
+        text = str(texts[i]) if i < len(texts) and texts[i] else ""
+        slides.append({"role": "hook" if i == 0 else "body", "image": path, "text_items": [{"text": text}] if text else []})
+    return SlideshowSpec.model_validate({"title": post.description[:80] or "Library post", "slides": slides})
+
+
+def backtest(limit: int = 20, progress=lambda done, total: None) -> dict:
+    """Score real library slideshows blind (each one is left out of its own calibration examples) and
+    check whether the score ranks them the way their real views did."""
+    from . import library  # library imports llm; keep this module's imports light
+
+    sample = backtest_sample(limit)
+    if len(sample) < BACKTEST_MIN:
+        raise PredictError(
+            f"The library has {len(sample)} usable slideshows; it needs {BACKTEST_MIN}. "
+            "Add accounts in your niche (3+ slideshow posts each) to the Slideshow library first."
+        )
+    cfg = llm.resolve()
+    if cfg is None:
+        raise PredictError("Add an AI key in Settings first.")
+    rows = []
+    for n, (post_id, lift) in enumerate(sample):
+        progress(n, len(sample))
+        with db.session_scope() as session:
+            post = session.get(db.LibraryPost, post_id)
+            analyzed = bool(post.slide_texts)
+        if not analyzed:
+            if not cfg.vision:
+                continue  # neither the slide text nor a way to read it
+            try:
+                library.analyze_post(post_id)
+            except library.LibraryError:
+                continue
+        with db.session_scope() as session:
+            post = session.get(db.LibraryPost, post_id)
+            spec, caption, images = _library_spec(post), post.description, list(post.images)
+            url, views, username = post.url, post.views, post.profile.username
+        try:
+            result = _read(spec, caption, "", images, exclude=post_id)
+        except PredictError:
+            continue
+        first = spec.slides[0].text_items if spec.slides else []
+        rows.append({
+            "post_id": post_id, "url": url, "username": username, "hook": first[0].text if first else caption[:80],
+            "views": views, "lift": round(math.exp(lift), 2), "score": result["viral_potential"], "_log_lift": lift,
+        })
+    progress(len(sample), len(sample))
+    rho = spearman([r["score"] for r in rows], [r.pop("_log_lift") for r in rows])
+    if len(rows) < BACKTEST_MIN:
+        summary = f"Only {len(rows)} library slideshows could be scored; the test needs {BACKTEST_MIN}."
+        rho = None
+    else:
+        summary = _summary(rho, "real views in your library")
+    out = {
+        "posts": len(rows), "spearman": round(rho, 2) if rho is not None else None, "summary": summary,
+        "rows": sorted(rows, key=lambda r: -r["score"]), "ran_at": datetime.now(timezone.utc).isoformat(),
+    }
+    with db.session_scope() as session:
+        row = session.get(db.Setting, BACKTEST_KEY)
+        if row is None:
+            session.add(db.Setting(key=BACKTEST_KEY, value=json.dumps(out)))
+        else:
+            row.value = json.dumps(out)
+    return out
+
+
+def last_backtest() -> dict | None:
+    with db.session_scope() as session:
+        row = session.get(db.Setting, BACKTEST_KEY)
+        raw = row.value if row is not None else ""
+    try:
+        return json.loads(raw) if raw else None
+    except ValueError:
+        return None
+
+
+def backtest_job(job_id: str, limit: int) -> None:
+    from .pipeline import _job
+
+    _job(job_id, status="running", message="Scoring library slideshows…")
+    try:
+        out = backtest(limit, lambda done, total: _job(job_id, message=f"Scored {done} of {total} library slideshows…"))
+    except PredictError as exc:
+        _job(job_id, status="failed", message=str(exc))
+        return
+    except Exception as exc:  # noqa: BLE001 - surface anything to the dashboard instead of a stuck job
+        _job(job_id, status="failed", message=f"Backtest failed: {exc}")
+        return
+    _job(job_id, status="completed", message=out["summary"], result={"backtest": out})

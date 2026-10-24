@@ -595,7 +595,13 @@ views["slideshows-of"] = async (id) => {
 };
 
 async function automationDialog(a) {
-  const [accounts, products, collections] = await Promise.all([api("/tiktok/accounts"), api("/products"), api("/collections")]);
+  const [accounts, products, collections, cal] = await Promise.all([api("/tiktok/accounts"), api("/products"), api("/collections"), api("/virality/calibration").catch(() => null)]);
+  const bt = cal?.backtest;
+  const pretestNote = !bt
+    ? `Not proven yet: run the library test in <a href="#analytics">Analytics</a> before trusting the score to throw versions away.`
+    : bt.spearman === null || bt.spearman < 0.15
+      ? `Careful: the library test found the score isn't tracking real views in your niche${bt.spearman === null ? "" : ` (ρ = ${bt.spearman})`}, so pre-testing may keep the worse version.`
+      : `The library test found the score tracks real views (ρ = ${bt.spearman}).`;
   const ps = a?.post_settings ?? {};
   const is = a?.image_settings ?? {};
   const sched = cronToTimes(a?.schedule.map((s) => s.cron) ?? []) ?? { times: "", days: "*", simple: false };
@@ -624,6 +630,7 @@ async function automationDialog(a) {
     ${a && !sched.simple ? `<p class="small muted">This automation uses a per-day schedule (${a.schedule.length} slots${a.target_country ? ` for ${esc(a.target_country)}` : ""}). Leave the times field empty to keep it.</p>` : ""}
     <label>Pre-test before posting: if a new slideshow's predicted viral potential is below this, write one more version and keep the better one (0 = off)</label>
     <input type="number" name="min_viral_score" min="0" max="100" value="${a?.min_viral_score ?? 0}" style="max-width:120px">
+    <p class="small ${bt && bt.spearman >= 0.15 ? "faint" : "muted"}" style="margin:6px 0 0">${pretestNote}</p>
     <h3 style="margin-top:18px">Posting</h3>
     <div class="form-grid">
       <div><label>Mode</label><select name="post_mode">
@@ -845,9 +852,7 @@ views.analytics = async () => {
       ${kpi("Views", n0(s.views), `${s.total_posts} posts`)}${kpi("Likes", n0(s.likes), "last 90 days")}
       ${kpi("Comments", n0(s.comments), "last 90 days")}${kpi("Shares", n0(s.shares), "last 90 days")}
     </div>
-    ${cal ? `<section class="card" style="margin-top:var(--gap)"><h2>Does the virality score predict your views?</h2>
-      <p style="margin:0 0 6px">${esc(cal.summary)}</p>
-      <p class="small faint" style="margin:0">Rank correlation between each posted slideshow's predicted score and its real views, over ${cal.posts} post${cal.posts === 1 ? "" : "s"}.</p></section>` : ""}
+    ${cal ? scoreCheckCard(cal) : ""}
     <section class="card" style="margin-top:var(--gap)">
       <div class="card-head"><h2>Posts</h2><div class="row">${Object.entries(SORTS).map(([k, label]) => `<a href="#analytics?sort=${k}" class="pill ${k === sort ? "on" : ""}">${label}</a>`).join("")}</div></div>
       ${data.posts.length ? `<div style="overflow-x:auto"><table>
@@ -864,7 +869,39 @@ views.analytics = async () => {
       await api("/posts/refresh", { method: "POST" });
       toast("Refreshing… reload in a moment.");
     });
+  const bt = $("#backtest");
+  if (bt) bt.onclick = (e) =>
+    busy(e.currentTarget, async () => {
+      const { job_id } = await api("/virality/backtest", { method: "POST" });
+      const note = $("#backtest-note");
+      try {
+        await pollJob(job_id, (j) => { note.textContent = j.message || "Starting…"; });
+        route();
+      } catch (err) {
+        note.textContent = err.message;
+      }
+    });
 };
+
+// Does the virality score mean anything? Two checks: real library posts scored blind (works on day
+// one), and your own posted slideshows (needs 8 with views).
+function scoreCheckCard(cal) {
+  const b = cal.backtest;
+  const rows = b?.rows ?? [];
+  return `<section class="card" style="margin-top:var(--gap)">
+    <div class="card-head"><h2>Does the virality score predict views?</h2>
+      <button id="backtest" class="small">${b ? "Test again" : "Test the score on the library"}</button></div>
+    <div class="verdict"><b>Library test</b>
+      <p class="sub">${b ? `${esc(b.summary)} ${b.posts} real slideshows, scored without seeing their views.` : "Not run yet. Scores up to 20 real slideshows from your library without seeing their views, then checks the ranking against what they actually got. Uses about 20 AI calls."}</p></div>
+    <div class="verdict"><b>Your posts</b><p class="sub">${esc(cal.summary)}</p></div>
+    <p class="small faint" id="backtest-note" aria-live="polite" style="margin:8px 0 0"></p>
+    ${rows.length ? `<details style="margin-top:6px"><summary class="small">Every library slideshow it scored</summary><div style="overflow-x:auto"><table>
+      <thead><tr><th>Slideshow</th><th class="num">Views vs usual</th><th class="num">Score</th></tr></thead>
+      <tbody>${rows.map((r) => `<tr><td>${r.url ? `<a href="${esc(r.url)}" target="_blank" rel="noopener">${esc(r.hook)}</a>` : esc(r.hook)}
+        <div class="small faint">@${esc(r.username)}</div></td><td class="num">${r.lift}x</td><td class="num">${r.score}</td></tr>`).join("")}</tbody>
+    </table></div></details>` : ""}
+  </section>`;
+}
 
 views.studio = async () => {
   const [st, accounts, products, recent] = await Promise.all([api("/status"), PHONE ? Promise.resolve({ accounts: [] }) : api("/tiktok/accounts"), api("/products"), api("/slideshows?limit=6")]);

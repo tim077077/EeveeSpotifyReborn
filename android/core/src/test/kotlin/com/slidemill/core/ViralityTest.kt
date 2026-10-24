@@ -82,4 +82,59 @@ class ViralityTest {
         assertEquals(kept, e.db.tx { all("posts").single().str("slideshow_id") })
         assertEquals(60L, c.get("/api/v1/automations/$aid").long("min_viral_score"))
     }
+
+    /** One library account with n slideshows; post i has (i+1)k views and hook "post{i} hook". */
+    private fun library(n: Int) {
+        java.io.File(e.mediaDir, "library").mkdirs()
+        java.io.File(e.mediaDir, "library/bt.jpg").writeBytes(TestKit.jpeg(40, 50))
+        e.db.tx {
+            deleteWhere("library_posts") { true }
+            deleteWhere("library_profiles") { true }
+            val prof = insert("library_profiles", obj("username" to "backtester"))
+            repeat(n) { i ->
+                insert("library_posts", obj(
+                    "id" to "bt$i", "profile_id" to prof.str("id"), "is_slideshow" to true, "views" to 1000L * (i + 1),
+                    "images" to arr("library/bt.jpg", "library/bt.jpg", "library/bt.jpg", "library/bt.jpg"),
+                    "slide_texts" to arr("post$i hook", "b", "c", "d"),
+                ))
+            }
+        }
+    }
+
+    private val leaks = java.util.concurrent.CopyOnWriteArrayList<String>()
+
+    private fun scoreBy(order: (Int) -> Int): (String) -> Int = { user ->
+        val own = user.substringAfter("1. [hook] ").substringBefore("\n")
+        if ("\"$own\" (" in user) leaks += own // a post must not see its own result as a calibration example
+        order(own.removePrefix("post").substringBefore(" ").toInt())
+    }
+
+    @Test fun backtest_ranks_library_posts_like_their_views() {
+        library(10)
+        ai.scoreFor = scoreBy { 20 + it * 7 }
+        val out = e.virality.backtest(analyze = {})
+        assertEquals(10L, out.long("posts"))
+        assertEquals(1.0, out.dbl("spearman"))
+        assertTrue("real views in your library" in out.str("summary"))
+        assertEquals("bt9", out.objs("rows")[0].str("post_id"))
+        assertTrue(leaks.isEmpty(), leaks.toString())
+        assertEquals(1.0, c.get("/api/v1/virality/calibration").objAt("backtest").dbl("spearman"))
+    }
+
+    @Test fun backtest_flags_a_score_that_doesnt_track() {
+        library(10)
+        ai.scoreFor = scoreBy { listOf(60, 20, 80, 40, 30, 90, 10, 70, 50, 35)[it] }
+        val out = e.virality.backtest(analyze = {})
+        assertTrue(out.dbl("spearman") < 0.15)
+        assertTrue("isn't tracking" in out.str("summary"))
+    }
+
+    @Test fun backtest_job_needs_a_big_enough_library() {
+        library(4)
+        val job = c.post("/api/v1/virality/backtest").str("job_id")
+        var j = obj()
+        repeat(100) { j = c.get("/api/v1/jobs/$job"); if (j.str("status") in setOf("completed", "failed")) return@repeat; Thread.sleep(50) }
+        assertEquals("failed", j.str("status"))
+        assertTrue("needs 8" in j.str("message"), j.str("message"))
+    }
 }

@@ -140,6 +140,11 @@ h3 { font-size: 14px; font-weight: 600; margin: 0 0 6px; }
 p { margin: 0 0 10px; max-width: 58ch; text-wrap: pretty; }
 .sub { color: var(--muted); margin: 4px 0 0; max-width: 58ch; text-wrap: pretty; }
 .muted { color: var(--muted); }
+summary { cursor: pointer; color: var(--muted); padding: 6px 0; }
+summary:hover { color: var(--text); }
+.verdict { padding: 12px 0; border-top: 1px solid var(--border); }
+.card-head + .verdict { border-top: 0; padding-top: 4px; }
+.verdict .sub { margin-top: 2px; }
 .small { font-size: 12px; line-height: 18px; }
 .faint { color: var(--faint); }
 a { color: var(--text); text-underline-offset: 3px; text-decoration-color: #555; }

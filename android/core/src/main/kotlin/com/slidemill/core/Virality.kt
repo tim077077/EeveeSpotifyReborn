@@ -16,6 +16,8 @@ import kotlin.math.ln
  */
 class Virality(private val db: Db, private val llm: Llm, private val mediaDir: File) {
     companion object {
+        const val BACKTEST_MIN = 8
+
         const val SYSTEM_PROMPT = """You are a TikTok photo-carousel (slideshow) performance analyst. You predict how real viewers on the For You feed react to a slideshow before it is posted.
 
 How viewers behave: they decide in under a second from slide 1 whether to stop scrolling (the hook). Each later slide either earns the next swipe (new, specific, a little surprising, easy to read in 2 seconds) or loses them (repetitive, vague, wall of text, unreadable over the image, the promised payoff never arrives). Saves and shares come from practical value, identity ("this is so me") and curiosity that pays off.
@@ -120,13 +122,14 @@ For each slide in order, give swipe_on: the percent of viewers who reach this sl
      * Real hooks from the library that beat or missed their account's usual views, as calibration
      * examples (the closest thing to ground truth the app has).
      */
-    fun calibrationExamples(limit: Int = 6): Pair<List<String>, List<String>> = db.tx {
+    fun calibrationExamples(limit: Int = 6, exclude: String = ""): Pair<List<String>, List<String>> = db.tx {
         val byProfile = where("library_posts") { it.bool("is_slideshow") && it.long("views") > 0 }.groupBy { it.str("profile_id") }
         val scored = mutableListOf<Pair<Double, String>>()
         for (posts in byProfile.values) {
             if (posts.size < 3) continue
             val median = Timing.median(posts.map { it.long("views") }).takeIf { it > 0 } ?: continue
             for (p in posts) {
+                if (p.str("id") == exclude) continue
                 val hook = p.strings("slide_texts").firstOrNull()?.takeIf { it.isNotBlank() }
                     ?: p.str("description").replace(Regex("#\\S+"), "").trim().takeIf { it.isNotBlank() } ?: continue
                 scored += ln(p.long("views") / median) to "\"${hook.take(120)}\" (${"%.1f".format(p.long("views") / median)}x the account's usual views)"
@@ -142,12 +145,18 @@ For each slide in order, give swipe_on: the percent of viewers who reach this sl
         val show = db.tx { get("slideshows", showId)?.copyObj() } ?: throw PipelineError("slideshow not found")
         if (show.str("status") != "completed" || show.strings("rendered").isEmpty()) throw PipelineError("Render the slideshow first.")
         val spec = Models.SPEC.of(show.objAt("spec"))
+        val result = read(spec, show.str("caption"), show.str("description"), show.strings("rendered"))
+        db.tx { get("slideshows", showId)?.set("prediction", result) }
+        return result
+    }
+
+    /** Ask the AI to read one slideshow (`images` = media-relative files) and score it. */
+    private fun read(spec: Obj, caption: String, description: String, images: List<String>, exclude: String = ""): Obj {
         val slides = spec.objs("slides")
         val cfg = llm.resolve() ?: throw LlmError("Add an AI key in Settings first.")
-
-        val (good, bad) = calibrationExamples()
+        val (good, bad) = calibrationExamples(exclude = exclude)
         val user = buildString {
-            append("Caption: ${show.str("caption")}\nDescription: ${show.str("description")}\n\nSlides (text as written on each image):\n")
+            append("Caption: $caption\nDescription: $description\n\nSlides (text as written on each image):\n")
             slides.forEachIndexed { i, s ->
                 append("${i + 1}. [${s.str("role")}] ${s.objs("text_items").joinToString(" / ") { it.str("text") }}\n")
             }
@@ -159,13 +168,11 @@ For each slide in order, give swipe_on: the percent of viewers who reach this sl
             append("\nThere are ${slides.size} slides; return exactly ${slides.size} entries in `slides`.")
             if (cfg.vision) append(" The rendered slides are attached in order: judge the actual images and how readable the text is on them.")
         }
-        val images = if (cfg.vision) show.strings("rendered").take(10).map {
+        val dataUrls = if (cfg.vision) images.take(10).map {
             "data:image/jpeg;base64," + Base64.getEncoder().encodeToString(File(mediaDir, it).readBytes())
         } else null
-        val read = llm.completeJson(SYSTEM_PROMPT, user, READ, images = images, cfg = cfg)
-        val result = score(read, spec, visionUsed = cfg.vision, calibrated = good.size + bad.size)
-        db.tx { get("slideshows", showId)?.set("prediction", result) }
-        return result
+        val read = llm.completeJson(SYSTEM_PROMPT, user, READ, images = dataUrls, cfg = cfg)
+        return score(read, spec, visionUsed = cfg.vision, calibrated = good.size + bad.size)
     }
 
     /** Turn the model's read plus the rule checks into the numbers shown in the app. */
@@ -220,25 +227,106 @@ For each slide in order, give swipe_on: the percent of viewers who reach this sl
         )
     }
 
+    private fun summary(rho: Double?, what: String): String = when {
+        rho == null -> "Not enough variation in views yet."
+        rho >= 0.4 -> "The score tracks $what well (ρ = ${"%.2f".format(rho)}): trust it to pick between drafts."
+        rho >= 0.15 -> "The score weakly tracks $what (ρ = ${"%.2f".format(rho)}): use it as a tiebreaker."
+        else -> "The score isn't tracking $what (ρ = ${"%.2f".format(rho)}): don't rely on it yet."
+    }
+
     /** Does the prediction track reality? Compare predicted scores with views of posted slideshows. */
-    fun calibration(): Obj = db.tx {
-        val pairs = mutableListOf<Pair<Double, Double>>()
-        for (s in where("slideshows") { it["prediction"] is Map<*, *> }) {
-            val views = where("posts") { it.str("slideshow_id") == s.str("id") && it.str("status") == "published" }.maxOfOrNull { it.long("views") } ?: continue
-            if (views <= 0) continue
-            pairs += s.objAt("prediction").dbl("viral_potential") to ln(views.toDouble())
+    fun calibration(): Obj {
+        val pairs = db.tx {
+            val out = mutableListOf<Pair<Double, Double>>()
+            for (s in where("slideshows") { it["prediction"] is Map<*, *> }) {
+                val views = where("posts") { it.str("slideshow_id") == s.str("id") && it.str("status") == "published" }.maxOfOrNull { it.long("views") } ?: continue
+                if (views <= 0) continue
+                out += s.objAt("prediction").dbl("viral_potential") to ln(views.toDouble())
+            }
+            out
         }
         val rho = spearman(pairs.map { it.first }, pairs.map { it.second })
-        obj(
+        return obj(
             "posts" to pairs.size,
             "spearman" to rho?.let { Math.round(it * 100) / 100.0 },
-            "summary" to when {
-                pairs.size < 8 -> "Post at least 8 predicted slideshows to see whether the score tracks your views (${pairs.size} so far)."
-                rho == null -> "Not enough variation in views yet."
-                rho >= 0.4 -> "The score tracks your views well (ρ = ${"%.2f".format(rho)}): trust it to pick between drafts."
-                rho >= 0.15 -> "The score weakly tracks your views (ρ = ${"%.2f".format(rho)}): use it as a tiebreaker."
-                else -> "The score isn't tracking your views (ρ = ${"%.2f".format(rho)}): don't rely on it for this account yet."
-            },
+            "summary" to if (pairs.size < 8) {
+                "Post at least 8 predicted slideshows to see whether the score tracks your views (${pairs.size} so far)."
+            } else summary(rho, "your views"),
+            "backtest" to lastBacktest(),
         )
     }
+
+    // --- backtest: score real library posts whose views are already known ---------------------
+
+    /** (post id, log of views vs the account's median) for library slideshows, spread from flops to hits. */
+    fun backtestSample(limit: Int = 20): List<Pair<String, Double>> {
+        val rows = db.tx {
+            val out = mutableListOf<Pair<String, Double>>()
+            val byProfile = where("library_posts") { it.bool("is_slideshow") && it.long("views") > 0 }.groupBy { it.str("profile_id") }
+            for (posts in byProfile.values) {
+                if (posts.size < 3) continue
+                val median = Timing.median(posts.map { it.long("views") }).takeIf { it > 0 } ?: continue
+                posts.filter { it.strings("images").isNotEmpty() }.forEach { out += it.str("id") to ln(it.long("views") / median) }
+            }
+            out.sortedBy { it.second }
+        }
+        if (rows.size <= limit) return rows
+        // Evenly spaced through the ranking, so the test sees hits, flops and the middle.
+        return (0 until limit).map { rows[Math.round(it * (rows.size - 1).toDouble() / (limit - 1)).toInt()] }
+    }
+
+    /**
+     * Score real library slideshows blind (each is left out of its own calibration examples) and check
+     * whether the score ranks them the way their real views did. `analyze` reads slide text off a post
+     * that hasn't been read yet. Throws PipelineError when the library is too small.
+     */
+    fun backtest(limit: Int = 20, analyze: (String) -> Unit, progress: (Int, Int) -> Unit = { _, _ -> }): Obj {
+        val sample = backtestSample(limit)
+        if (sample.size < BACKTEST_MIN) throw PipelineError(
+            "The library has ${sample.size} usable slideshows; it needs $BACKTEST_MIN. " +
+                "Add accounts in your niche (3+ slideshow posts each) to the Slideshow library first.",
+        )
+        val cfg = llm.resolve() ?: throw LlmError("Add an AI key in Settings first.")
+        val rows = mutableListOf<Obj>()
+        val lifts = mutableListOf<Double>()
+        sample.forEachIndexed { n, (postId, lift) ->
+            progress(n, sample.size)
+            if (db.tx { get("library_posts", postId)?.strings("slide_texts") }.isNullOrEmpty()) {
+                if (!cfg.vision) return@forEachIndexed // neither the slide text nor a way to read it
+                try { analyze(postId) } catch (e: RuntimeException) { return@forEachIndexed }
+            }
+            val post = db.tx { get("library_posts", postId)?.copyObj() } ?: return@forEachIndexed
+            val texts = post.strings("slide_texts")
+            val slides = post.strings("images").take(10).mapIndexed { i, path ->
+                val t = texts.getOrNull(i).orEmpty()
+                obj("role" to if (i == 0) "hook" else "body", "image" to path,
+                    "text_items" to if (t.isBlank()) mutableListOf<Any?>() else mutableListOf<Any?>(obj("text" to t)))
+            }
+            val spec = Models.SPEC.of(obj("title" to post.str("description").take(80).ifEmpty { "Library post" }, "slides" to slides.toMutableList<Any?>()))
+            val result = try {
+                read(spec, post.str("description"), "", post.strings("images"), exclude = postId)
+            } catch (e: RuntimeException) { return@forEachIndexed }
+            val username = db.tx { get("library_profiles", post.str("profile_id"))?.str("username") }.orEmpty()
+            rows += obj(
+                "post_id" to postId, "url" to post.str("url"), "username" to username,
+                "hook" to texts.firstOrNull()?.takeIf { it.isNotBlank() }.orEmpty().ifEmpty { post.str("description").take(80) },
+                "views" to post.long("views"), "lift" to Math.round(Math.exp(lift) * 100) / 100.0, "score" to result.int("viral_potential"),
+            )
+            lifts += lift
+        }
+        progress(sample.size, sample.size)
+        val rho = if (rows.size < BACKTEST_MIN) null else spearman(rows.map { it.dbl("score") }, lifts)
+        val out = obj(
+            "posts" to rows.size,
+            "spearman" to rho?.let { Math.round(it * 100) / 100.0 },
+            "summary" to if (rows.size < BACKTEST_MIN) "Only ${rows.size} library slideshows could be scored; the test needs $BACKTEST_MIN."
+            else summary(rho, "real views in your library"),
+            "rows" to rows.sortedByDescending { it.int("score") }.toMutableList<Any?>(),
+            "ran_at" to Db.iso(java.time.Instant.now()),
+        )
+        db.tx { (get("state", "virality_backtest") ?: insert("state", obj("id" to "virality_backtest")))["result"] = out }
+        return out
+    }
+
+    fun lastBacktest(): Obj? = db.tx { get("state", "virality_backtest")?.get("result") as? Map<String, Any?> }?.toMutableMap()
 }

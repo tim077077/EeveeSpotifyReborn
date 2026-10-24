@@ -422,6 +422,24 @@ class Api(private val e: Engine, private val token: String, port: Int) : NanoHTT
 
         route("GET", "/virality/calibration") { _ -> e.virality.calibration() }
 
+        route("POST", "/virality/backtest", 202) { r ->
+            if (!e.llm.configured()) throw invalid("Add an AI key in Settings first.")
+            val limit = (r.q("limit")?.toIntOrNull() ?: 20).coerceIn(8, 40)
+            val jobId = e.pipeline.newJob("backtest")
+            e.pipeline.jobExecutor.submit {
+                e.pipeline.job(jobId, status = "running", message = "Scoring library slideshows…")
+                try {
+                    val out = e.virality.backtest(limit, analyze = { e.library.analyzePost(it) }) { done, total ->
+                        e.pipeline.job(jobId, message = "Scored $done of $total library slideshows…")
+                    }
+                    e.pipeline.job(jobId, status = "completed", message = out.str("summary"), result = obj("backtest" to out))
+                } catch (x: Exception) {
+                    e.pipeline.job(jobId, status = "failed", message = x.message ?: "Backtest failed.")
+                }
+            }
+            obj("job_id" to jobId)
+        }
+
         route("DELETE", "/slideshows/{id}") { r ->
             val s = e.db.tx { delete("slideshows", r.params[0]) } ?: throw notFound("slideshow")
             (s.strings("rendered") + listOfNotNull(s.strOrNull("video_path"))).forEach { e.images.deleteFile(it) }

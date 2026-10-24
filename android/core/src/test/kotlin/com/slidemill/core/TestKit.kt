@@ -22,6 +22,8 @@ class FakeAi {
     /** Hook scores the virality fake hands out in order (then 64). */
     val hookScores = java.util.concurrent.ConcurrentLinkedQueue<Int>()
     @Volatile var lastImages = 0
+    /** When set, the virality fake scores each read with this (given the prompt) instead of hookScores. */
+    @Volatile var scoreFor: ((String) -> Int)? = null
     private val server = HttpServer.create(InetSocketAddress("127.0.0.1", 0), 0)
     val url: String get() = "http://127.0.0.1:${server.address.port}"
 
@@ -72,7 +74,7 @@ class FakeAi {
         }
         "performance analyst" in system -> {
             val n = Regex("There are (\\d+) slides").find(user)?.groupValues?.get(1)?.toInt() ?: 3
-            val hook = hookScores.poll() ?: 64
+            val hook = scoreFor?.invoke(user) ?: hookScores.poll() ?: 64
             obj(
                 "hook_score" to hook, "curiosity" to "70", "relatability" to 60, "payoff" to 55, "shareability" to 50,
                 "slides" to (1..n).map { obj("swipe_on" to 80, "visual_pull" to 60, "clarity" to 70, "note" to "ok") }.toMutableList<Any?>(),

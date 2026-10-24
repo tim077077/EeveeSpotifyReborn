@@ -95,3 +95,68 @@ def test_pretest_keeps_better_version(client):
         assert [x.id for x in shows] == [kept]
         assert shows[0].prediction["hook_score"] == 95
         assert len(shows[0].posts) == 1
+
+
+def _library(n: int) -> None:
+    """One library account with n slideshows; post i has (i+1)k views and hook "post{i} hook"."""
+    from app.config import settings
+
+    (settings.media_dir / "library").mkdir(parents=True, exist_ok=True)
+    (settings.media_dir / "library" / "bt.jpg").write_bytes(b"\xff\xd8\xff\xd9")
+    with db.session_scope() as s:
+        s.query(db.LibraryPost).delete()
+        s.query(db.LibraryProfile).delete()
+        prof = db.LibraryProfile(username="backtester")
+        s.add(prof)
+        s.flush()
+        for i in range(n):
+            s.add(db.LibraryPost(id=f"bt{i}", profile_id=prof.id, is_slideshow=True, views=1000 * (i + 1),
+                                 images=["library/bt.jpg"] * 4, slide_texts=[f"post{i} hook", "b", "c", "d"]))
+
+
+def _backtest_fake(order):
+    def fake(system, user, model, images=None, cfg=None):
+        own = user.split("1. [hook] ")[1].split("\n")[0]
+        assert f'"{own}" (' not in user, "a post must not see its own result as a calibration example"
+        r = fake_complete(system, user, model, images, cfg)
+        r.hook_score = order(int(own[4:].split(" ")[0]))
+        return r
+    return fake
+
+
+def test_backtest_ranks_like_views(client, monkeypatch):
+    _library(10)
+    monkeypatch.setattr(llm, "complete_json", _backtest_fake(lambda i: 20 + i * 7))
+    out = virality.backtest()
+    assert out["posts"] == 10 and out["spearman"] == 1.0 and "real views in your library" in out["summary"]
+    assert out["rows"][0]["post_id"] == "bt9" and out["rows"][0]["lift"] > 1
+    assert client.get("/api/v1/virality/calibration", headers=AUTH).json()["backtest"]["spearman"] == 1.0
+
+
+def test_backtest_flags_a_score_that_doesnt_track(client, monkeypatch):
+    _library(10)
+    monkeypatch.setattr(llm, "complete_json", _backtest_fake(lambda i: [60, 20, 80, 40, 30, 90, 10, 70, 50, 35][i]))
+    out = virality.backtest()
+    assert out["spearman"] < 0.15 and "isn't tracking" in out["summary"]
+
+
+def test_backtest_job_and_small_library(client, monkeypatch):
+    import time
+
+    _library(4)
+    job = client.post("/api/v1/virality/backtest", headers=AUTH).json()["job_id"]
+    for _ in range(100):
+        j = client.get(f"/api/v1/jobs/{job}", headers=AUTH).json()
+        if j["status"] in ("completed", "failed"):
+            break
+        time.sleep(0.05)
+    assert j["status"] == "failed" and "needs 8" in j["message"]
+    _library(12)
+    monkeypatch.setattr(llm, "complete_json", _backtest_fake(lambda i: 20 + i * 5))
+    job = client.post("/api/v1/virality/backtest", headers=AUTH).json()["job_id"]
+    for _ in range(200):
+        j = client.get(f"/api/v1/jobs/{job}", headers=AUTH).json()
+        if j["status"] in ("completed", "failed"):
+            break
+        time.sleep(0.05)
+    assert j["status"] == "completed" and j["result"]["backtest"]["posts"] == 12
