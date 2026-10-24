@@ -892,13 +892,18 @@ function scoreCheckCard(cal) {
     <div class="card-head"><h2>Does the virality score predict views?</h2>
       <button id="backtest" class="small">${b ? "Test again" : "Test the score on the library"}</button></div>
     <div class="verdict"><b>Library test</b>
-      <p class="sub">${b ? `${esc(b.summary)} ${b.posts} real slideshows, scored without seeing their views.` : "Not run yet. Scores up to 20 real slideshows from your library without seeing their views, then checks the ranking against what they actually got. Uses about 20 AI calls."}</p></div>
+      <p class="sub">${b ? `${esc(b.summary)} ${b.posts} real slideshows, scored without seeing their views.` : "Not run yet. Scores up to 20 real slideshows from your library three ways without seeing their views, checks each against what they actually got, and switches the app to whichever tracks best. Uses about 45 AI calls."}</p></div>
+    ${b?.methods?.length ? `<div class="verdict"><b>Which way of scoring works best on your library</b>
+      <table style="margin-top:6px"><thead><tr><th>Method</th><th class="num">Posts</th><th class="num">ρ</th><th></th></tr></thead>
+      <tbody>${b.methods.map((m) => `<tr><td>${esc(m.label)}</td><td class="num">${m.posts}</td>
+        <td class="num">${m.spearman ?? "–"}</td><td>${m.method === b.method ? `<span class="pill score">In use</span>` : ""}</td></tr>`).join("")}</tbody></table>
+      <p class="small faint" style="margin:6px 0 0">ρ runs from −1 to 1: above 0.4 is useful, below 0.15 is noise. A method only takes over when it tracks views and beats the AI score by 0.05.${b.noise !== null && b.noise !== undefined ? ` The same slideshow scored twice moved ${b.noise} points on average${b.noise > 8 ? ", which is a lot: treat small score gaps as ties" : ""}.` : ""}</p></div>` : ""}
     <div class="verdict"><b>Your posts</b><p class="sub">${esc(cal.summary)}</p></div>
     <p class="small faint" id="backtest-note" aria-live="polite" style="margin:8px 0 0"></p>
     ${rows.length ? `<details style="margin-top:6px"><summary class="small">Every library slideshow it scored</summary><div style="overflow-x:auto"><table>
-      <thead><tr><th>Slideshow</th><th class="num">Views vs usual</th><th class="num">Score</th></tr></thead>
+      <thead><tr><th>Slideshow</th><th class="num">Views vs usual</th><th class="num">AI score</th><th class="num">Rank</th></tr></thead>
       <tbody>${rows.map((r) => `<tr><td>${r.url ? `<a href="${esc(r.url)}" target="_blank" rel="noopener">${esc(r.hook)}</a>` : esc(r.hook)}
-        <div class="small faint">@${esc(r.username)}</div></td><td class="num">${r.lift}x</td><td class="num">${r.score}</td></tr>`).join("")}</tbody>
+        <div class="small faint">@${esc(r.username)}</div></td><td class="num">${r.lift}x</td><td class="num">${r.score}</td><td class="num">${r.rank ?? "–"}</td></tr>`).join("")}</tbody>
     </table></div></details>` : ""}
   </section>`;
 }
@@ -1210,7 +1215,7 @@ function predictionHtml(p) {
       <button id="predict">Predict</button></div>`;
   }
   const att = (p.slides || []).map((sl) => sl.attention);
-  return `<div class="row" style="align-items:center;gap:18px">
+  return `<div class="row pred-head" style="align-items:center;gap:18px">
       ${gauge(p.viral_potential)}
       <div class="grow"><h2 style="margin:0 0 4px">${esc(p.verdict)} <span class="pill" style="vertical-align:2px">${esc(p.verdict_tag)}</span></h2>
         <div class="row" style="gap:18px;color:var(--muted)">
@@ -1228,7 +1233,26 @@ function predictionHtml(p) {
     ${p.tips?.length ? `<h3 style="margin-top:18px">Fix first</h3><ul class="tips">${p.tips.map((t) => `<li>${esc(t)}</li>`).join("")}</ul>` : ""}
     ${p.better_hook ? `<div class="nested row" style="margin-top:14px"><span class="grow">A stronger hook: <b>“${esc(p.better_hook)}”</b></span>
       <button class="small" id="use-hook">Use this hook</button></div>` : ""}
+    ${evidenceHtml(p)}
     <p class="small faint" style="margin:12px 0 0">${esc(p.basis)}. A prediction, not a promise: Analytics checks whether it tracks your real views.</p>`;
+}
+
+// The data behind the number: where it ranked among real posts, and what similar posts got.
+function evidenceHtml(p) {
+  const parts = [];
+  if (p.rank) {
+    parts.push(`<div class="verdict"><b>Against real posts</b><p class="sub">Ranked above ${p.rank.beats} of ${p.rank.references} library slideshows
+      whose results are known, which puts it around <b class="num">${p.rank.lift}x</b> the account's usual views.
+      ${p.method !== "current" && p.ai_score !== undefined ? `The AI score on its own was ${p.ai_score}.` : ""}</p></div>`);
+  }
+  if (p.similar) {
+    parts.push(`<div class="verdict"><b>Posts like this</b><p class="sub">${p.similar.posts.length} similar library slideshows got
+      <b class="num">${p.similar.lift}x</b> their account's usual views on average.</p>
+      <details><summary class="small">Show them</summary><div class="list">${p.similar.posts.map((x) => `<div class="list-row"><div class="what">
+        <b>${x.url ? `<a href="${esc(x.url)}" target="_blank" rel="noopener">${esc(x.hook)}</a>` : esc(x.hook)}</b><span>@${esc(x.username)}</span></div>
+        <span class="num">${x.lift}x</span></div>`).join("")}</div></details></div>`);
+  }
+  return parts.length ? `<div style="margin-top:14px">${parts.join("")}</div>` : "";
 }
 
 function wirePrediction(id, spec) {

@@ -2,20 +2,36 @@
 
 from __future__ import annotations
 
+import random
+import re
+
 import pytest
 from fastapi.testclient import TestClient
 
 import tests.test_flow  # noqa: F401 - sets up env before app import
 from app import db, generator, imagegen, llm, pipeline, store, virality
 from app.main import app
-from app.schemas import SlideshowSpec, ViralityRead
+from app.schemas import RankRead, SlideshowSpec, ViralityRead
 from tests.test_flow import AUTH, fake_image, fake_plan
 
 SCORES: list[int] = []
 SEEN: dict = {}
 
 
+def rank_by(true_value):
+    """A fake blind ranker: orders the slideshows in the prompt by true_value(their slide text)."""
+    def rank(user):
+        items = re.findall(r"^Slideshow ([A-G]): (.*)$", user, re.M)
+        return RankRead(order=[x for x, _ in sorted(items, key=lambda t: -true_value(t[1]))], reason="clearer hooks win")
+    return rank
+
+
+RANKER = {"fn": None}
+
+
 def fake_complete(system, user, model, images=None, cfg=None):
+    if model is RankRead:
+        return RANKER["fn"](user) if RANKER["fn"] else RankRead(order=list("ABCDEFG"), reason="")
     assert model is ViralityRead
     n = int(user.split("There are ")[1].split(" slides")[0])
     SEEN["images"] = len(images or [])
@@ -34,6 +50,7 @@ def client(monkeypatch):
     monkeypatch.setattr(llm, "complete_json", fake_complete)
     store.set_many({"llm_provider": "openai", "llm_api_key": "sk-test"})
     SCORES.clear()
+    RANKER["fn"] = None
     with TestClient(app) as c:
         yield c
     store.set_many({"llm_provider": "", "llm_api_key": ""})
@@ -97,7 +114,7 @@ def test_pretest_keeps_better_version(client):
         assert len(shows[0].posts) == 1
 
 
-def _library(n: int) -> None:
+def _library(n: int, texts=None) -> None:
     """One library account with n slideshows; post i has (i+1)k views and hook "post{i} hook"."""
     from app.config import settings
 
@@ -111,15 +128,24 @@ def _library(n: int) -> None:
         s.flush()
         for i in range(n):
             s.add(db.LibraryPost(id=f"bt{i}", profile_id=prof.id, is_slideshow=True, views=1000 * (i + 1),
-                                 images=["library/bt.jpg"] * 4, slide_texts=[f"post{i} hook", "b", "c", "d"]))
+                                 images=["library/bt.jpg"] * 4,
+                                 slide_texts=texts(i) if texts else [f"post{i} hook", "b", "c", "d"]))
+
+
+def _n(text: str) -> int:
+    return int(re.search(r"post(\d+)", text).group(1))
 
 
 def _backtest_fake(order):
     def fake(system, user, model, images=None, cfg=None):
+        if model is RankRead:
+            mine = [line for line in user.splitlines() if line.startswith("Slideshow ")]
+            assert len({_n(x) for x in mine}) == len(mine), "a post must not be ranked against itself"
+            return fake_complete(system, user, model, images, cfg)
         own = user.split("1. [hook] ")[1].split("\n")[0]
         assert f'"{own}" (' not in user, "a post must not see its own result as a calibration example"
         r = fake_complete(system, user, model, images, cfg)
-        r.hook_score = order(int(own[4:].split(" ")[0]))
+        r.hook_score = order(_n(own))
         return r
     return fake
 
@@ -127,17 +153,72 @@ def _backtest_fake(order):
 def test_backtest_ranks_like_views(client, monkeypatch):
     _library(10)
     monkeypatch.setattr(llm, "complete_json", _backtest_fake(lambda i: 20 + i * 7))
+    RANKER["fn"] = rank_by(_n)
     out = virality.backtest()
     assert out["posts"] == 10 and out["spearman"] == 1.0 and "real views in your library" in out["summary"]
     assert out["rows"][0]["post_id"] == "bt9" and out["rows"][0]["lift"] > 1
+    rho = {m["method"]: m["spearman"] for m in out["methods"]}
+    assert rho["rank"] >= 0.9
+    assert out["method"] == "current"  # nothing beat a perfect AI score by the margin
+    assert out["noise"] == 0
     assert client.get("/api/v1/virality/calibration", headers=AUTH).json()["backtest"]["spearman"] == 1.0
 
 
-def test_backtest_flags_a_score_that_doesnt_track(client, monkeypatch):
+def test_backtest_switches_to_ranking_when_it_tracks_better(client, monkeypatch):
     _library(10)
     monkeypatch.setattr(llm, "complete_json", _backtest_fake(lambda i: [60, 20, 80, 40, 30, 90, 10, 70, 50, 35][i]))
+    RANKER["fn"] = rank_by(_n)
     out = virality.backtest()
+    rho = {m["method"]: m["spearman"] for m in out["methods"]}
     assert out["spearman"] < 0.15 and "isn't tracking" in out["summary"]
+    assert rho["rank"] >= 0.9 and out["method"] in ("rank", "blend") and "now scores with" in out["summary"]
+    # New predictions use the winner: a slideshow written like the best library post ranks at the top.
+    monkeypatch.setattr(llm, "complete_json", fake_complete)
+    RANKER["fn"] = rank_by(lambda t: _n(t) if "post" in t else 99)
+    sid = make(client, ["the sleep habit nobody tells you", "a", "b", "c", "d"])
+    p = client.post(f"/api/v1/slideshows/{sid}/predict", headers=AUTH).json()
+    assert p["method"] == out["method"] and p["rank"]["beats"] == p["rank"]["references"]
+    assert p["ai_score"] != p["viral_potential"] or out["method"] == "current"
+
+
+def test_similar_posts_finds_the_near_duplicate():
+    rows = [{"id": str(i), "texts": [t], "lift": 0.0, "hook": t, "url": "", "username": "u"} for i, t in enumerate([
+        "5 morning habits that fixed my skin", "what I eat in a day as a nurse", "my night routine for deep sleep",
+        "things nobody tells you about sleep", "how I save money on groceries"])]
+    top = virality.similar_posts("the night routine that gave me deep sleep", rows)
+    assert top[0][1]["id"] == "2"
+    assert virality.similar_evidence("the night routine that gave me deep sleep", rows) is None  # needs 3 matches
+
+
+def test_learned_weights_only_win_out_of_sample():
+    rnd = random.Random(7)
+
+    def rows(signal: bool):
+        out = []
+        for i in range(40):
+            hook, fmt = rnd.randint(20, 90), rnd.randint(40, 100)
+            y = (0.05 * hook + 0.03 * fmt + rnd.gauss(0, 0.3)) if signal else rnd.gauss(0, 1)
+            f = {"current": rnd.randint(30, 90), "hook": hook, "hold": rnd.randint(20, 80), "engagement": 60,
+                 "format": fmt, "rank": None, "similar": None}
+            out.append({"f": f, "lift_log": y})
+        return out
+
+    methods, winner, model, _ = virality.compare_methods(rows(True))
+    assert winner == "learned" and model is not None
+    assert next(m for m in methods if m["method"] == "learned")["spearman"] > 0.5
+    _, winner, model, _ = virality.compare_methods(rows(False))  # pure noise: fitting can't help out of sample
+    assert winner != "learned" and model is None
+
+
+def test_switch_needs_a_real_margin():
+    rnd = random.Random(3)
+    rows = []
+    for i in range(20):
+        y = i / 10
+        rows.append({"lift_log": y, "f": {"current": i * 4 + rnd.choice([0, 1]), "hook": 50, "hold": 50, "engagement": 50,
+                                          "format": 50, "rank": i * 4, "similar": None}})
+    _, winner, _, _ = virality.compare_methods(rows)
+    assert winner == "current"
 
 
 def test_backtest_job_and_small_library(client, monkeypatch):

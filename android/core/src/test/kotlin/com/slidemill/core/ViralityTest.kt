@@ -103,30 +103,82 @@ class ViralityTest {
 
     private val leaks = java.util.concurrent.CopyOnWriteArrayList<String>()
 
+    private fun n(text: String): Int = Regex("post(\\d+)").find(text)!!.groupValues[1].toInt()
+
     private fun scoreBy(order: (Int) -> Int): (String) -> Int = { user ->
         val own = user.substringAfter("1. [hook] ").substringBefore("\n")
         if ("\"$own\" (" in user) leaks += own // a post must not see its own result as a calibration example
-        order(own.removePrefix("post").substringBefore(" ").toInt())
+        order(n(own))
     }
 
     @Test fun backtest_ranks_library_posts_like_their_views() {
         library(10)
         ai.scoreFor = scoreBy { 20 + it * 7 }
+        ai.rankBy = { n(it).toDouble() }
         val out = e.virality.backtest(analyze = {})
         assertEquals(10L, out.long("posts"))
         assertEquals(1.0, out.dbl("spearman"))
         assertTrue("real views in your library" in out.str("summary"))
         assertEquals("bt9", out.objs("rows")[0].str("post_id"))
         assertTrue(leaks.isEmpty(), leaks.toString())
+        val rho = out.objs("methods").associate { it.str("method") to it["spearman"] }
+        assertTrue((rho["rank"] as Double) >= 0.9, rho.toString())
+        assertEquals("current", out.str("method")) // nothing beat a perfect AI score by the margin
+        assertEquals(0.0, out.dbl("noise"))
         assertEquals(1.0, c.get("/api/v1/virality/calibration").objAt("backtest").dbl("spearman"))
     }
 
-    @Test fun backtest_flags_a_score_that_doesnt_track() {
+    @Test fun backtest_switches_to_ranking_when_it_tracks_better() {
         library(10)
         ai.scoreFor = scoreBy { listOf(60, 20, 80, 40, 30, 90, 10, 70, 50, 35)[it] }
+        ai.rankBy = { n(it).toDouble() }
         val out = e.virality.backtest(analyze = {})
+        val rho = out.objs("methods").associate { it.str("method") to it["spearman"] }
         assertTrue(out.dbl("spearman") < 0.15)
-        assertTrue("isn't tracking" in out.str("summary"))
+        assertTrue((rho["rank"] as Double) >= 0.9, rho.toString())
+        assertTrue(out.str("method") in setOf("rank", "blend"), out.str("method"))
+        assertTrue("now scores with" in out.str("summary"))
+        // New predictions use the winner: a slideshow unlike any library post ranks at the top here.
+        ai.scoreFor = null
+        ai.rankBy = { if ("post" in it) n(it).toDouble() else 99.0 }
+        val id = show(listOf("the sleep habit nobody tells you", "a", "b", "c", "d"))
+        val p = c.post("/api/v1/slideshows/$id/predict")
+        assertEquals(out.str("method"), p.str("method"))
+        assertEquals(p.objAt("rank").long("references"), p.objAt("rank").long("beats"))
+    }
+
+    @Test fun similar_posts_finds_the_near_duplicate() {
+        val rows = listOf("5 morning habits that fixed my skin", "what I eat in a day as a nurse", "my night routine for deep sleep",
+            "things nobody tells you about sleep", "how I save money on groceries").mapIndexed { i, t ->
+            obj("id" to "$i", "texts" to arr(t), "lift" to 0.0, "hook" to t, "url" to "", "username" to "u")
+        }
+        assertEquals("2", Methods.similarPosts("the night routine that gave me deep sleep", rows)[0].second.str("id"))
+        assertNull(Methods.similarEvidence("the night routine that gave me deep sleep", rows)) // needs 3 matches
+    }
+
+    @Test fun learned_weights_only_win_out_of_sample() {
+        val rnd = java.util.Random(7)
+        fun rows(signal: Boolean) = (0 until 40).map {
+            val hook = 20 + rnd.nextInt(71)
+            val fmt = 40 + rnd.nextInt(61)
+            val y = if (signal) 0.05 * hook + 0.03 * fmt + rnd.nextGaussian() * 0.3 else rnd.nextGaussian()
+            obj("lift_log" to y, "f" to obj("current" to 30 + rnd.nextInt(61), "hook" to hook, "hold" to 20 + rnd.nextInt(61),
+                "engagement" to 60, "format" to fmt, "rank" to null, "similar" to null))
+        }
+        val good = Methods.compare(rows(true))
+        assertEquals("learned", good.winner)
+        assertTrue((good.methods.first { it.str("method") == "learned" }.dbl("spearman")) > 0.5)
+        val noise = Methods.compare(rows(false)) // pure noise: fitting can't help out of sample
+        assertTrue(noise.winner != "learned" && noise.model == null, noise.winner)
+    }
+
+    @Test fun switch_needs_a_real_margin() {
+        val rnd = java.util.Random(3)
+        val rows = (0 until 20).map { i ->
+            obj("lift_log" to i / 10.0, "f" to obj("current" to i * 4 + rnd.nextInt(2), "hook" to 50, "hold" to 50,
+                "engagement" to 50, "format" to 50, "rank" to i * 4, "similar" to null))
+        }
+        assertEquals("current", Methods.compare(rows).winner)
     }
 
     @Test fun backtest_job_needs_a_big_enough_library() {

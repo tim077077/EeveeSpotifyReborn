@@ -106,6 +106,13 @@ class SlideRead(BaseModel):
     note: str = Field(description="At most 12 words on what helps or hurts this slide.")
 
 
+class RankRead(BaseModel):
+    """A blind ranking of slideshows by expected performance (see app/virality.py rank_score)."""
+
+    order: list[str] = Field(description="Every slideshow's letter, best first.")
+    reason: str = Field(description="At most 25 words on what separates the best from the worst.")
+
+
 class ViralityRead(BaseModel):
     """A viewer-simulation read of one slideshow (see app/virality.py)."""
 

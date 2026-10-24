@@ -43,10 +43,15 @@ private fun seedLibrary(e: Engine, ai: FakeAi) {
             ))
         }
     }
-    val noise = listOf(4, -12, 9, 0, -6, 14, -3, 8, -10, 5, 2, -1)
+    val noise = listOf(14, -12, 19, 0, -16, 14, -13, 8, -10, 5, 2, -11)
     ai.scoreFor = { user ->
         val hook = user.substringAfter("1. [hook] ").substringBefore("\n")
         val i = hooks.indexOf(hook)
         if (i < 0) 64 else 40 + i * 4 + noise[i]
+    }
+    // The blind ranker mostly agrees with real results (two neighbours swapped).
+    ai.rankBy = { text ->
+        val i = hooks.indexOf(text.substringBefore(" / "))
+        when (i) { 3 -> 4.0; 4 -> 3.0; -1 -> 6.5; else -> i.toDouble() }
     }
 }

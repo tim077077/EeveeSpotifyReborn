@@ -14,13 +14,14 @@ import json
 import math
 import re
 import statistics
+import zlib
 from datetime import datetime, timezone
 
 from sqlalchemy import select
 
 from . import db, llm
 from .config import settings
-from .schemas import SlideshowSpec, ViralityRead
+from .schemas import RankRead, SlideshowSpec, ViralityRead
 
 SYSTEM_PROMPT = """You are a TikTok photo-carousel (slideshow) performance analyst. You predict how real viewers on the For You feed react to a slideshow before it is posted.
 
@@ -217,6 +218,259 @@ def _read(spec: SlideshowSpec, caption: str, description: str, rendered: list[st
     return score(read, spec, cfg.vision, len(good) + len(bad))
 
 
+# --- the library: real slideshows whose views are known --------------------------------------
+
+
+def library_rows() -> list[dict]:
+    """Library slideshows from accounts with 3+ of them, each with its log views vs the account's median."""
+    rows: list[dict] = []
+    with db.session_scope() as session:
+        for p in session.scalars(select(db.LibraryProfile)).all():
+            posts = [x for x in p.posts if x.is_slideshow and x.views]
+            if len(posts) < 3:
+                continue
+            median = statistics.median(x.views for x in posts) or 1
+            for x in posts:
+                texts = [str(t) for t in (x.slide_texts or []) if t]
+                hook = texts[0] if texts else re.sub(r"#\S+", "", x.description).strip()
+                rows.append({
+                    "id": x.id, "niche": p.niche, "username": p.username, "url": x.url, "hook": hook,
+                    "texts": texts or ([hook] if hook else []), "images": list(x.images), "views": x.views,
+                    "lift": math.log(x.views / median),
+                })
+    return rows
+
+
+def _pct(value: float, population: list[float]) -> float:
+    """Percentile (0-100) of `value` within `population`."""
+    if not population:
+        return 50.0
+    below = sum(1 for v in population if v < value)
+    equal = sum(1 for v in population if v == value)
+    return 100 * (below + 0.5 * equal) / len(population)
+
+
+def _spread(rows: list[dict], k: int) -> list[dict]:
+    """k rows evenly spaced from the lowest lift to the highest."""
+    rows = sorted(rows, key=lambda r: r["lift"])
+    if len(rows) <= k:
+        return rows
+    return [rows[round(i * (len(rows) - 1) / (k - 1))] for i in range(k)]
+
+
+# --- method B: posts like this (no AI call) ------------------------------------------------------
+
+STOP = set("the a an and or of to in on for is are was it its this that my your you i me we with at be by as from "
+           "how what why when not no do so if just all".split())
+
+
+def _tokens(text: str) -> list[str]:
+    return [w for w in re.findall(r"[^\W\d_]{2,}|\d+", text.lower()) if w not in STOP]
+
+
+def similar_posts(text: str, rows: list[dict], k: int = 5) -> list[tuple[float, dict]]:
+    """The k library posts whose slide text is closest to `text` (TF-IDF cosine), best first."""
+    query = _tokens(text)
+    docs = [_tokens(" ".join(r["texts"])) for r in rows]
+    if not query or not rows:
+        return []
+    df: dict[str, int] = {}
+    for d in docs:
+        for w in set(d):
+            df[w] = df.get(w, 0) + 1
+
+    def vec(toks: list[str]) -> dict[str, float]:
+        v: dict[str, float] = {}
+        for w in toks:
+            v[w] = v.get(w, 0.0) + math.log((len(docs) + 1) / (df.get(w, 0) + 1)) + 1
+        norm = math.sqrt(sum(x * x for x in v.values())) or 1.0
+        return {w: x / norm for w, x in v.items()}
+
+    q = vec(query)
+    scored = []
+    for r, d in zip(rows, docs):
+        if d:
+            dv = vec(d)
+            sim = sum(x * dv.get(w, 0.0) for w, x in q.items())
+            if sim > 0.05:
+                scored.append((sim, r))
+    scored.sort(key=lambda t: -t[0])
+    return scored[:k]
+
+
+def similar_evidence(text: str, rows: list[dict]) -> dict | None:
+    """What library posts like this one actually got (needs 3 matches)."""
+    top = similar_posts(text, rows)
+    if len(top) < 3:
+        return None
+    lift = sum(s * r["lift"] for s, r in top) / sum(s for s, _ in top)
+    return {
+        "score": round(_pct(lift, [r["lift"] for r in rows])),
+        "lift": round(math.exp(lift), 2),
+        "posts": [{"hook": r["hook"][:120], "url": r["url"], "username": r["username"], "lift": round(math.exp(r["lift"]), 2),
+                   "similarity": round(sim, 2)} for sim, r in top],
+    }
+
+
+# --- method A: rank blind against real posts -------------------------------------------------------
+
+RANK_PROMPT = """You compare TikTok photo-carousel (slideshow) posts. Rank every slideshow you are given from the one that will perform best to the one that will perform worst, where performing means beating the views its account usually gets: a hook that stops the scroll, slides that earn each swipe, a payoff, and something people relate to, save or share. Judge only what is in front of you; you are not told how any of them did."""
+LETTERS = "ABCDEFG"
+
+
+def rank_score(texts: list[str], cover: str | None, rows: list[dict], seed: str, exclude: str = "") -> dict | None:
+    """Rank a slideshow blind among up to 6 real library posts spread from flops to hits; its place
+    among them (whose real results are known) is the score."""
+    refs = _spread([r for r in rows if r["id"] != exclude and r["texts"]], 6)
+    if len(refs) < 4:
+        return None
+    cfg = llm.resolve()
+    if cfg is None:
+        raise PredictError("Add an AI key in Settings first.")
+    pos = zlib.crc32(seed.encode()) % (len(refs) + 1)  # where the new one sits, so position bias can't favour it
+    items: list[dict | None] = refs[:pos] + [None] + refs[pos:]
+    lines, covers = [], []
+    for letter, it in zip(LETTERS, items):
+        slides = texts if it is None else it["texts"]
+        lines.append(f"Slideshow {letter}: " + " / ".join(t[:160] for t in slides[:10]))
+        covers.append(cover if it is None else (it["images"][0] if it["images"] else None))
+    images = None
+    if cfg.vision and all(covers):
+        images = ["data:image/jpeg;base64," + base64.b64encode((settings.media_dir / c).read_bytes()).decode() for c in covers]
+    user = "\n".join(lines) + f"\n\nRank all {len(items)} ({', '.join(LETTERS[:len(items)])}), best first."
+    if images:
+        user += " Their cover slides (slide 1) are attached in the same order."
+    try:
+        read = llm.complete_json(RANK_PROMPT, user, RankRead, images=images, cfg=cfg)
+    except llm.LLMError as exc:
+        raise PredictError(str(exc)) from exc
+    order = [str(x).strip().upper()[:1] for x in read.order]
+    me = LETTERS[pos]
+    if me not in order:
+        return None
+    above = {x for x in order[: order.index(me)]}
+    beats = sum(1 for i, _ in enumerate(refs) if LETTERS[i if i < pos else i + 1] not in above)
+    lifts = sorted(r["lift"] for r in refs)
+    at = beats / len(refs) * (len(lifts) - 1)
+    lo = int(at)
+    lift = lifts[lo] + (lifts[min(lo + 1, len(lifts) - 1)] - lifts[lo]) * (at - lo)
+    return {"score": round(100 * (beats + 0.5) / (len(refs) + 1)), "lift": round(math.exp(lift), 2),
+            "beats": beats, "references": len(refs), "reason": read.reason}
+
+
+# --- combining methods ------------------------------------------------------------------------------
+
+METHODS = {"current": "AI score", "rank": "Rank vs library", "similar": "Posts like this", "blend": "Blend of all three",
+           "learned": "Learned from your library"}
+FEATURES = ["hook", "hold", "engagement", "format", "rank", "similar"]
+SWITCH_MARGIN = 0.05  # a method has to beat the AI score by this much ρ before the app switches to it
+USEFUL = 0.15  # ...and track views at least weakly itself; beating a useless score by luck doesn't count
+LEARN_MIN = 30
+
+
+def features(result: dict, rank: dict | None, similar: dict | None) -> dict:
+    d = result["dimensions"]
+    return {
+        "current": result["viral_potential"], "hook": result["hook_score"], "hold": result["hold_rate"],
+        "engagement": round(statistics.mean([d["curiosity"], d["relatability"], d["shareability"], result["payoff"]])),
+        "format": result["format_score"], "rank": rank["score"] if rank else None, "similar": similar["score"] if similar else None,
+    }
+
+
+def _vector(f: dict) -> list[float]:
+    return [float(f[k]) if f.get(k) is not None else 50.0 for k in FEATURES]
+
+
+def _solve(a: list[list[float]], b: list[float]) -> list[float]:
+    n = len(b)
+    m = [row[:] + [b[i]] for i, row in enumerate(a)]
+    for c in range(n):
+        piv = max(range(c, n), key=lambda r: abs(m[r][c]))
+        m[c], m[piv] = m[piv], m[c]
+        if abs(m[c][c]) < 1e-12:
+            continue
+        for r in range(n):
+            if r != c:
+                f = m[r][c] / m[c][c]
+                m[r] = [x - f * y for x, y in zip(m[r], m[c])]
+    return [m[i][n] / m[i][i] if abs(m[i][i]) > 1e-12 else 0.0 for i in range(n)]
+
+
+def fit(xs: list[list[float]], ys: list[float], lam: float = 1.0) -> dict:
+    """Ridge regression of log lift on standardized features."""
+    n, k = len(xs), len(xs[0])
+    mu = [sum(r[j] for r in xs) / n for j in range(k)]
+    sd = [math.sqrt(sum((r[j] - mu[j]) ** 2 for r in xs) / n) or 1.0 for j in range(k)]
+    z = [[(r[j] - mu[j]) / sd[j] for j in range(k)] for r in xs]
+    ym = sum(ys) / n
+    a = [[sum(row[i] * row[j] for row in z) + (lam if i == j else 0.0) for j in range(k)] for i in range(k)]
+    b = [sum(row[i] * (y - ym) for row, y in zip(z, ys)) for i in range(k)]
+    return {"mu": mu, "sd": sd, "w": _solve(a, b), "b": ym}
+
+
+def apply_fit(model: dict, x: list[float]) -> float:
+    return model["b"] + sum(w * (v - m) / s for w, v, m, s in zip(model["w"], x, model["mu"], model["sd"]))
+
+
+def method_value(method: str, f: dict, bt: dict) -> int | None:
+    """A 0-100 score for one slideshow's features under `method`, using the library test's populations."""
+    pop = bt.get("populations", {})
+    if method == "current":
+        return f["current"]
+    if method in ("rank", "similar"):
+        return f[method]
+    if method == "blend":
+        parts = [_pct(f[m], pop[m]) for m in ("current", "rank", "similar") if f.get(m) is not None and pop.get(m)]
+        return round(statistics.mean(parts)) if parts else None
+    if method == "learned" and bt.get("model"):
+        return round(_pct(apply_fit(bt["model"], _vector(f)), pop.get("learned", [])))
+    return None
+
+
+def compare_methods(rows: list[dict]) -> tuple[list[dict], str, dict | None, dict]:
+    """ρ of every method on the library rows, the winner, the learned model (if it won) and populations."""
+    ys = [r["lift_log"] for r in rows]
+    pops = {m: [r["f"][m] for r in rows if r["f"].get(m) is not None] for m in ("current", "rank", "similar")}
+    bt = {"populations": pops}
+    results: list[dict] = []
+
+    def add(method: str, scores: list[float | None]) -> None:
+        pairs = [(sc, y) for sc, y in zip(scores, ys) if sc is not None]
+        rho = spearman([a for a, _ in pairs], [b for _, b in pairs]) if len(pairs) >= BACKTEST_MIN else None
+        results.append({"method": method, "label": METHODS[method], "posts": len(pairs),
+                        "spearman": round(rho, 2) if rho is not None else None})
+
+    for m in ("current", "rank", "similar", "blend"):
+        add(m, [method_value(m, r["f"], bt) for r in rows])
+    model = None
+    if len(rows) >= LEARN_MIN:
+        xs = [_vector(r["f"]) for r in rows]
+        # Leave-one-out: each post is predicted by weights fitted without it.
+        loo = [apply_fit(fit(xs[:i] + xs[i + 1:], ys[:i] + ys[i + 1:]), xs[i]) for i in range(len(rows))]
+        add("learned", loo)
+        model = fit(xs, ys)
+        pops["learned"] = [apply_fit(model, x) for x in xs]
+    rho = {r["method"]: r["spearman"] for r in results}
+    singles = [m for m in ("current", "rank", "similar", "blend") if rho[m] is not None]
+    best = max(singles, key=lambda m: rho[m]) if singles else "current"
+    if rho.get("learned") is not None and rho["learned"] >= (rho.get(best) or -1) + SWITCH_MARGIN:
+        best = "learned"
+    base = rho.get("current")
+    good = rho.get(best) is not None and rho[best] >= USEFUL
+    winner = best if good and (base is None or rho[best] >= base + SWITCH_MARGIN) else "current"
+    if winner != "learned":
+        model = None
+        pops.pop("learned", None)
+    return results, winner, model, pops
+
+
+# --- predicting one slideshow ---------------------------------------------------------------------
+
+
+def _slide_texts(spec: SlideshowSpec) -> list[str]:
+    return [" ".join(t.text for t in s.text_items).strip() for s in spec.slides]
+
+
 def predict(slideshow_id: str) -> dict:
     with db.session_scope() as session:
         show = session.get(db.Slideshow, slideshow_id)
@@ -227,6 +481,31 @@ def predict(slideshow_id: str) -> dict:
         spec = SlideshowSpec.model_validate(show.spec)
         caption, description, rendered = show.caption, show.description, list(show.rendered)
     result = _read(spec, caption, description, rendered)
+    rows = library_rows()
+    texts = [t for t in _slide_texts(spec) if t]
+    similar = similar_evidence(" ".join(texts), rows)
+    if similar:
+        result["similar"] = similar
+    bt = last_backtest() or {}
+    method = bt.get("method", "current")
+    rank = None
+    if method in ("rank", "blend", "learned"):
+        try:
+            rank = rank_score(texts, rendered[0], rows, slideshow_id)
+        except PredictError:
+            rank = None  # fall back to the AI score below rather than failing the prediction
+        if rank:
+            result["rank"] = rank
+    value = method_value(method, features(result, rank, similar), bt) if method != "current" else None
+    result["ai_score"] = result["viral_potential"]
+    if value is not None:
+        result["viral_potential"] = value
+        result["verdict"], result["verdict_tag"] = verdict(value)
+        rho = next((m["spearman"] for m in bt.get("methods", []) if m["method"] == method), None)
+        result["basis"] += f"; final score from {METHODS[method].lower()} (the library test's pick, ρ = {rho})"
+        result["method"] = method
+    else:
+        result["method"] = "current"
     with db.session_scope() as session:
         session.get(db.Slideshow, slideshow_id).prediction = result
     return result
@@ -262,27 +541,11 @@ def calibration() -> dict:
     }
 
 
-# --- backtest: score real library posts whose views are already known -----------------------
+# --- backtest: race the methods on real library posts whose views are already known -------------
 
 BACKTEST_KEY = "virality_backtest"
 BACKTEST_MIN = 8
-
-
-def backtest_sample(limit: int = 20) -> list[tuple[str, float]]:
-    """(post id, log of views vs the account's median) for library slideshows, spread from flops to hits."""
-    rows: list[tuple[str, float]] = []
-    with db.session_scope() as session:
-        for p in session.scalars(select(db.LibraryProfile)).all():
-            posts = [x for x in p.posts if x.is_slideshow and x.views]
-            if len(posts) < 3:
-                continue
-            median = statistics.median(x.views for x in posts) or 1
-            rows += [(x.id, math.log(x.views / median)) for x in posts if x.images]
-    rows.sort(key=lambda r: r[1])
-    if len(rows) <= limit:
-        return rows
-    # Evenly spaced through the ranking, so the test sees hits, flops and the middle.
-    return [rows[round(i * (len(rows) - 1) / (limit - 1))] for i in range(limit)]
+NOISE_POSTS = 3
 
 
 def _library_spec(post: db.LibraryPost) -> SlideshowSpec:
@@ -295,11 +558,12 @@ def _library_spec(post: db.LibraryPost) -> SlideshowSpec:
 
 
 def backtest(limit: int = 20, progress=lambda done, total: None) -> dict:
-    """Score real library slideshows blind (each one is left out of its own calibration examples) and
-    check whether the score ranks them the way their real views did."""
+    """Score real library slideshows blind with every method (each post is left out of its own
+    calibration examples, references and look-alikes), measure how well each ranks them like their
+    real views did, and pick the method the app should use."""
     from . import library  # library imports llm; keep this module's imports light
 
-    sample = backtest_sample(limit)
+    sample = _spread([r for r in library_rows() if r["images"]], limit)
     if len(sample) < BACKTEST_MIN:
         raise PredictError(
             f"The library has {len(sample)} usable slideshows; it needs {BACKTEST_MIN}. "
@@ -308,42 +572,67 @@ def backtest(limit: int = 20, progress=lambda done, total: None) -> dict:
     cfg = llm.resolve()
     if cfg is None:
         raise PredictError("Add an AI key in Settings first.")
-    rows = []
-    for n, (post_id, lift) in enumerate(sample):
+    rows: list[dict] = []
+    for n, row in enumerate(sample):
         progress(n, len(sample))
         with db.session_scope() as session:
-            post = session.get(db.LibraryPost, post_id)
-            analyzed = bool(post.slide_texts)
+            analyzed = bool(session.get(db.LibraryPost, row["id"]).slide_texts)
         if not analyzed:
             if not cfg.vision:
                 continue  # neither the slide text nor a way to read it
             try:
-                library.analyze_post(post_id)
+                library.analyze_post(row["id"])
             except library.LibraryError:
                 continue
         with db.session_scope() as session:
-            post = session.get(db.LibraryPost, post_id)
-            spec, caption, images = _library_spec(post), post.description, list(post.images)
-            url, views, username = post.url, post.views, post.profile.username
+            post = session.get(db.LibraryPost, row["id"])
+            spec, caption = _library_spec(post), post.description
+        texts = [t for t in _slide_texts(spec) if t]
+        others = [r for r in library_rows() if r["id"] != row["id"]]
         try:
-            result = _read(spec, caption, "", images, exclude=post_id)
+            result = _read(spec, caption, "", row["images"], exclude=row["id"])
+            rank = rank_score(texts, row["images"][0], others, row["id"])
         except PredictError:
             continue
-        first = spec.slides[0].text_items if spec.slides else []
+        similar = similar_evidence(" ".join(texts), others)
         rows.append({
-            "post_id": post_id, "url": url, "username": username, "hook": first[0].text if first else caption[:80],
-            "views": views, "lift": round(math.exp(lift), 2), "score": result["viral_potential"], "_log_lift": lift,
+            "post_id": row["id"], "url": row["url"], "username": row["username"],
+            "hook": texts[0] if texts else caption[:80], "views": row["views"], "lift": round(math.exp(row["lift"]), 2),
+            "lift_log": row["lift"], "score": result["viral_potential"], "f": features(result, rank, similar),
         })
+    # Noise: the same slideshow read twice should get about the same score.
+    drifts = []
+    for r in rows[:NOISE_POSTS]:
+        with db.session_scope() as session:
+            post = session.get(db.LibraryPost, r["post_id"])
+            spec, caption, images = _library_spec(post), post.description, list(post.images)
+        try:
+            drifts.append(abs(_read(spec, caption, "", images, exclude=r["post_id"])["viral_potential"] - r["score"]))
+        except PredictError:
+            pass
     progress(len(sample), len(sample))
-    rho = spearman([r["score"] for r in rows], [r.pop("_log_lift") for r in rows])
     if len(rows) < BACKTEST_MIN:
-        summary = f"Only {len(rows)} library slideshows could be scored; the test needs {BACKTEST_MIN}."
-        rho = None
+        methods, winner, model, pops = [], "current", None, {}
+        rho, summary = None, f"Only {len(rows)} library slideshows could be scored; the test needs {BACKTEST_MIN}."
     else:
+        methods, winner, model, pops = compare_methods(rows)
+        rho = next(m["spearman"] for m in methods if m["method"] == "current")
         summary = _summary(rho, "real views in your library")
+        if winner != "current":
+            won = next(m for m in methods if m["method"] == winner)
+            summary += f" {won['label']} did better (ρ = {won['spearman']}), so the app now scores with it."
+        elif (rho is None or rho < USEFUL) and all((m["spearman"] or 0) < USEFUL for m in methods):
+            summary += " No other method tracked views either, so treat every score as a guess for now."
     out = {
-        "posts": len(rows), "spearman": round(rho, 2) if rho is not None else None, "summary": summary,
-        "rows": sorted(rows, key=lambda r: -r["score"]), "ran_at": datetime.now(timezone.utc).isoformat(),
+        "posts": len(rows), "spearman": rho, "summary": summary, "method": winner, "methods": methods,
+        "model": model, "populations": pops,
+        "noise": round(statistics.mean(drifts), 1) if drifts else None,
+        "rows": sorted(
+            [{**{k: v for k, v in r.items() if k not in ("f", "lift_log")}, "rank": r["f"]["rank"], "similar": r["f"]["similar"]}
+             for r in rows],
+            key=lambda r: -r["score"],
+        ),
+        "ran_at": datetime.now(timezone.utc).isoformat(),
     }
     with db.session_scope() as session:
         row = session.get(db.Setting, BACKTEST_KEY)

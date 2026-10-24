@@ -24,6 +24,8 @@ class FakeAi {
     @Volatile var lastImages = 0
     /** When set, the virality fake scores each read with this (given the prompt) instead of hookScores. */
     @Volatile var scoreFor: ((String) -> Int)? = null
+    /** When set, the blind ranker orders slideshows by this value of their slide text (highest first). */
+    @Volatile var rankBy: ((String) -> Double)? = null
     private val server = HttpServer.create(InetSocketAddress("127.0.0.1", 0), 0)
     val url: String get() = "http://127.0.0.1:${server.address.port}"
 
@@ -80,6 +82,11 @@ class FakeAi {
                 "slides" to (1..n).map { obj("swipe_on" to 80, "visual_pull" to 60, "clarity" to 70, "note" to "ok") }.toMutableList<Any?>(),
                 "tips" to arr("Make slide 2 more specific."), "better_hook" to "the sleep habit nobody tells you",
             )
+        }
+        "You compare TikTok photo-carousel" in system -> {
+            val items = Regex("^Slideshow ([A-G]): (.*)$", RegexOption.MULTILINE).findAll(user).map { it.groupValues[1] to it.groupValues[2] }.toList()
+            val by = rankBy
+            obj("order" to (if (by == null) items else items.sortedByDescending { by(it.second) }).map { it.first }.toMutableList<Any?>(), "reason" to "clearer hooks win")
         }
         "categorize TikTok accounts" in system -> obj("niche" to "Skincare", "product_medium" to "creator")
         "Transcribe the overlay text" in system -> obj("slides" to arr("things that changed my skin", "1. double cleanse", "2. spf daily"))

@@ -348,6 +348,8 @@ tbody tr:hover td { background: #161616; }
 }
 
 @media (max-width: 820px) {
+  .pred-head { flex-wrap: wrap; }
+  .pred-head > button { order: 3; width: 100%; }
   :root { --gutter: 16px; --pad: 18px; --topbar: 52px; }
   body { grid-template-columns: minmax(0, 1fr); grid-template-rows: var(--topbar) 1fr; }
   .sidebar {
