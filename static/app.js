@@ -1090,7 +1090,7 @@ views.libprofile = async (id) => {
 };
 
 views.settings = async () => {
-  const [data, ext] = await Promise.all([api("/settings"), api("/extension/status")]);
+  const [data, ext, mcp] = await Promise.all([api("/settings"), api("/extension/status"), PHONE ? null : api("/mcp").catch(() => null)]);
   const seen = ext.extension?.at ? new Date(ext.extension.at) : null;
   const online = seen && Date.now() - seen.getTime() < 3 * 60 * 1000;
   const v = data.values;
@@ -1103,6 +1103,7 @@ views.settings = async () => {
     ${titleRow("Settings", `Paste any AI key and the provider is detected from it. ${PHONE ? "Keys are encrypted on this phone." : "Keys are stored in this server's database."}`,
       `<button id="test">Test AI and images</button><button class="primary" id="save">Save</button>`)}
     ${PHONE ? phoneCard(ext, field, setRow) : ""}
+    ${mcp ? claudeCard(mcp.url, setRow) : ""}
     ${setRow("Browser poster", "Posts your queue from a logged-in tiktok.com tab with the Slidemill extension. No TikTok developer app needed.", `
       <p class="small" style="display:flex;flex-wrap:wrap;gap:8px;align-items:center">
         <span class="pill ${online ? "ok" : "bad"}">${online ? "Extension online" : "Extension offline"}</span>
@@ -1148,6 +1149,17 @@ views.settings = async () => {
       a.click();
       URL.revokeObjectURL(a.href);
     });
+  const copy = $("#mcp-copy");
+  if (copy) copy.onclick = async () => {
+    try {
+      await navigator.clipboard.writeText($("#mcp-url").value);
+      toast("Copied. Paste it into Claude as a custom connector.");
+    } catch {
+      $("#mcp-url").type = "text";
+      $("#mcp-url").select();
+      toast("Select and copy the URL.");
+    }
+  };
   $("#save").onclick = (e) =>
     busy(e.currentTarget, async () => {
       const values = {};
@@ -1169,6 +1181,21 @@ views.settings = async () => {
       $("#test-out").scrollIntoView({ behavior: "smooth", block: "nearest" });
     });
 };
+
+// Claude as the writer: the MCP connector URL (server only; the phone's engine isn't reachable from Claude).
+function claudeCard(url, setRow) {
+  const desc = "Claude writes the slideshows in conversation; Slidemill renders, scores and queues them. Works in every Claude app.";
+  if (!url) return setRow("Connect Claude", desc, `<p class="muted" style="margin:0">Set <code>SLIDEMILL_API_KEY</code> on this server to turn the connector on.</p>`);
+  const reachable = url.startsWith("https://");
+  return setRow("Connect Claude", desc, `
+    <label for="mcp-url" style="margin-top:0">Connector URL</label>
+    <div class="row"><input id="mcp-url" class="grow" type="password" value="${esc(url)}" readonly>
+      <button type="button" id="mcp-copy">Copy</button></div>
+    <p class="small muted" style="margin:8px 0 0">In Claude, open Settings, then Connectors, add a custom connector and paste this URL.
+      Then ask something like “make 3 slideshows like my best library posts and score them”.</p>
+    <p class="small faint" style="margin:6px 0 0">Treat this URL like a password: whoever has it can make and queue posts. Changing <code>SLIDEMILL_API_KEY</code> changes it.</p>
+    ${reachable ? "" : `<p class="small muted" style="margin:6px 0 0">Claude can only reach a public https address. This server is at ${esc(new URL(url).origin)}, so deploy it first (deploy/install.sh).</p>`}`);
+}
 
 function phoneCard(ext, field, setRow) {
   return setRow("Posting from this phone", "The TikTok tab posts your queue by itself, within the limits below. “Send to the TikTok app” posts open TikTok's own editor instead, for you to finish.", `

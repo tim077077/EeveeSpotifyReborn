@@ -57,6 +57,9 @@ def client(monkeypatch):
     store.set_many({"llm_provider": "openai", "llm_api_key": "sk-test"})
     SCORES.clear()
     CALLS.clear()
+    with db.session_scope() as s:  # every test starts from an empty research library
+        s.query(db.LibraryPost).delete()
+        s.query(db.LibraryProfile).delete()
     RANKER["fn"] = None
     RANKER["transcribe"] = None
     with TestClient(app) as c:

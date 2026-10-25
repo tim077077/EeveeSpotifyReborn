@@ -8,7 +8,7 @@ import zipfile
 import os
 import secrets
 from datetime import datetime, timedelta, timezone
-from contextlib import asynccontextmanager
+from contextlib import AsyncExitStack, asynccontextmanager
 from typing import Any
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
@@ -18,7 +18,7 @@ from fastapi.staticfiles import StaticFiles
 from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
-from . import browser_queue, db, imagegen, images, legal, library, llm, pipeline, scheduler, store, tiktok, timing, virality
+from . import browser_queue, db, imagegen, images, legal, library, llm, mcp_server, pipeline, scheduler, store, tiktok, timing, virality
 from .config import STATIC_DIR, settings
 from .schemas import (
     ApplyTimingRequest,
@@ -45,12 +45,18 @@ logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name
 
 
 @asynccontextmanager
-async def lifespan(_: FastAPI):
+async def lifespan(app_: FastAPI):
     check_deployment_security()
     db.init_db()
     if settings.run_scheduler:
         scheduler.start()
-    yield
+    async with AsyncExitStack() as stack:
+        if settings.api_key:
+            # Claude's connector endpoint. Its session manager runs once per start, so the route is rebuilt each start.
+            routes = [r for r in app_.router.routes if not getattr(r, "path", "").startswith("/mcp/")]
+            app_.router.routes[:] = routes + list(mcp_server.http_app().routes)
+            await stack.enter_async_context(mcp_server.server.session_manager.run())
+        yield
     scheduler.shutdown()
 
 
@@ -341,6 +347,12 @@ def predict_slideshow(slideshow_id: str) -> dict[str, Any]:
         if str(exc) == "slideshow not found":
             raise _404("slideshow") from exc
         raise HTTPException(422, {"error": str(exc), "code": "VALIDATION_ERROR"}) from exc
+
+
+@api.get("/mcp")
+def mcp_connector() -> dict[str, Any]:
+    """The URL to add in Claude as a custom connector (it contains a secret: treat it like a password)."""
+    return {"url": mcp_server.mcp_url()}
 
 
 @api.get("/virality/calibration")

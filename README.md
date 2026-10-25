@@ -29,6 +29,7 @@ It was built by tearing down how reel.farm works; see [docs/REELFARM_TEARDOWN.md
 - **TikTok posting.** Connect any number of accounts with OAuth. Posts go out as photo carousels, either straight to your TikTok drafts (`MEDIA_UPLOAD`) or published directly (`DIRECT_POST`). The direct-post daily limit is enforced, with automatic fallback to drafts.
 - **Analytics.** It polls each post's publish status and syncs views, likes, comments and shares every 10 minutes.
 - **MP4 export** for Reels and Shorts, plus a **REST API** (`/api/v1`, docs at `/docs`).
+- **Claude connector (MCP).** Add the server to Claude as a custom connector. Claude can then research your library, write slideshows, see the rendered slides, score them and queue posts, all in conversation, and the writing runs on your Claude plan. The URL is in **Settings → Connect Claude**. See [docs/CLAUDE_CONNECTOR.md](docs/CLAUDE_CONNECTOR.md).
 
 ## Deploy (production)
 
