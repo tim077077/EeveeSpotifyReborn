@@ -11,8 +11,8 @@ android {
         applicationId = "com.slidemill.app"
         minSdk = 26
         targetSdk = 35
-        versionCode = 2
-        versionName = "2.0.0"
+        versionCode = 3
+        versionName = "3.0.0"
     }
 
     // A fixed key checked into the repo, so every build (local or CI) can update the installed app.
@@ -51,12 +51,11 @@ dependencies {
     testImplementation("org.robolectric:robolectric:4.14.1")
 }
 
-// One source of truth, shared with the server and the browser extension: the dashboard (static/),
-// the slide fonts (fonts/) and the TikTok poster (extension/tiktok-inject.js).
-val copySharedAssets by tasks.registering(Copy::class) {
+// One source of truth, shared with the server and the browser extension: the slide fonts (fonts/)
+// and the TikTok page script (extension/tiktok-inject.js).
+val copySharedAssets by tasks.registering(Sync::class) {
     into(layout.buildDirectory.dir("generated/sharedAssets"))
     from(rootProject.file("../extension/tiktok-inject.js"))
-    from(rootProject.file("../static")) { into("static") }
     from(rootProject.file("../fonts")) { into("fonts") }
 }
 tasks.named("preBuild") { dependsOn(copySharedAssets) }

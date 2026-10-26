@@ -6,7 +6,6 @@ on:
       - "android/**"
       - "extension/tiktok-inject.js"
       - "extension/test/**"
-      - "static/**"
       - "fonts/**"
       - ".github/workflows/android.yml"
   workflow_dispatch:

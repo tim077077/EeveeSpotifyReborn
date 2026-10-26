@@ -5,11 +5,11 @@ import java.time.Instant
 import java.time.ZoneId
 
 /**
- * What the engine needs from the device it runs on. Android implements it with Canvas, MediaCodec,
- * the Keystore and notifications; tests implement it with Java2D and plain files.
+ * What the engine needs from the device it runs on. Android implements it with Canvas and the
+ * Keystore; tests implement it with Java2D and plain files.
  */
 interface Platform {
-    /** "android" on the phone; anything else elsewhere (the dashboard adapts to it). */
+    /** "android" on the phone. */
     val name: String
 
     fun now(): Instant = Instant.now()
@@ -21,15 +21,6 @@ interface Platform {
     fun decryptSecret(stored: String): String
 
     val imaging: Imaging
-
-    /** Stitch JPEG frames into an MP4 at `target`. Throws with a readable message on failure. */
-    fun exportVideo(frames: List<File>, secondsPerSlide: Double, target: File)
-
-    /** Bundled files: the dashboard ("static/index.html") and fonts ("fonts/Anton-Regular.ttf"). */
-    fun asset(path: String): ByteArray?
-
-    /** Something the user should see outside the app (a post is ready to share, a post failed). */
-    fun notify(notice: Notice) {}
 
     /**
      * Raw TikTok web `itemStruct`s for a public profile's latest posts, read by a logged-in TikTok page
@@ -45,7 +36,19 @@ interface Platform {
     fun log(message: String) = println("slidemill: $message")
 }
 
-data class Notice(val kind: String, val title: String, val text: String, val postId: String? = null)
+/**
+ * The phone's logged-in tiktok.com tab. Both calls block until TikTok answers (or a timeout) and
+ * throw [DraftError] with a reason the user can act on.
+ */
+interface TikTokTab {
+    /** The logged-in TikTok username; "" when nobody is logged in. */
+    fun username(): String
+
+    /** Upload the slides and save them to the user's TikTok Studio drafts. Returns TikTok's draft id. */
+    fun saveDraft(title: String, caption: String, slides: List<File>): String
+}
+
+class DraftError(message: String) : RuntimeException(message)
 
 /** Image decoding and drawing primitives; the slide layout itself lives in [Renderer]. */
 interface Imaging {

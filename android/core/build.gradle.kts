@@ -26,10 +26,3 @@ tasks.test {
     systemProperty("java.awt.headless", "true")
     testLogging { events("failed"); exceptionFormat = org.gradle.api.tasks.testing.logging.TestExceptionFormat.FULL }
 }
-
-// Phone engine on the desktop with a fake AI, for browser UI tests.
-tasks.register<JavaExec>("harness") {
-    classpath = sourceSets["test"].runtimeClasspath
-    mainClass.set("com.slidemill.core.HarnessKt")
-    workingDir = rootProject.projectDir
-}

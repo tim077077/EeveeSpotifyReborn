@@ -7,27 +7,12 @@
     <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
     <uses-permission android:name="android.permission.WAKE_LOCK" />
     <uses-permission android:name="android.permission.RECEIVE_BOOT_COMPLETED" />
-    <uses-permission android:name="android.permission.SCHEDULE_EXACT_ALARM" />
-    <!-- Saving slides/videos/backups on Android 8-9 (newer versions use MediaStore without a permission). -->
-    <uses-permission android:name="android.permission.WRITE_EXTERNAL_STORAGE" android:maxSdkVersion="28" />
 
-    <queries>
-        <package android:name="com.zhiliaoapp.musically" />
-        <package android:name="com.ss.android.ugc.trill" />
-        <package android:name="com.ss.android.ugc.aweme" />
-        <intent>
-            <action android:name="android.intent.action.SEND_MULTIPLE" />
-            <data android:mimeType="image/*" />
-        </intent>
-    </queries>
-
-    <!-- Cleartext is allowed only because the dashboard is served by the app itself on http://127.0.0.1. -->
     <application
         android:name=".SlidemillApp"
         android:label="Slidemill"
         android:icon="@mipmap/ic_launcher"
         android:theme="@style/AppTheme"
-        android:usesCleartextTraffic="true"
         android:largeHeap="true"
         android:allowBackup="false">
 
@@ -43,20 +28,13 @@
             </intent-filter>
         </activity>
 
-        <activity
-            android:name=".ShareActivity"
-            android:exported="false"
-            android:excludeFromRecents="true"
-            android:taskAffinity=""
-            android:theme="@android:style/Theme.Translucent.NoTitleBar" />
-
         <service
             android:name=".EngineService"
             android:exported="false"
             android:foregroundServiceType="specialUse">
             <property
                 android:name="android.app.PROPERTY_SPECIAL_USE_FGS_SUBTYPE"
-                android:value="Runs the user's slideshow schedules on the device and posts them from their logged-in TikTok session at the times they chose." />
+                android:value="Keeps the connection Claude uses to reach this phone, and the logged-in TikTok page that saves the slideshows Claude makes to the user's TikTok drafts." />
         </service>
 
         <receiver android:name=".BootReceiver" android:exported="true">
@@ -66,10 +44,5 @@
             </intent-filter>
         </receiver>
 
-        <provider
-            android:name=".SlideProvider"
-            android:authorities="com.slidemill.app.slides"
-            android:exported="false"
-            android:grantUriPermissions="true" />
     </application>
 </manifest>

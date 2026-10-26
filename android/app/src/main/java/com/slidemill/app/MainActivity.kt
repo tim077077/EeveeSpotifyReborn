@@ -1,42 +1,40 @@
 package com.slidemill.app
 
 import android.Manifest
-import android.annotation.SuppressLint
 import android.app.Activity
-import android.app.AlarmManager
-import android.content.ContentValues
+import android.content.ClipData
+import android.content.ClipboardManager
 import android.content.Intent
 import android.content.pm.PackageManager
 import android.graphics.Color
 import android.graphics.Typeface
-import android.net.Uri
 import android.os.Build
 import android.os.Bundle
-import android.os.Environment
 import android.os.Handler
 import android.os.Looper
-import android.provider.MediaStore
 import android.provider.Settings
+import android.text.InputType
 import android.util.TypedValue
 import android.view.View
 import android.view.ViewGroup
-import android.webkit.JavascriptInterface
-import android.webkit.ValueCallback
-import android.webkit.WebChromeClient
-import android.webkit.WebResourceRequest
-import android.webkit.WebView
-import android.webkit.WebViewClient
 import android.widget.Button
+import android.widget.EditText
 import android.widget.FrameLayout
 import android.widget.LinearLayout
 import android.widget.ScrollView
-import android.widget.Switch
 import android.widget.TextView
 import android.widget.Toast
-import java.io.File
+import com.slidemill.core.Engine
+import com.slidemill.core.copyObj
+import com.slidemill.core.long
+import com.slidemill.core.objOrNull
+import com.slidemill.core.str
 import java.util.concurrent.Executors
 
-/** Three tabs: the Slidemill dashboard (served by the app itself), tiktok.com (log in once), and the phone poster. */
+/**
+ * Two tabs: Slidemill (connect Claude, see what it made and whether each draft reached TikTok) and
+ * TikTok (log in once). Claude does the work through the connector; this screen only sets it up.
+ */
 class MainActivity : Activity() {
 
     private val bg = Color.parseColor("#0E0F12")
@@ -44,20 +42,24 @@ class MainActivity : Activity() {
     private val ink = Color.parseColor("#ECEDF0")
     private val muted = Color.parseColor("#9097A3")
     private val accent = Color.parseColor("#FE2C55")
+    private val good = Color.parseColor("#12B886")
 
     private lateinit var content: FrameLayout
     private lateinit var tabs: List<Button>
-    private var dashboard: WebView? = null
     private var current = ""
     private val main = Handler(Looper.getMainLooper())
     private val io = Executors.newSingleThreadExecutor()
-    private var statusView: TextView? = null
-    private var fileCallback: ValueCallback<Array<Uri>>? = null
+    private lateinit var engine: Engine
 
-    private val statusTicker = object : Runnable {
+    private var relayState: TextView? = null
+    private var claudeUrl: TextView? = null
+    private var tiktokState: TextView? = null
+    private var showsList: LinearLayout? = null
+
+    private val ticker = object : Runnable {
         override fun run() {
-            statusView?.text = statusText()
-            main.postDelayed(this, 2_000)
+            refresh()
+            main.postDelayed(this, 3_000)
         }
     }
 
@@ -69,13 +71,13 @@ class MainActivity : Activity() {
     }
 
     private fun start() {
-        Prefs.init(this)
         if (Build.VERSION.SDK_INT >= 33 && checkSelfPermission(Manifest.permission.POST_NOTIFICATIONS) != PackageManager.PERMISSION_GRANTED) {
-            requestPermissions(arrayOf(Manifest.permission.POST_NOTIFICATIONS), 1)
+            requestPermissions(arrayOf(Manifest.permission.POST_NOTIFICATIONS), 1) // only for the "running" notice
         }
+        engine = Slidemill.engine(this)
         content = FrameLayout(this)
         val bar = LinearLayout(this).apply { setBackgroundColor(panel) }
-        tabs = listOf("Dashboard", "TikTok", "Phone").map { name ->
+        tabs = listOf("Slidemill", "TikTok").map { name ->
             Button(this).apply {
                 text = name
                 isAllCaps = false
@@ -91,24 +93,20 @@ class MainActivity : Activity() {
             addView(content, LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, 0, 1f))
             addView(bar, LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT))
         })
-        EngineService.start(this) // the engine's clock: schedules run even with the app closed
-        show(if (intent?.getStringExtra("tab") == "TikTok") "TikTok" else "Dashboard")
+        EngineService.start(this) // keeps the relay and the TikTok tab alive with the app closed
+        show("Slidemill")
     }
 
     override fun onDestroy() {
         TikTokWeb.detach()
-        main.removeCallbacks(statusTicker)
+        main.removeCallbacks(ticker)
         super.onDestroy()
     }
 
     @Deprecated("Deprecated in Java")
     override fun onBackPressed() {
         if (!::tabs.isInitialized) return super.onBackPressed() // on the crash report
-        val web = when (current) {
-            "Dashboard" -> dashboard
-            "TikTok" -> TikTokWeb.get(this)
-            else -> null
-        }
+        val web = if (current == "TikTok") TikTokWeb.get(this) else null
         if (web != null && web.canGoBack()) web.goBack() else super.onBackPressed()
     }
 
@@ -117,187 +115,144 @@ class MainActivity : Activity() {
         tabs.forEach { it.setTextColor(if (it.text == name) accent else muted) }
         TikTokWeb.detach()
         content.removeAllViews()
-        main.removeCallbacks(statusTicker)
-        statusView = null
-        when (name) {
-            "Dashboard" -> content.addView(dashboardView())
-            "TikTok" -> TikTokWeb.attach(this, content)
-            else -> content.addView(phoneView())
-        }
-    }
-
-    // ---- Dashboard ----------------------------------------------------------------------------
-
-    /** Called by the dashboard page (window.SlidemillApp). */
-    inner class AppBridge {
-        @JavascriptInterface
-        fun openTikTok() = main.post { show("TikTok") }
-
-        @JavascriptInterface
-        fun saveBackup() {
-            io.execute {
-                val msg = runCatching {
-                    val bytes = Slidemill.engine(this@MainActivity).backup()
-                    val name = "slidemill-backup-${java.time.LocalDate.now()}.zip"
-                    saveToDownloads(name, "application/zip", bytes)
-                    "Saved $name to Downloads"
-                }.getOrElse { "Backup failed: ${it.message}" }
-                main.post { toast(msg) }
-            }
-        }
-    }
-
-    @SuppressLint("SetJavaScriptEnabled")
-    private fun dashboardView(): View {
-        dashboard?.let { (it.parent as? ViewGroup)?.removeView(it); return it }
-        val web = WebView(this).apply {
-            setBackgroundColor(bg)
-            settings.javaScriptEnabled = true
-            settings.domStorageEnabled = true
-            settings.mediaPlaybackRequiresUserGesture = false
-            addJavascriptInterface(AppBridge(), "SlidemillApp")
-            webViewClient = object : WebViewClient() {
-                // The dashboard stays inside the app; links to TikTok or elsewhere open outside.
-                override fun shouldOverrideUrlLoading(view: WebView, request: WebResourceRequest): Boolean {
-                    if (request.url.host == "127.0.0.1") return false
-                    runCatching { startActivity(Intent(Intent.ACTION_VIEW, request.url)) }
-                    return true
-                }
-            }
-            webChromeClient = object : WebChromeClient() {
-                override fun onShowFileChooser(view: WebView, callback: ValueCallback<Array<Uri>>, params: FileChooserParams): Boolean {
-                    fileCallback?.onReceiveValue(null)
-                    fileCallback = callback
-                    val pick = params.createIntent().apply {
-                        if (params.mode == FileChooserParams.MODE_OPEN_MULTIPLE) putExtra(Intent.EXTRA_ALLOW_MULTIPLE, true)
-                    }
-                    return runCatching { startActivityForResult(pick, 42) }.map { true }.getOrElse {
-                        fileCallback = null
-                        false
-                    }
-                }
-            }
-            setDownloadListener { url, _, _, mime, _ -> saveMedia(url, mime) }
-        }
-        io.execute {
-            val url = runCatching { Slidemill.dashboardUrl(this) }.getOrNull()
-            main.post { if (url != null) web.loadUrl(url) else toast("Slidemill couldn't start its engine") }
-        }
-        dashboard = web
-        return web
-    }
-
-    @Deprecated("Deprecated in Java")
-    override fun onActivityResult(requestCode: Int, resultCode: Int, data: Intent?) {
-        super.onActivityResult(requestCode, resultCode, data)
-        if (requestCode != 42) return
-        val result = if (resultCode != RESULT_OK || data == null) null else {
-            data.clipData?.let { clip -> Array(clip.itemCount) { clip.getItemAt(it).uri } } ?: data.data?.let { arrayOf(it) }
-        }
-        fileCallback?.onReceiveValue(result)
-        fileCallback = null
-    }
-
-    /** "Download" links in the dashboard (slides, MP4) go to the phone's gallery. */
-    private fun saveMedia(url: String, mime: String?) {
-        val path = Uri.parse(url).path.orEmpty()
-        if (!path.startsWith("/media/")) return toast("Can't save that here")
-        io.execute {
-            val msg = runCatching {
-                val e = Slidemill.engine(this)
-                val file = File(e.mediaDir, path.removePrefix("/media/")).canonicalFile
-                require(file.path.startsWith(e.mediaDir.canonicalPath) && file.isFile) { "file not found" }
-                val video = file.name.endsWith(".mp4")
-                val values = ContentValues().apply {
-                    put(MediaStore.MediaColumns.DISPLAY_NAME, "slidemill_${file.parentFile?.name}_${file.name}")
-                    put(MediaStore.MediaColumns.MIME_TYPE, if (video) "video/mp4" else (mime ?: "image/jpeg"))
-                    if (Build.VERSION.SDK_INT >= 29) {
-                        put(MediaStore.MediaColumns.RELATIVE_PATH, (if (video) Environment.DIRECTORY_MOVIES else Environment.DIRECTORY_PICTURES) + "/Slidemill")
-                    }
-                }
-                val collection = if (video) MediaStore.Video.Media.EXTERNAL_CONTENT_URI else MediaStore.Images.Media.EXTERNAL_CONTENT_URI
-                val uri = contentResolver.insert(collection, values) ?: error("gallery refused the file")
-                contentResolver.openOutputStream(uri)!!.use { out -> file.inputStream().use { it.copyTo(out) } }
-                "Saved to your gallery (Slidemill album)"
-            }.getOrElse { "Couldn't save: ${it.message}" }
-            main.post { toast(msg) }
-        }
-    }
-
-    private fun saveToDownloads(name: String, mime: String, bytes: ByteArray) {
-        if (Build.VERSION.SDK_INT >= 29) {
-            val values = ContentValues().apply {
-                put(MediaStore.MediaColumns.DISPLAY_NAME, name)
-                put(MediaStore.MediaColumns.MIME_TYPE, mime)
-                put(MediaStore.MediaColumns.RELATIVE_PATH, Environment.DIRECTORY_DOWNLOADS)
-            }
-            val uri = contentResolver.insert(MediaStore.Downloads.EXTERNAL_CONTENT_URI, values) ?: error("Downloads refused the file")
-            contentResolver.openOutputStream(uri)!!.use { it.write(bytes) }
+        main.removeCallbacks(ticker)
+        if (name == "TikTok") {
+            TikTokWeb.attach(this, content)
         } else {
-            @Suppress("DEPRECATION")
-            val dir = Environment.getExternalStoragePublicDirectory(Environment.DIRECTORY_DOWNLOADS)
-            File(dir, name).writeBytes(bytes)
+            content.addView(home())
+            main.post(ticker)
+            checkTikTok()
         }
     }
 
-    // ---- Phone (poster) -------------------------------------------------------------------------
+    // ---- the Slidemill tab ------------------------------------------------------------------------
 
-    private fun phoneView(): View {
+    private fun home(): View {
         val col = LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL
             setPadding(dp(18), dp(18), dp(18), dp(18))
         }
-        col.addView(label("This phone", 22f, ink, bold = true))
+        col.addView(label("Slidemill", 22f, ink, bold = true))
         col.addView(label(
-            "Slidemill runs entirely on this phone: it writes, renders and schedules your slideshows, and posts them from the TikTok tab's logged-in session.",
+            "Ask Claude for slideshows. Claude writes and scores them; this phone renders them and saves them straight to your TikTok Studio drafts.",
             13f, muted,
         ))
 
-        statusView = label(statusText(), 14f, ink).apply {
-            setBackgroundColor(panel)
-            setPadding(dp(12), dp(12), dp(12), dp(12))
-        }
-        col.addView(statusView, spaced())
-        main.post(statusTicker)
-
-        col.addView(Switch(this).apply {
-            text = "Publish automatically from this phone (drafts are always saved)"
-            setTextColor(ink)
-            isChecked = Prefs.autoPost
-            setOnCheckedChangeListener { _, on ->
-                Prefs.autoPost = on
-                EngineService.checkNow(this@MainActivity)
+        // 1. Claude connector
+        col.addView(heading("1. Connect Claude"))
+        col.addView(label("Your Slidemill relay address (from the relay deploy):", 13f, muted))
+        val relayField = field("slidemill-relay.you.workers.dev").apply { setText(engine.relay.url) }
+        col.addView(relayField, spaced(6))
+        col.addView(button("Save relay address") {
+            val raw = relayField.text.toString()
+            io.execute {
+                val msg = runCatching { engine.relay.configure(raw); "Saved" }.getOrElse { it.message ?: "Invalid address" }
+                main.post { toast(msg); refresh() }
             }
-        }, spaced())
-        col.addView(button("Check the queue now") { EngineService.checkNow(this) }, spaced())
+        }, spaced(6))
+        relayState = label("", 14f, ink).also { col.addView(it, spaced(10)) }
+        claudeUrl = label("", 13f, ink).apply { setTextIsSelectable(true) }.also { col.addView(it, spaced(6)) }
+        col.addView(row(
+            button("Copy Claude link") {
+                val url = engine.relay.status().str("claude_url")
+                if (url.isEmpty()) return@button toast("Save the relay address first")
+                getSystemService(ClipboardManager::class.java).setPrimaryClip(ClipData.newPlainText("Slidemill connector", url))
+                toast("Copied. In Claude: Settings → Connectors → Add custom connector, paste it.")
+            },
+            button("New link", secondary = true) {
+                io.execute { engine.relay.newLink(); main.post { toast("New link made: the old one stops working. Update it in Claude."); refresh() } }
+            },
+        ), spaced(6))
 
-        col.addView(label("Keep it running", 12f, muted, bold = true), spaced(18))
+        // 2. TikTok
+        col.addView(heading("2. Log in to TikTok"))
+        tiktokState = label("Checking…", 14f, ink).also { col.addView(it, spaced(6)) }
+        col.addView(row(
+            button("Open the TikTok tab") { show("TikTok") },
+            button("Check again", secondary = true) { checkTikTok() },
+        ), spaced(6))
+        col.addView(label("Use username/email + password: Google login doesn't work inside apps.", 12f, muted), spaced(6))
+
+        // 3. Backgrounds
+        col.addView(heading("3. Real photos (optional)"))
+        val hasPexels = engine.store.get("pexels_api_key").isNotEmpty()
         col.addView(label(
-            "Schedules only run while Android lets Slidemill work in the background. Set battery use to \"Unrestricted\", keep " +
-                "the notification, and allow exact alarms so posts go out on time. Log in on the TikTok tab once " +
-                "(email/username + password; Google login doesn't work inside apps).",
+            if (hasPexels) "Pexels key saved: backgrounds are real stock photos." else "Without a key, backgrounds are free AI images (slower, watermarked). A free Pexels key (pexels.com/api) gives real photos.",
             13f, muted,
         ))
-        col.addView(button("Open battery settings") {
-            runCatching { startActivity(Intent(Settings.ACTION_IGNORE_BATTERY_OPTIMIZATION_SETTINGS)) }
-        }, spaced())
-        if (Build.VERSION.SDK_INT >= 31 && !getSystemService(AlarmManager::class.java).canScheduleExactAlarms()) {
-            col.addView(button("Allow exact alarms") {
-                runCatching { startActivity(Intent(Settings.ACTION_REQUEST_SCHEDULE_EXACT_ALARM, Uri.parse("package:$packageName"))) }
-            }, spaced())
+        val keyField = field(if (hasPexels) "•••• saved (paste to replace)" else "Pexels API key").apply {
+            inputType = InputType.TYPE_CLASS_TEXT or InputType.TYPE_TEXT_VARIATION_PASSWORD
         }
+        col.addView(keyField, spaced(6))
+        col.addView(button("Save key") {
+            val key = keyField.text.toString().trim()
+            io.execute {
+                engine.store.setMany(mapOf("pexels_api_key" to key))
+                main.post { toast(if (key.isEmpty()) "Key removed" else "Saved"); show("Slidemill") }
+            }
+        }, spaced(6))
+
+        // 4. Keep running
+        col.addView(heading("4. Keep it reachable"))
         col.addView(label(
-            "Posting and saving drafts use TikTok's private web endpoints, which is against TikTok's terms: keep the daily limit " +
-                "low (Dashboard → Settings) and use an account you can afford to lose. Drafts land in TikTok Studio's drafts; you " +
-                "add a sound and post.",
+            "Claude can only reach the phone while Android lets Slidemill run. Set battery use to \"Unrestricted\" (Samsung: also remove it from sleeping apps).",
+            13f, muted,
+        ))
+        col.addView(button("Open battery settings", secondary = true) {
+            runCatching { startActivity(Intent(Settings.ACTION_IGNORE_BATTERY_OPTIMIZATION_SETTINGS)) }
+        }, spaced(6))
+
+        // What Claude made
+        col.addView(heading("Slideshows"))
+        showsList = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL }.also { col.addView(it, spaced(6)) }
+
+        col.addView(label(
+            "Saving drafts uses TikTok's private web endpoints, which is against TikTok's terms. Use an account you can afford to lose.",
             12f, muted,
-        ), spaced(18))
+        ), spaced(24))
         return ScrollView(this).apply { addView(col) }
     }
 
-    private fun statusText(): String {
-        val who = EngineService.username.takeIf { it.isNotEmpty() }?.let { "TikTok: @$it\n" } ?: "TikTok: not logged in yet\n"
-        return who + if (EngineService.running) EngineService.status else "Starting…"
+    private fun refresh() {
+        val s = engine.relay.status()
+        relayState?.text = when (s.str("state")) {
+            "off" -> "Not connected: enter your relay address."
+            "connected" -> "✓ Connected: Claude can reach this phone."
+            "connecting" -> "Connecting…"
+            else -> "Offline: ${s.str("detail")} (retrying)"
+        }
+        relayState?.setTextColor(if (s.str("state") == "connected") good else ink)
+        claudeUrl?.text = s.str("claude_url").ifEmpty { "" }.let { if (it.isEmpty()) "" else "Claude link: $it" }
+        val list = showsList ?: return
+        val rows = engine.db.tx { all("slideshows").sortedByDescending { it.long("created_at") }.take(15).map { it.copyObj() } }
+        list.removeAllViews()
+        if (rows.isEmpty()) list.addView(label("Nothing yet. Ask Claude: \"make me a slideshow about … and save it to my TikTok drafts\".", 13f, muted))
+        for (r in rows) {
+            val d = r.objOrNull("draft")
+            val draft = when (d?.str("status")) {
+                null -> if (r.str("status") == "completed") "not saved to TikTok" else r.str("status").let { if (it == "failed") "failed: ${r.str("error")}" else "$it…" }
+                "saved" -> "✓ in TikTok drafts"
+                "saving" -> "saving to TikTok…"
+                else -> "✗ not saved: ${d.str("error")}"
+            }
+            list.addView(LinearLayout(this).apply {
+                orientation = LinearLayout.VERTICAL
+                setBackgroundColor(panel)
+                setPadding(dp(12), dp(10), dp(12), dp(10))
+                addView(label(r.str("title").ifEmpty { "Untitled" }, 14f, ink, bold = true))
+                addView(label(draft, 13f, if (d?.str("status") == "saved") good else muted))
+            }, spaced(6))
+        }
+    }
+
+    private fun checkTikTok() {
+        tiktokState?.text = "Checking…"
+        io.execute {
+            val text = runCatching {
+                engine.tiktok!!.username().let { if (it.isEmpty()) "✗ Not logged in: open the TikTok tab and log in." else "✓ Logged in as @$it" }
+            }.getOrElse { "✗ ${it.message}" }
+            main.post { tiktokState?.text = text; tiktokState?.setTextColor(if (text.startsWith("✓")) good else ink) }
+        }
     }
 
     // ---- small view helpers -------------------------------------------------------------------
@@ -314,12 +269,31 @@ class MainActivity : Activity() {
         if (bold) typeface = Typeface.DEFAULT_BOLD
     }
 
-    private fun button(s: String, onClick: () -> Unit) = Button(this).apply {
+    private fun heading(s: String) = label(s, 15f, ink, bold = true).apply {
+        layoutParams = spaced(22)
+    }
+
+    private fun field(hint: String) = EditText(this).apply {
+        this.hint = hint
+        setHintTextColor(muted)
+        setTextColor(ink)
+        setBackgroundColor(panel)
+        setPadding(dp(12), dp(10), dp(12), dp(10))
+        isSingleLine = true
+    }
+
+    private fun button(s: String, secondary: Boolean = false, onClick: () -> Unit) = Button(this).apply {
         text = s
         isAllCaps = false
         setTextColor(Color.WHITE)
-        setBackgroundColor(accent)
+        setBackgroundColor(if (secondary) panel else accent)
         setOnClickListener { onClick() }
+    }
+
+    private fun row(vararg views: View) = LinearLayout(this).apply {
+        views.forEachIndexed { i, v ->
+            addView(v, LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f).apply { if (i > 0) leftMargin = dp(8) })
+        }
     }
 
     private fun toast(s: String) = Toast.makeText(this, s, Toast.LENGTH_LONG).show()

@@ -1,21 +1,12 @@
 package com.slidemill.core
 
-import java.time.ZoneId
-import java.time.ZonedDateTime
-import kotlin.test.AfterTest
 import kotlin.test.Test
 import kotlin.test.assertEquals
 import kotlin.test.assertFailsWith
-import kotlin.test.assertFalse
-import kotlin.test.assertNull
 import kotlin.test.assertTrue
 
-/** Engine pieces without the HTTP server: AI layer, schedules, timing, queue, library parsing. */
+/** Engine pieces: JSON, settings, timing, library parsing, models. */
 class CoreTest {
-    private val ai = FakeAi()
-
-    @AfterTest fun tearDown() = ai.stop()
-
     @Test fun json_round_trip() {
         val v = Json.parse("""{"a":[1,2.5,"x\né",true,null],"b":{"c":-3e2}}""") as Obj
         assertEquals(1L, v.list("a")[0])
@@ -24,77 +15,14 @@ class CoreTest {
         assertTrue("\\u003c" in Json.write("</script>"))
     }
 
-    @Test fun provider_detection() {
-        assertEquals("anthropic", Llm.detectProvider("sk-ant-api03-x"))
-        assertEquals("openrouter", Llm.detectProvider("sk-or-v1-x"))
-        assertEquals("groq", Llm.detectProvider("gsk_abc"))
-        assertEquals("gemini", Llm.detectProvider("AIzaSy"))
-        assertEquals("xai", Llm.detectProvider("xai-1"))
-        assertEquals("openai", Llm.detectProvider("sk-proj-1"))
-        assertEquals("together", Llm.detectProvider("a".repeat(64)))
-        assertNull(Llm.detectProvider("hello"))
-    }
-
-    @Test fun openai_compatible_json_with_repair_retry() {
-        val e = TestKit.engine(ai)
-        ai.badFirst = 1
-        val plan = e.generator.generatePlan("my topic")
-        assertEquals("Plan: my topic", plan.str("title"))
-        assertEquals(89, plan.str("caption").length)
-        assertEquals(2, ai.requests.size) // first answer failed validation, second fixed it
-        val retry = ai.requests[1].second.objs("messages")
-        assertTrue(retry.last().str("content").startsWith("That JSON did not match the schema"))
-        assertTrue("response_format" in ai.requests[0].second)
-    }
-
-    @Test fun anthropic_structured_outputs_and_fallbacks() {
-        val e = TestKit.engine()
-        e.store.setMany(mapOf("llm_api_key" to "sk-ant-test", "llm_base_url" to ai.url))
-        assertEquals("anthropic", e.llm.resolve()!!.provider)
-        assertEquals("claude-opus-5-5", e.llm.resolve()!!.model)
-        val campaign = e.generator.planCampaign("sleep tips", 4)
-        assertEquals(4, campaign.strings("hooks").size)
-        val (path, body) = ai.requests.single()
-        assertEquals("/v1/messages", path)
-        assertEquals("json_schema", body.objAt("output_config").objAt("format").str("type"))
-        assertEquals("medium", body.objAt("output_config").str("effort"))
-        assertEquals("default", body.str("fallbacks"))
-        assertEquals("server-side-fallback-2026-07-01", ai.headers.single()["anthropic-beta"])
-        assertEquals("sk-ant-test", ai.headers.single()["x-api-key"])
-        val schema = body.objAt("output_config").objAt("format").objAt("schema")
-        assertEquals(false, schema["additionalProperties"])
-    }
-
     @Test fun settings_mask_and_encrypt() {
         val e = TestKit.engine()
-        e.store.setMany(mapOf("llm_api_key" to "sk-proj-abcdefghijklmnop"))
-        val raw = e.db.tx { get("settings", "llm_api_key")!!.str("value") }
+        e.store.setMany(mapOf("pexels_api_key" to "abcdefghijklmnopqrst"))
+        val raw = e.db.tx { get("settings", "pexels_api_key")!!.str("value") }
         assertTrue(raw.startsWith("b64:"))
-        assertEquals("sk-p…mnop", e.store.publicView().objAt("llm_api_key").str("value"))
+        assertEquals("abcd…qrst", e.store.publicView().objAt("pexels_api_key").str("value"))
+        assertEquals(listOf("pexels"), e.images.providers())
         assertFailsWith<IllegalArgumentException> { e.store.setMany(mapOf("nope" to "1")) }
-    }
-
-    @Test fun similarity_matches_python_difflib() {
-        assertEquals(0.875, Generator.ratio("5 habits that fixed my sleep", "5 habits that quietly fixed my sleep"), 1e-9)
-        assertEquals(0.0, Generator.ratio("abc", "xyz"))
-        assertEquals(0.8679245283018868, Generator.ratio("things i wish i knew before 25", "things i knew before 25"), 1e-9)
-        assertTrue(Generator.tooSimilar("5 habits that quietly fixed my sleep!", listOf(Generator.fingerprint("5 habits that quietly fixed my sleep"))))
-    }
-
-    @Test fun cron_weekdays_use_standard_numbering() {
-        assertEquals(setOf(1, 2, 3, 4, 5), Cron.parseDow("1-5"))
-        assertEquals(setOf(0), Cron.parseDow("7"))
-        assertEquals(setOf(5, 6, 0, 1), Cron.parseDow("fri-mon"))
-        assertNull(Cron.parseDow("*"))
-        assertEquals("15 9 * * 1,2,3,4,5", Cron.shiftEarlier("30 9 * * 1-5", 15))
-        assertEquals("50 23 * * 0,1,2,3,4", Cron.shiftEarlier("5 0 * * 1-5", 15))
-        assertNull(Cron.shiftEarlier("*/5 9 * * *", 15))
-        assertFailsWith<IllegalArgumentException> { Cron.validate("61 9 * * *") }
-        assertFailsWith<IllegalArgumentException> { Cron.validate("9 * *") }
-        val zone = ZoneId.of("Europe/Berlin")
-        // Friday 2026-10-23 20:00 Berlin -> next "0 19 * * 1-5" is Monday 19:00 Berlin.
-        val next = Cron.parse("0 19 * * 1-5").next(ZonedDateTime.of(2026, 10, 23, 20, 0, 0, 0, zone).toInstant(), zone)!!
-        assertEquals(ZonedDateTime.of(2026, 10, 26, 19, 0, 0, 0, zone).toInstant(), next)
     }
 
     @Test fun best_times_match_the_python_engine() {
@@ -145,7 +73,6 @@ class CoreTest {
         assertEquals("outline", spec.objs("slides")[0].objs("text_items")[0].str("text_style"))
         assertFailsWith<ValidationError> { Models.SPEC.of(obj("aspect_ratio" to "3:2")) }
         assertFailsWith<ValidationError> { Models.SPEC.of(obj("slides" to (1..21).map { obj() }.toMutableList<Any?>())) }
-        assertFailsWith<ValidationError> { Models.STUDIO.of(obj("brief" to "x", "count" to 11)) }
     }
 
     companion object {

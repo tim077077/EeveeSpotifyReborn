@@ -6,7 +6,7 @@ import java.util.Base64
 import kotlin.random.Random
 
 /** AI backgrounds over whichever image key is available (port of app/imagegen.py). */
-class ImageGen(private val store: Store, private val llm: Llm) {
+class ImageGen(private val store: Store) {
     data class Config(val provider: String, val apiKey: String, val model: String)
 
     companion object {
@@ -37,24 +37,19 @@ class ImageGen(private val store: Store, private val llm: Llm) {
 
     fun resolve(): Config {
         var provider = store.get("image_provider")
-        var key = store.get("image_api_key")
-        if (provider.isEmpty() || provider == "auto") {
-            val cfg = llm.resolve()
-            if (key.isNotEmpty()) {
-                provider = Llm.detectProvider(key) ?: "pollinations"
-                if (provider !in IMAGE_PROVIDERS) provider = "pollinations"
-            } else if (cfg != null && cfg.provider in IMAGE_PROVIDERS) {
-                provider = cfg.provider
-                key = cfg.apiKey
-            } else provider = "pollinations"
-        }
+        val key = store.get("image_api_key")
+        if (provider.isEmpty() || provider == "auto") provider = if (key.isEmpty()) "pollinations" else detect(key)
         if (provider !in IMAGE_PROVIDERS) throw ImageGenError("Unknown image provider '$provider'")
-        if (provider != "pollinations" && key.isEmpty()) {
-            val llmCfg = llm.resolve()
-            if (llmCfg != null && llmCfg.provider == provider) key = llmCfg.apiKey
-            else throw ImageGenError("No API key for image provider $provider.")
-        }
+        if (provider != "pollinations" && key.isEmpty()) throw ImageGenError("No API key for image provider $provider.")
         return Config(provider, key, store.get("image_model").ifEmpty { IMAGE_PROVIDERS.getValue(provider) })
+    }
+
+    /** Which provider an image key belongs to, from its shape. */
+    private fun detect(key: String): String = when {
+        key.startsWith("sk-") -> "openai"
+        key.startsWith("AIza") -> "gemini"
+        key.startsWith("tgp_") || key.length == 64 -> "together"
+        else -> "pollinations"
     }
 
     fun describe(): String {
@@ -157,7 +152,7 @@ class ImageGen(private val store: Store, private val llm: Llm) {
 
 class ImageGenError(message: String) : RuntimeException(message)
 
-/** Stock-photo search, collections and least-used picking (port of app/images.py). */
+/** Stock-photo search (Pexels / Unsplash) and the downloaded-image cache. */
 class Images(private val db: Db, private val store: Store, private val platform: Platform, private val mediaDir: File) {
     data class StockPhoto(val url: String, val thumb: String, val width: Int, val height: Int, val source: String, val credit: String = "") {
         fun toObj(): Obj = obj("url" to url, "thumb" to thumb, "width" to width, "height" to height, "source" to source, "credit" to credit)
@@ -170,7 +165,7 @@ class Images(private val db: Db, private val store: Store, private val platform:
 
     fun search(query: String, count: Int = 12, orientation: String = "portrait", page: Int = 1): List<StockPhoto> {
         val available = providers()
-        if (available.isEmpty()) throw ImageSearchError("No image provider configured. Add a Pexels or Unsplash key in Settings.")
+        if (available.isEmpty()) throw ImageSearchError("No image provider configured. Add a Pexels key in the Slidemill app.")
         return if (available[0] == "pexels") pexels(query, count, orientation, page) else unsplash(query, count, orientation, page)
     }
 
@@ -208,27 +203,16 @@ class Images(private val db: Db, private val store: Store, private val platform:
         return Triple("$folder/$name", img.width, img.height)
     }
 
-    fun downloadInto(photo: StockPhoto, collectionId: String?, query: String = ""): Obj {
+    fun downloadInto(photo: StockPhoto, query: String = ""): Obj {
         val resp = Net.get(photo.url, timeoutSec = 30)
         if (resp.status >= 400) throw ImageSearchError("download failed (${resp.status})")
-        val (rel, w, h) = storeBytes(resp.body, "library/${collectionId ?: "auto"}")
+        val (rel, w, h) = storeBytes(resp.body, "library/auto")
         return db.tx {
             insert("images", obj(
-                "collection_id" to collectionId, "path" to rel, "source" to photo.source, "source_url" to photo.url,
+                "path" to rel, "source" to photo.source, "source_url" to photo.url,
                 "query" to query, "width" to w, "height" to h, "use_count" to 0,
             ))
         }.copyObj()
-    }
-
-    /** Least-used image first so a collection is exhausted before anything repeats. */
-    fun pickFromCollection(collectionId: String, exclude: Set<String>): Obj? = db.tx {
-        val rows = where("images") { it.str("collection_id") == collectionId }
-        val candidates = rows.filter { it.str("id") !in exclude }.ifEmpty { rows }
-        if (candidates.isEmpty()) return@tx null
-        val low = candidates.minOf { it.long("use_count") }
-        val choice = candidates.filter { it.long("use_count") == low }.random()
-        choice["use_count"] = choice.long("use_count") + 1
-        choice.copyObj()
     }
 
     /** Search stock photos for a slide and cache the pick in the 'auto' pool. */
@@ -246,7 +230,7 @@ class Images(private val db: Db, private val store: Store, private val platform:
             }?.copyObj()
         }
         if (existing != null) return existing
-        val image = try { downloadInto(photo, null, query) } catch (e: Exception) { return null }
+        val image = try { downloadInto(photo, query) } catch (e: Exception) { return null }
         db.tx { get("images", image.str("id"))?.set("use_count", 1L) }
         return image
     }

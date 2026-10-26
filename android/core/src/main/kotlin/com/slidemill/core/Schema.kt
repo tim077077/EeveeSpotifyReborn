@@ -89,7 +89,6 @@ object Shapes {
     val ASPECT_RATIOS = listOf("4:5", "9:16", "1:1", "16:9")
     val IMAGE_LAYOUTS = listOf("single", "1:2", "1:3", "2:1", "2:2")
     val ROLES = listOf("hook", "body", "cta")
-    val PRIVACY = listOf("PUBLIC_TO_EVERYONE", "MUTUAL_FOLLOW_FRIENDS", "FOLLOWER_OF_CREATOR", "SELF_ONLY")
 
     val PLAN_TEXT_ITEM = Schema.obj(
         "PlanTextItem",
@@ -120,27 +119,4 @@ object Shapes {
         "slides" to Schema.Array(PLAN_SLIDE),
     )
 
-    val CAMPAIGN_PLAN = Schema.obj(
-        "CampaignPlan",
-        "name" to Schema.Str(),
-        "format_summary" to Schema.Str(),
-        "style" to Schema.Str(),
-        "visual_style" to Schema.Str(),
-        "aspect_ratio" to Schema.Str(enum = ASPECT_RATIOS),
-        "hooks" to Schema.Array(Schema.Str()),
-        "language" to Schema.Str(),
-    )
-
-    val SLIDE_TEXT_READ = Schema.obj(
-        "SlideTextRead",
-        "slides" to Schema.Array(Schema.Str(), "The visible overlay text of each image, in order. Empty string if none."),
-    )
-
-    val PROFILE_CLASSIFICATION = Schema.obj(
-        "ProfileClassification",
-        "niche" to Schema.Str("One or two lowercase words, e.g. fitness, skincare, personal finance, studying, relationships."),
-        "product_medium" to Schema.Str(enum = listOf("app", "physical product", "digital product", "service", "creator", "none")),
-    )
-
-    val PING = Schema.obj("Ping", "ok" to Schema.Bool())
 }

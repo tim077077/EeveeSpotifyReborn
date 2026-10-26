@@ -578,7 +578,7 @@
         const run = job.action === "draft" ? saveDraft : post;
         log(`Slidemill job ${job.id}: ${job.action || "publish"} "${job.title}" (${(job.images || []).length} slides)`);
         const res = await run({ title: job.title, caption: job.caption, images: job.images, sound: job.sound });
-        result = { ok: true, itemId: (res && res.itemId) || "", username: currentUsername() };
+        result = { ok: true, itemId: (res && res.itemId) || "", draftId: (res && res.draftId) || "", username: currentUsername() };
       } catch (e) {
         result = { ok: false, error: String((e && e.message) || e), unsupported: !!(e && e.unsupported), username: currentUsername() };
       } finally {

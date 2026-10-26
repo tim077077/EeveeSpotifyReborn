@@ -59,7 +59,7 @@ try {
 
   // Changes asked for while offline wait in the relay; reads don't.
   const call = (name, args = {}) => rpc(url, "tools/call", { name, arguments: args }).then((x) => x.json());
-  r = await call("create_slideshow", { plan: { title: "a" }, post: "draft" });
+  r = await call("create_slideshow", { plan: { title: "a" }, save_draft: true });
   assert.equal(r.result.isError, false);
   assert.match(r.result.content[0].text, /saved and runs as soon as the phone is back online \(1 waiting\)/);
   r = await call("delete_slideshow", { slideshow_id: "x" });

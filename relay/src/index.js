@@ -14,7 +14,7 @@ const TIMEOUT_MS = 290_000; // rendering with AI backgrounds can take a few minu
 const MAX_BODY = 1_000_000;
 const ORIGINS = ["https://claude.ai", "https://claude.com"];
 // Tools that change things: while the phone is offline these wait here and run when it's back.
-const QUEUEABLE = ["create_slideshow", "queue_post", "delete_slideshow"];
+const QUEUEABLE = ["create_slideshow", "save_draft", "delete_slideshow"];
 const MAX_QUEUE = 20;
 
 const json = (status, body, headers = {}) =>
@@ -152,7 +152,7 @@ export class Relay extends DurableObject {
       await this.ctx.storage.put("queue", queue);
       const text = `Slidemill's phone is offline, so this is saved and runs as soon as the phone is back online ` +
         `(${queue.length} waiting). You can't see the result yet: check list_slideshows once the phone is online. ` +
-        `A slideshow made later can't be referred to by id now; to post one, pass post to create_slideshow instead.`;
+        `A slideshow made later can't be referred to by id now; to save one to TikTok drafts, pass save_draft: true to create_slideshow.`;
       return json(200, { jsonrpc: "2.0", id: msg.id, result: { content: [{ type: "text", text }], isError: false } });
     }
     switch (msg.method) {
