@@ -306,6 +306,26 @@ class McpTest {
         assertTrue("Not logged in" in text(call("my_posts")))
     }
 
+    @Test fun my_posts_checks_the_score_against_real_views() {
+        // Too few: no verdict about the score.
+        assertTrue("Not enough yet" in Virality.predictionCheck(listOf(80.0 to 1000.0)).str("verdict"))
+        val tracks = (1..10).map { it * 10.0 to it * 1000.0 }
+        assertTrue("tracks real views well" in Virality.predictionCheck(tracks).str("verdict"))
+        assertTrue("FEWER views" in Virality.predictionCheck(tracks.map { it.first to -it.second }).str("verdict"))
+
+        // A post made with the POST button is matched to its slideshow and score.
+        val id = idOf(create())
+        e.db.tx { get("slideshows", id)!!["prediction"] = obj("viral_potential" to 72L) }
+        val item = e.studio.publish(id, tiktok).str("item_id")
+        platform.profilePosts["tim"] = listOf(CoreTest.WEB_ITEM.copyObj().also {
+            it["author"] = obj("uniqueId" to "tim"); it["id"] = item; it["createTime"] = Db.nowMs() / 1000 - 3 * 86400
+        })
+        val mine = Json.parseObj(text(call("my_posts")))
+        assertEquals(id, mine.objs("posts")[0].objAt("slidemill").str("slideshow_id"))
+        assertEquals(72L, mine.objs("posts")[0].objAt("slidemill").long("predicted_score"))
+        assertEquals(1L, mine.objAt("prediction_check").long("posts_checked"))
+    }
+
     @Test fun claude_scores_a_slideshow_itself() {
         java.io.File(e.mediaDir, "library").mkdirs()
         java.io.File(e.mediaDir, "library/c.jpg").writeBytes(TestKit.jpeg(40, 50))

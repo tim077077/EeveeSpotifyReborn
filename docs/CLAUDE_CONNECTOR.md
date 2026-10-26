@@ -58,7 +58,7 @@ On the phone:
 | `list_slideshows` | Recent slideshows with their draft status and scores |
 | `delete_slideshow` | Remove a weaker version (doesn't touch TikTok drafts) |
 | `predict_virality` | Score a slideshow with Claude as the reader. The first call returns the scoring rules, the slides and real library posts to rank it against blind; Claude sends its read back and Slidemill turns it into the score, attention curve and rank |
-| `my_posts` | Views, likes, comments, shares and saves of the logged-in account's recent posts |
+| `my_posts` | Views, likes, comments, shares and saves of the logged-in account's recent posts. Posts made with Slidemill show their predicted score, and `prediction_check` says whether the score has tracked this account's real views (8+ scored posts, 2+ days old) |
 | `best_times` | When to post for an audience in a country |
 | `phone_status` | Whether the phone is logged in to TikTok, where backgrounds come from, the library size |
 

@@ -183,7 +183,9 @@ How to work with it:
         ) { a -> predict(id(a), a.objOrNull("read")) },
 
         "my_posts" to Tool(
-            "The user's own recent TikTok posts (the account logged in on the phone) with views, likes, comments, shares and saves.",
+            "The user's own recent TikTok posts (the account logged in on the phone) with views, likes, comments, shares and saves. " +
+                "Posts made with Slidemill show their slideshow and predicted score, and prediction_check says whether " +
+                "predict_virality's score has actually tracked this account's views (needs 8+ scored posts, 2+ days old).",
             input(listOf(), "limit" to int("How many.", 20, 1, 60)),
         ) { a -> myPosts(a.int("limit", 20)) },
 
@@ -478,14 +480,28 @@ How to work with it:
         val posts = within { e.platform.listProfilePosts(user, limit.coerceIn(1, 60)).map { Library.normalizeWebItem(it) } }
             ?: throw ToolError("TikTok took too long to list @$user's posts; try again.")
         if (posts.isEmpty()) return "No posts found for @$user (or TikTok didn't list them)."
-        return Json.write(obj("username" to user, "posts" to posts.map { p ->
+        // Posts made with Slidemill's POST button carry their slideshow's predicted score: compare it with reality.
+        val made = e.db.tx {
+            all("slideshows").filter { it.objOrNull("post")?.str("item_id").orEmpty().isNotEmpty() }
+                .associate { s -> s.objAt("post").str("item_id") to s.copyObj() }
+        }
+        val nowS = Db.nowMs() / 1000
+        val pairs = posts.mapNotNull { p ->
+            val score = (made[p.str("id")]?.objOrNull("prediction")?.get("viral_potential") as? Number)?.toDouble()
+            if (score == null || p.long("posted_at") <= 0 || nowS - p.long("posted_at") < Virality.CHECK_AGE_S) null else score to p.long("views").toDouble()
+        }
+        return Json.write(obj("username" to user, "prediction_check" to Virality.predictionCheck(pairs), "posts" to posts.map { p ->
             obj(
                 "url" to "https://www.tiktok.com/@$user/${if (p.bool("is_slideshow")) "photo" else "video"}/${p.str("id")}",
                 "description" to p.str("description").take(200), "slideshow" to p.bool("is_slideshow"),
                 "views" to p.long("views"), "likes" to p.long("likes"), "comments" to p.long("comments"),
                 "shares" to p.long("shares"), "saves" to p.long("saves"),
                 "posted_at" to Db.iso(p.long("posted_at") * 1000),
-            )
+            ).also { o ->
+                made[p.str("id")]?.let { s ->
+                    o["slidemill"] = obj("slideshow_id" to s.str("id"), "predicted_score" to s.objOrNull("prediction")?.get("viral_potential"))
+                }
+            }
         }.toMutableList<Any?>()))
     }
 
