@@ -36,6 +36,7 @@ class Engine(val platform: Platform, val dataDir: File, val token: String) {
     val library = Library(db, store, llm, images, platform, mediaDir, pipeline)
     val scheduler = Scheduler(db, platform, pipeline) { periodic(it) }
     val virality = Virality(db, llm, mediaDir).also { pipeline.virality = it }
+    val relay = Relay(this)
 
     @Volatile var poster: PosterHooks? = null
     private var api: Api? = null
@@ -64,12 +65,14 @@ class Engine(val platform: Platform, val dataDir: File, val token: String) {
         val server = Api(this, token, port)
         server.start(30_000, false)
         api = server
+        relay.start() // Claude's way in, if the user set up a relay
         return server.listeningPort
     }
 
     val port: Int get() = api?.listeningPort ?: -1
 
     fun stop() {
+        relay.stop()
         api?.stop()
         api = null
         pipeline.shutdown()

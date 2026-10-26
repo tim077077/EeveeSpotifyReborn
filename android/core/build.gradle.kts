@@ -17,6 +17,7 @@ kotlin {
 
 dependencies {
     api("org.nanohttpd:nanohttpd:2.3.1")
+    implementation("com.squareup.okhttp3:okhttp:4.12.0") // the relay's WebSocket (Claude connector)
     testImplementation("org.jetbrains.kotlin:kotlin-test-junit:2.0.21")
 }
 

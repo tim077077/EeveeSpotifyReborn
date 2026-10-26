@@ -1090,7 +1090,8 @@ views.libprofile = async (id) => {
 };
 
 views.settings = async () => {
-  const [data, ext, mcp] = await Promise.all([api("/settings"), api("/extension/status"), PHONE ? null : api("/mcp").catch(() => null)]);
+  const [data, ext, mcp, relay] = await Promise.all([api("/settings"), api("/extension/status"), PHONE ? null : api("/mcp").catch(() => null),
+    PHONE ? api("/relay").catch(() => null) : null]);
   const seen = ext.extension?.at ? new Date(ext.extension.at) : null;
   const online = seen && Date.now() - seen.getTime() < 3 * 60 * 1000;
   const v = data.values;
@@ -1104,6 +1105,7 @@ views.settings = async () => {
       `<button id="test">Test AI and images</button><button class="primary" id="save">Save</button>`)}
     ${PHONE ? phoneCard(ext, field, setRow) : ""}
     ${mcp ? claudeCard(mcp.url, setRow) : ""}
+    ${relay ? relayCard(relay, setRow) : ""}
     ${setRow("Browser poster", "Posts your queue from a logged-in tiktok.com tab with the Slidemill extension. No TikTok developer app needed.", `
       <p class="small" style="display:flex;flex-wrap:wrap;gap:8px;align-items:center">
         <span class="pill ${online ? "ok" : "bad"}">${online ? "Extension online" : "Extension offline"}</span>
@@ -1141,6 +1143,7 @@ views.settings = async () => {
       ${field("apify_token", "Apify token (library discovery)", "password")}`)}
     <div id="test-out"></div>`;
   if (PHONE) wirePhoneCard();
+  if (relay) wireRelayCard();
   $("#ext-download").onclick = (e) =>
     busy(e.currentTarget, async () => {
       const res = await fetch("/api/v1/extension/download", { headers: storedKey() ? { Authorization: `Bearer ${storedKey()}` } : {} });
@@ -1195,6 +1198,49 @@ function claudeCard(url, setRow) {
       Then ask something like “make 3 slideshows like my best library posts and score them”.</p>
     <p class="small faint" style="margin:6px 0 0">Treat this URL like a password: whoever has it can make and queue posts. Changing <code>SLIDEMILL_API_KEY</code> changes it.</p>
     ${reachable ? "" : `<p class="small muted" style="margin:6px 0 0">Claude can only reach a public https address. This server is at ${esc(new URL(url).origin)}, so deploy it first (deploy/install.sh).</p>`}`);
+}
+
+// Claude on the phone: the engine dials out to the user's free relay, which gives Claude a fixed https URL.
+const RELAY_STATE = { connected: ["ok", "Connected"], connecting: ["live", "Connecting…"], offline: ["bad", "Offline"], off: ["bad", "Not set up"] };
+
+function relayCard(r, setRow) {
+  const [cls, label] = RELAY_STATE[r.state] || RELAY_STATE.offline;
+  return setRow("Connect Claude", "Claude writes the slideshows in conversation; this phone renders, scores and queues them. Works in every Claude app while Slidemill runs on this phone.", `
+    <p class="small" style="display:flex;flex-wrap:wrap;gap:8px;align-items:center;margin-top:0">
+      <span class="pill ${cls}">${label}</span><span class="muted">${esc(r.detail || (r.handled ? `${r.handled} request(s) from Claude since the app started` : ""))}</span></p>
+    <label for="relay-url" style="margin-top:0">Relay address</label>
+    <div class="row"><input id="relay-url" class="grow" value="${esc(r.url)}" placeholder="slidemill-relay.yourname.workers.dev" autocapitalize="off" spellcheck="false">
+      <button type="button" id="relay-save">${r.url ? "Update" : "Connect"}</button></div>
+    ${r.claude_url ? `<label for="mcp-url">Connector URL for Claude</label>
+    <div class="row"><input id="mcp-url" class="grow" type="password" value="${esc(r.claude_url)}" readonly>
+      <button type="button" id="mcp-copy">Copy</button></div>
+    <p class="small muted" style="margin:8px 0 0">In Claude, open Settings, then Connectors, add a custom connector and paste this URL.
+      Then ask something like “make 3 slideshows like my best library posts and score them”.</p>
+    <p class="small faint" style="margin:6px 0 0">Treat this URL like a password: whoever has it can make and queue posts.
+      If it leaks, make a new one; the old one stops working.</p>
+    <div class="row" style="margin-top:10px"><button type="button" id="relay-new">New connector URL</button></div>` : ""}
+    <details style="margin-top:12px"><summary>Set up your free relay (once, about 10 minutes)</summary>
+      <ol class="small muted" style="margin:8px 0 0;padding-left:20px;line-height:1.6">
+        <li>Make a free Cloudflare account (email only, no card) and open <b>Workers &amp; Pages</b> once.</li>
+        <li>In Cloudflare, create an API token from the <b>Edit Cloudflare Workers</b> template. Copy it, and your <b>Account ID</b>.</li>
+        <li>In your Slidemill repo on GitHub: Settings, Secrets and variables, Actions. Add <code>CLOUDFLARE_API_TOKEN</code> and <code>CLOUDFLARE_ACCOUNT_ID</code>.</li>
+        <li>Actions tab, <b>Deploy Claude relay</b>, Run workflow. Its summary shows your relay address.</li>
+        <li>Paste that address above and tap Connect.</li>
+      </ol></details>`, 'id="claude-relay"');
+}
+
+function wireRelayCard() {
+  const save = async (url, msg) => {
+    await api("/relay", { method: "PUT", body: { url } });
+    toast(msg);
+    setTimeout(route, 1500); // give it a moment to connect
+  };
+  $("#relay-save").onclick = (e) => busy(e.currentTarget, () => save($("#relay-url").value, $("#relay-url").value.trim() ? "Connecting to your relay…" : "Claude disconnected"));
+  const fresh = $("#relay-new");
+  if (fresh) fresh.onclick = async () => {
+    if (!confirm("Make a new connector URL? Claude stops working until you paste the new one into Claude.")) return;
+    try { await api("/relay/new-link", { method: "POST" }); toast("New URL made. Update it in Claude."); route(); } catch (err) { toast(err.message, true); }
+  };
 }
 
 function phoneCard(ext, field, setRow) {

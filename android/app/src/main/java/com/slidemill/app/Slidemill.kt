@@ -9,6 +9,7 @@ import android.content.ClipboardManager
 import android.content.Context
 import android.content.Intent
 import android.net.Uri
+import android.os.PowerManager
 import android.util.Log
 import com.slidemill.core.Engine
 import com.slidemill.core.Imaging
@@ -34,6 +35,16 @@ class AndroidPlatform(private val context: Context) : Platform {
     override fun notify(notice: Notice) = Notifications.show(context, notice)
 
     override fun listProfilePosts(username: String, max: Int): List<Obj> = LibraryScraper.profilePosts(context, username, max)
+
+    override fun <T> awake(block: () -> T): T {
+        val lock = context.getSystemService(PowerManager::class.java)
+            .newWakeLock(PowerManager.PARTIAL_WAKE_LOCK, "slidemill:claude").apply { acquire(10 * 60_000L) }
+        try {
+            return block()
+        } finally {
+            if (lock.isHeld) lock.release()
+        }
+    }
 
     override fun defaultTimezone(): String = ZoneId.systemDefault().id
 

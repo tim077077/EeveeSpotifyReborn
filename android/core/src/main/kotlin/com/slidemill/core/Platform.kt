@@ -37,6 +37,9 @@ interface Platform {
      */
     fun listProfilePosts(username: String, max: Int): List<Obj> = emptyList()
 
+    /** Keep the device awake while `block` runs (Claude asked for something through the relay). */
+    fun <T> awake(block: () -> T): T = block()
+
     fun defaultTimezone(): String = ZoneId.systemDefault().id
 
     fun log(message: String) = println("slidemill: $message")

@@ -724,6 +724,16 @@ class Api(private val e: Engine, private val token: String, port: Int) : NanoHTT
             obj("deleted" to true)
         }
 
+        // --- Claude connector (through the user's relay) ---
+        route("GET", "/relay") { _ -> e.relay.status() }
+
+        route("PUT", "/relay") { r ->
+            val body = r.body() as? Map<*, *> ?: throw invalid("body: expected an object")
+            e.relay.configure(body["url"]?.toString().orEmpty())
+        }
+
+        route("POST", "/relay/new-link") { _ -> e.relay.newLink() }
+
         // --- posting times ---
         route("GET", "/timing/countries") { _ -> obj("countries" to Timing.countryList().toMutableList<Any?>()) }
 
