@@ -26,8 +26,9 @@ import java.util.concurrent.Executors
 
 /**
  * Keeps Slidemill working while the app is closed: runs the engine's clock (scheduled slideshows,
- * "ready to post" notifications, analytics) and, with auto-posting on, posts the queue from the
- * TikTok tab's logged-in session, one post at a time within the daily cap and gap.
+ * "ready to post" notifications, analytics) and works the queue from the TikTok tab's logged-in
+ * session, one post at a time within the daily cap and gap: drafts always, public posts only with
+ * auto-posting on.
  */
 class EngineService : Service() {
     companion object {
@@ -150,11 +151,6 @@ class EngineService : Service() {
     private fun poll(force: Boolean = false) {
         lastPoll = System.currentTimeMillis()
         if (busy) return
-        if (!Prefs.autoPost) {
-            // Still learn who is logged in, for the dashboard.
-            if (TikTokWeb.pageReady) TikTokWeb.ask("hello", JSONObject(), 8_000) { h -> h?.optString("username")?.let { username = it } }
-            return setStatus("Running · auto-posting is off")
-        }
         busy = true
         io.execute { flushSavedResults() }
         if (!TikTokWeb.pageReady) {
@@ -180,9 +176,11 @@ class EngineService : Service() {
             val res = engine.queue.claimNext(
                 // The tab saves drafts to TikTok Studio itself (drafts only go to the TikTok app while it can't).
                 client = mapOf("version" to "android-3", "username" to user, "draft" to "1"),
+                draftsOnly = !Prefs.autoPost, // drafts aren't public, so they don't wait for auto-posting
             )
             @Suppress("UNCHECKED_CAST")
-            val job = res["job"] as? Obj ?: return finish("@$user · ${res.str("reason")}")
+            val job = res["job"] as? Obj
+                ?: return finish("@$user · ${res.str("reason")}${if (Prefs.autoPost) "" else " · auto-posting off (drafts only)"}")
             val postId = job.str("id")
             val title = job.str("title")
             setStatus("Posting: $title")
@@ -280,7 +278,7 @@ class AppHooks(private val context: Context) : PosterHooks {
     )
 
     override fun kick() {
-        if (Prefs.autoPost) runCatching { EngineService.checkNow(context) }
+        runCatching { EngineService.checkNow(context) } // drafts go out even with auto-posting off
     }
 
     override fun share(postId: String, slides: List<File>, caption: String) = Slidemill.shareToTikTok(context, postId, slides, caption)

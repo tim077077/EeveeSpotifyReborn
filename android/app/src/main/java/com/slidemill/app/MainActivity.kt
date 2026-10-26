@@ -261,7 +261,7 @@ class MainActivity : Activity() {
         main.post(statusTicker)
 
         col.addView(Switch(this).apply {
-            text = "Post automatically from this phone"
+            text = "Publish automatically from this phone (drafts are always saved)"
             setTextColor(ink)
             isChecked = Prefs.autoPost
             setOnCheckedChangeListener { _, on ->

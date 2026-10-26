@@ -106,9 +106,16 @@ class PostQueue(private val db: Db, private val store: Store) {
     /**
      * The next post to make, or why there's nothing to do yet. `client` is what the poster reports:
      * version, the logged-in username, and whether it can save drafts ("draft": "1"). `mediaBase`
-     * prefixes slide links ("" gives /media/... paths for in-app use).
+     * prefixes slide links ("" gives /media/... paths for in-app use). `draftsOnly`: hand out drafts
+     * but nothing public (the phone with auto-posting off).
      */
-    fun claimNext(now: Instant = Db.clock(), client: Map<String, String> = emptyMap(), mediaBase: String = "", skipDrafts: Boolean = false): Obj {
+    fun claimNext(
+        now: Instant = Db.clock(),
+        client: Map<String, String> = emptyMap(),
+        mediaBase: String = "",
+        skipDrafts: Boolean = false,
+        draftsOnly: Boolean = false,
+    ): Obj {
         val c = client.filterValues { it.isNotEmpty() }.mapValues { it.value.take(128) }
         lastSeen.clear()
         lastSeen["at"] = Db.iso(now)
@@ -131,7 +138,9 @@ class PostQueue(private val db: Db, private val store: Store) {
                 return@tx obj("job" to null, "reason" to "waiting ${waitMs / 60_000 + 1} min between posts")
             }
 
-            val candidates = where("posts") { isBrowser(it) && it.str("status") == "queued" && !(skipDrafts && action(it) == "draft") }
+            val candidates = where("posts") {
+                isBrowser(it) && it.str("status") == "queued" && !(skipDrafts && action(it) == "draft") && !(draftsOnly && action(it) != "draft")
+            }
                 .sortedBy { it.long("created_at") }
             val dueOnes = candidates.filter { due(it, now) }
             val post = dueOnes.firstOrNull { canDraft || action(it) != "draft" }

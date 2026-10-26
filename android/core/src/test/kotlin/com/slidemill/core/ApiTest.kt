@@ -180,6 +180,18 @@ class ApiTest {
         assertEquals(later, platform.notices.single { it.kind == "share" }.postId)
     }
 
+    @Test fun with_auto_posting_off_only_drafts_are_handed_out() {
+        e.store.setMany(mapOf("browser_min_gap_minutes" to "0"))
+        val public = queue()
+        val draft = queue(action = "draft")
+        val canDraft = mapOf("username" to "tim", "draft" to "1")
+        val job = e.queue.claimNext(T0, client = canDraft, draftsOnly = true).objAt("job")
+        assertEquals(draft, job.str("id"))
+        e.queue.recordResult(draft, true, username = "tim")
+        assertEquals("queue empty", e.queue.claimNext(T0, client = canDraft, draftsOnly = true).str("reason"))
+        assertEquals("queued", e.db.tx { get("posts", public)!!.str("status") }) // waits for auto-posting
+    }
+
     @Test fun failures_retry_then_give_up_and_stale_claims_release() {
         e.store.setMany(mapOf("browser_min_gap_minutes" to "0"))
         val pid = queue()
