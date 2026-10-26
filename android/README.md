@@ -1,13 +1,22 @@
 # Slidemill for Android
 
-The phone app is built for one way of working: **you talk to Claude, and Claude does the job**. Claude researches your niche, writes the slideshows, looks at the rendered slides, scores them, and saves the ones you want straight to your TikTok Studio drafts. The phone renders the slides and saves the drafts. There is no AI key, no schedule, no queue and no notification to tap.
+The phone app is built for one way of working: **you talk to Claude, and Claude does the job**. Claude researches your niche, writes the slideshows, looks at the rendered slides and scores them. The phone renders the slides and keeps them as drafts in the app; you preview one and tap **POST** to publish it live. There is no AI key, no schedule, no queue and no notification to tap.
 
 The app has two tabs:
 
-- **Slidemill**: connect Claude (relay address, connector link), check you're logged in to TikTok, add an optional Pexels key for real photos, and see each slideshow Claude made and whether it reached your TikTok drafts.
+- **Slidemill**: connect Claude (relay address, connector link), check you're logged in to TikTok, add an optional Pexels key for real photos, and see Claude's slideshows as **Drafts**: tap one to preview it and post it.
 - **TikTok**: tiktok.com in desktop mode. Log in here once.
 
-## How a draft gets saved
+## How you post one
+
+Tap a draft on the Slidemill tab: you see the slides (swipe), the carousel title and the caption. Tap **POST** and the phone's logged-in TikTok page uploads the slides and publishes the photo post; the draft then shows "✓ Live on TikTok" with a link to the post. A second tap can't post it twice.
+
+- **Add a sound** (on by default) attaches TikTok's top suggested sound for those slides from its web library. That library is smaller than the app's, and you don't choose the sound. Untick it to post silent.
+- **Edit in the TikTok app instead** opens the TikTok app's photo editor with the slides and the caption copied, if you want to pick a trending sound yourself.
+
+## Web drafts (optional)
+
+Only if you want a copy in TikTok Studio's web drafts. Those drafts live on tiktok.com/tiktokstudio, **not** in the TikTok app's Drafts (the app's Drafts only holds drafts made on that phone). The **Web drafts** button on the Slidemill tab opens them in the TikTok tab.
 
 1. Claude calls `create_slideshow` (Claude writes, the phone draws the text over backgrounds) or `import_slides` (Claude made the finished images itself and passes them as links), with `save_draft: true`; or `save_draft` later.
 2. The phone renders or downloads the slides, then hands them to its logged-in tiktok.com page (`extension/tiktok-inject.js`). The page uploads them and makes TikTok Studio's own "Save draft" request.
@@ -15,7 +24,7 @@ The app has two tabs:
 
 If the work takes longer than Claude waits (about 45 seconds), Claude gets the slideshow's id; the phone finishes, records the result, and `view_slideshow` shows it. Nothing waits in a queue for a timer.
 
-Drafts are never public. Open TikTok → Profile → Drafts (or TikTok Studio on the web), add a sound and post.
+Web drafts are never public. Open them with **Web drafts** in the app or on tiktok.com/tiktokstudio → Drafts.
 
 ## Install
 

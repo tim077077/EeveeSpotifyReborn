@@ -8,6 +8,16 @@
     <uses-permission android:name="android.permission.WAKE_LOCK" />
     <uses-permission android:name="android.permission.RECEIVE_BOOT_COMPLETED" />
 
+    <!-- To hand finished slides to the TikTok app's photo editor. -->
+    <queries>
+        <package android:name="com.zhiliaoapp.musically" />
+        <package android:name="com.ss.android.ugc.trill" />
+        <intent>
+            <action android:name="android.intent.action.SEND_MULTIPLE" />
+            <data android:mimeType="image/*" />
+        </intent>
+    </queries>
+
     <application
         android:name=".SlidemillApp"
         android:label="Slidemill"
@@ -43,6 +53,12 @@
                 <action android:name="android.intent.action.MY_PACKAGE_REPLACED" />
             </intent-filter>
         </receiver>
+
+        <provider
+            android:name=".SlideProvider"
+            android:authorities="com.slidemill.app.slides"
+            android:exported="false"
+            android:grantUriPermissions="true" />
 
     </application>
 </manifest>

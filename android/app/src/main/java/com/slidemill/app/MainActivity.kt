@@ -6,11 +6,13 @@ import android.content.ClipData
 import android.content.ClipboardManager
 import android.content.Intent
 import android.content.pm.PackageManager
+import android.graphics.BitmapFactory
 import android.graphics.Color
 import android.graphics.Typeface
 import android.os.Build
 import android.os.Bundle
 import android.os.Handler
+import android.net.Uri
 import android.os.Looper
 import android.provider.Settings
 import android.text.InputType
@@ -18,8 +20,11 @@ import android.util.TypedValue
 import android.view.View
 import android.view.ViewGroup
 import android.widget.Button
+import android.widget.CheckBox
 import android.widget.EditText
 import android.widget.FrameLayout
+import android.widget.HorizontalScrollView
+import android.widget.ImageView
 import android.widget.LinearLayout
 import android.widget.ScrollView
 import android.widget.TextView
@@ -29,10 +34,12 @@ import com.slidemill.core.copyObj
 import com.slidemill.core.long
 import com.slidemill.core.objOrNull
 import com.slidemill.core.str
+import com.slidemill.core.strings
+import java.io.File
 import java.util.concurrent.Executors
 
 /**
- * Two tabs: Slidemill (connect Claude, see what it made and whether each draft reached TikTok) and
+ * Two tabs: Slidemill (connect Claude; Claude's slideshows wait here as drafts: tap one, preview it, POST it live) and
  * TikTok (log in once). Claude does the work through the connector; this screen only sets it up.
  */
 class MainActivity : Activity() {
@@ -106,6 +113,7 @@ class MainActivity : Activity() {
     @Deprecated("Deprecated in Java")
     override fun onBackPressed() {
         if (!::tabs.isInitialized) return super.onBackPressed() // on the crash report
+        if (current == "preview") return show("Slidemill")
         val web = if (current == "TikTok") TikTokWeb.get(this) else null
         if (web != null && web.canGoBack()) web.goBack() else super.onBackPressed()
     }
@@ -134,7 +142,7 @@ class MainActivity : Activity() {
         }
         col.addView(label("Slidemill", 22f, ink, bold = true))
         col.addView(label(
-            "Ask Claude for slideshows. Claude writes and scores them; this phone renders them and saves them straight to your TikTok Studio drafts.",
+            "Ask Claude for slideshows. Claude writes and scores them; this phone renders them and keeps them below as drafts. Tap one to preview it and POST it to TikTok.",
             13f, muted,
         ))
 
@@ -171,6 +179,10 @@ class MainActivity : Activity() {
             button("Open the TikTok tab") { show("TikTok") },
             button("Check again", secondary = true) { checkTikTok() },
         ), spaced(6))
+        col.addView(button("Web drafts (TikTok Studio)", secondary = true) {
+            show("TikTok")
+            TikTokWeb.get(this).loadUrl("https://www.tiktok.com/tiktokstudio/content?tab=draft")
+        }, spaced(6))
         col.addView(label("Use username/email + password: Google login doesn't work inside apps.", 12f, muted), spaced(6))
 
         // 3. Backgrounds
@@ -203,7 +215,7 @@ class MainActivity : Activity() {
         }, spaced(6))
 
         // What Claude made
-        col.addView(heading("Slideshows"))
+        col.addView(heading("Drafts"))
         showsList = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL }.also { col.addView(it, spaced(6)) }
 
         col.addView(label(
@@ -226,23 +238,126 @@ class MainActivity : Activity() {
         val list = showsList ?: return
         val rows = engine.db.tx { all("slideshows").sortedByDescending { it.long("created_at") }.take(15).map { it.copyObj() } }
         list.removeAllViews()
-        if (rows.isEmpty()) list.addView(label("Nothing yet. Ask Claude: \"make me a slideshow about … and save it to my TikTok drafts\".", 13f, muted))
+        if (rows.isEmpty()) list.addView(label("Nothing yet. Ask Claude: \"make me a slideshow about …\".", 13f, muted))
         for (r in rows) {
-            val d = r.objOrNull("draft")
-            val draft = when (d?.str("status")) {
-                null -> if (r.str("status") == "completed") "not saved to TikTok" else r.str("status").let { if (it == "failed") "failed: ${r.str("error")}" else "$it…" }
-                "saved" -> "✓ in TikTok drafts"
-                "saving" -> "saving to TikTok…"
-                else -> "✗ not saved: ${d.str("error")}"
-            }
+            val state = stateOf(r)
             list.addView(LinearLayout(this).apply {
                 orientation = LinearLayout.VERTICAL
                 setBackgroundColor(panel)
                 setPadding(dp(12), dp(10), dp(12), dp(10))
                 addView(label(r.str("title").ifEmpty { "Untitled" }, 14f, ink, bold = true))
-                addView(label(draft, 13f, if (d?.str("status") == "saved") good else muted))
+                addView(label(state, 13f, if (state.startsWith("✓")) good else muted))
+                if (r.str("status") == "completed") setOnClickListener { preview(r.str("id")) }
             }, spaced(6))
         }
+    }
+
+    private fun stateOf(r: Map<String, Any?>): String {
+        val p = r.objOrNull("post")
+        return when {
+            r.str("status") == "failed" -> "failed to render: ${r.str("error")}"
+            r.str("status") != "completed" -> "${r.str("status")}…"
+            p?.str("status") == "posted" -> "✓ Live on TikTok"
+            p?.str("status") == "posting" -> "posting…"
+            p?.str("status") == "failed" -> "✗ not posted: ${p.str("error")} (tap to retry)"
+            else -> "Draft: tap to preview and post"
+        }
+    }
+
+    // ---- one draft: preview and POST --------------------------------------------------------------
+
+    private fun preview(id: String) {
+        val r = engine.db.tx { get("slideshows", id)?.copyObj() } ?: return show("Slidemill")
+        current = "preview"
+        tabs.forEach { it.setTextColor(muted) }
+        TikTokWeb.detach()
+        main.removeCallbacks(ticker)
+        content.removeAllViews()
+
+        val col = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            setPadding(dp(18), dp(12), dp(18), dp(18))
+        }
+        col.addView(button("← Drafts", secondary = true) { show("Slidemill") })
+        col.addView(label(r.str("title").ifEmpty { "Untitled" }, 20f, ink, bold = true), spaced(12))
+
+        // The slides, swipe sideways, in posting order.
+        val strip = LinearLayout(this)
+        val h = dp(380)
+        for (rel in r.strings("rendered")) {
+            val bmp = runCatching {
+                val f = File(engine.mediaDir, rel).path
+                val bounds = BitmapFactory.Options().apply { inJustDecodeBounds = true }.also { BitmapFactory.decodeFile(f, it) }
+                var sample = 1
+                while (bounds.outHeight / (sample * 2) >= h) sample *= 2
+                BitmapFactory.decodeFile(f, BitmapFactory.Options().apply { inSampleSize = sample })
+            }.getOrNull() ?: continue
+            strip.addView(ImageView(this).apply {
+                setImageBitmap(bmp)
+                scaleType = ImageView.ScaleType.FIT_CENTER
+                adjustViewBounds = true
+            }, LinearLayout.LayoutParams(h * bmp.width / bmp.height, h).apply { rightMargin = dp(8) })
+        }
+        col.addView(HorizontalScrollView(this).apply { addView(strip) }, spaced(12))
+        col.addView(label("${r.strings("rendered").size} slides: swipe to see them all.", 12f, muted), spaced(4))
+
+        col.addView(label("Title on the carousel", 12f, muted), spaced(14))
+        col.addView(label(r.str("caption").ifEmpty { r.str("title") }, 14f, ink).apply { setTextIsSelectable(true) })
+        col.addView(label("Caption", 12f, muted), spaced(10))
+        col.addView(label(r.str("description").ifEmpty { "(none)" }, 14f, ink).apply { setTextIsSelectable(true) })
+
+        val status = label("", 14f, ink)
+        val posted = r.objOrNull("post")?.takeIf { it.str("status") == "posted" }
+        if (posted != null) {
+            status.text = "✓ Live on TikTok"
+            status.setTextColor(good)
+            col.addView(status, spaced(18))
+            col.addView(button("Open the post") { openUrl(posted.str("url")) }, spaced(8))
+        } else {
+            val sound = CheckBox(this).apply {
+                text = "Add a sound (TikTok's top suggestion for these slides)"
+                setTextColor(ink)
+                isChecked = true
+            }
+            col.addView(sound, spaced(16))
+            col.addView(status, spaced(8))
+            lateinit var postButton: Button
+            postButton = button("POST") {
+                postButton.isEnabled = false
+                status.setTextColor(ink)
+                status.text = "Posting… uploading ${r.strings("rendered").size} slides to TikTok (up to a minute or two)."
+                io.execute {
+                    val out = runCatching { engine.studio.publish(id, engine.tiktok, sound.isChecked) }
+                    main.post {
+                        if (current != "preview") return@post
+                        out.onSuccess { preview(id) }.onFailure {
+                            status.text = "✗ ${it.message}"
+                            status.setTextColor(accent)
+                            postButton.isEnabled = true
+                        }
+                    }
+                }
+            }.apply { textSize = 18f }
+            col.addView(postButton, LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, dp(56)).apply { topMargin = dp(8) })
+            col.addView(button("Edit in the TikTok app instead (pick any sound)", secondary = true) { post(r) }, spaced(10))
+        }
+        col.addView(button("Delete this draft", secondary = true) {
+            io.execute { engine.studio.delete(id); main.post { toast("Deleted"); show("Slidemill") } }
+        }, spaced(10))
+        content.addView(ScrollView(this).apply { addView(col) })
+    }
+
+    private fun openUrl(url: String) {
+        runCatching { startActivity(Intent(Intent.ACTION_VIEW, Uri.parse(url))) }.onFailure { toast("Couldn't open $url") }
+    }
+
+    /** Open TikTok's photo editor with the slides; the caption goes on the clipboard. */
+    private fun post(r: Map<String, Any?>) {
+        val slides = r.strings("rendered").map { File(engine.mediaDir, it) }
+        val caption = r.str("description").ifEmpty { r.str("caption") }
+        runCatching { Slidemill.shareToTikTok(this, slides, caption) }
+            .onSuccess { toast(if (caption.isEmpty()) "Pick a sound and post." else "Caption copied: paste it, pick a sound and post.") }
+            .onFailure { toast("Couldn't open TikTok: ${it.message}") }
     }
 
     private fun checkTikTok() {

@@ -34,13 +34,14 @@ class Mcp(private val e: Engine) {
         /** Handshake-era protocol revisions this server speaks, oldest to newest. */
         val VERSIONS = listOf("2024-11-05", "2025-03-26", "2025-06-18", "2025-11-25")
 
-        const val INSTRUCTIONS = """Slidemill makes TikTok photo-carousel slideshows on the user's phone and saves them to their TikTok Studio drafts. You do the thinking; the phone renders and saves.
+        const val INSTRUCTIONS = """Slidemill makes TikTok photo-carousel slideshows on the user's phone. You do the thinking; the phone renders them, and the user posts them from the phone.
 
 How to work with it:
 1. Call writing_guide once, and research_library to see which real slideshows in the user's niche beat their account's usual views. Write in that spirit; never copy a post. (add_to_library imports accounts; read_library_slides lets you read slide text the library doesn't have yet.)
 2. Write each slideshow yourself and pass it to create_slideshow (the phone finds backgrounds and draws your text). Or, if you made finished slide images yourself, pass them to import_slides as https links or small data URIs. Look at the slides that come back and fix what reads badly.
 3. predict_virality scores a slideshow with you as the reader: call it once for the rules, the slides and real library posts to rank it against, write your read, and call it again with that read. Use the scores to choose.
-4. save_draft (or create_slideshow / import_slides with save_draft: true) puts it in the user's TikTok Studio drafts right away and answers with TikTok's draft id. Drafts are never public: the user adds a sound and posts from TikTok. If it fails, the answer says why (for example: not logged in to TikTok in the app)."""
+4. Every finished slideshow is a draft in the Slidemill app on the phone: the user taps it, sees the preview, and taps POST to publish it live on TikTok. You don't post; tell the user it's waiting in the Slidemill app. list_slideshows and view_slideshow show whether it's been posted, with the post's link.
+5. Only if the user asks for web drafts: save_draft (or save_draft: true) also saves it to TikTok Studio's web drafts and answers with TikTok's draft id. Those drafts appear on tiktok.com/tiktokstudio (or the Slidemill app's "Web drafts" button), NOT in the TikTok app's Drafts."""
 
         private fun str(description: String = "", enum: List<String>? = null): Obj =
             obj("type" to "string").also { o -> if (description.isNotEmpty()) o["description"] = description; enum?.let { o["enum"] = it.toMutableList<Any?>() } }
@@ -123,8 +124,9 @@ How to work with it:
         ) { a -> importSlides(a) },
 
         "save_draft" to Tool(
-            "Save a rendered slideshow to the user's TikTok Studio drafts now, from the phone's logged-in TikTok tab. " +
-                "Answers with TikTok's draft id, or why it failed. Drafts are never public.",
+            "Save a rendered slideshow to the user's TikTok Studio web drafts now, from the phone's logged-in TikTok tab. " +
+                "Answers with TikTok's draft id, or why it failed. Web drafts are never public and don't appear in the TikTok " +
+                "app's Drafts; to post, the user opens the slideshow in the Slidemill app and taps POST instead.",
             input(listOf("slideshow_id"), "slideshow_id" to str(), "again" to bool("Save another copy of one that's already in drafts.")),
         ) { a -> saveDraft(id(a), a.bool("again")) },
 
@@ -142,6 +144,7 @@ How to work with it:
                     "id" to s.str("id"), "title" to s.str("title"), "status" to s.str("status"),
                     "draft" to s.objOrNull("draft")?.let { d -> if (d.str("status") == "saved") "saved (${d.str("draft_id")})" else d.str("status") },
                     "score" to s.objOrNull("prediction")?.get("viral_potential"),
+                    "posted" to s.objOrNull("post")?.let { p -> if (p.str("status") == "posted") p.str("url") else p.str("status") },
                 )
             })
         },
@@ -407,7 +410,7 @@ How to work with it:
         show(id) // a clear "not found" first
         val record = within { e.studio.saveDraft(id, e.tiktok, again) }
             ?: return "TikTok is still uploading the slides. Call view_slideshow in a minute: it shows the draft id, or why it failed."
-        return "Saved to TikTok Studio drafts (draft id ${record.str("draft_id")}). The user adds a sound and posts it from TikTok."
+        return "Saved to TikTok Studio web drafts (draft id ${record.str("draft_id")}): tiktok.com/tiktokstudio → Drafts, not the TikTok app's Drafts. To post it, the user opens it in the Slidemill app and taps POST."
     }
 
     private fun predict(id: String, read: Map<String, Any?>?): Any? {
@@ -466,7 +469,7 @@ How to work with it:
     /** The slideshow as JSON text plus each slide, scaled down so a conversation can hold a whole slideshow. */
     private fun withSlides(show: Obj): MutableList<Any?> {
         val slim = obj()
-        for (k in listOf("id", "title", "status", "error", "caption", "description", "draft")) slim[k] = show[k]
+        for (k in listOf("id", "title", "status", "error", "caption", "description", "draft", "post")) slim[k] = show[k]
         show.str("warning").takeIf { it.isNotEmpty() }?.let { slim["warning"] = it }
         show.objOrNull("prediction")?.let { p ->
             slim["prediction"] = obj().also { o ->
