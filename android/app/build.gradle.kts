@@ -41,11 +41,14 @@ android {
     packaging {
         resources.excludes += setOf("META-INF/*.kotlin_module")
     }
+    testOptions { unitTests.isIncludeAndroidResources = true }
     sourceSets["main"].assets.srcDir(layout.buildDirectory.dir("generated/sharedAssets"))
 }
 
 dependencies {
     implementation(project(":core"))
+    testImplementation("junit:junit:4.13.2")
+    testImplementation("org.robolectric:robolectric:4.14.1")
 }
 
 // One source of truth, shared with the server and the browser extension: the dashboard (static/),
