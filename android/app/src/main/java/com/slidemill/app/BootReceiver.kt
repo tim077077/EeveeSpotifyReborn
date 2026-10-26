@@ -8,7 +8,8 @@ import android.content.Intent
 class BootReceiver : BroadcastReceiver() {
     override fun onReceive(context: Context, intent: Intent) {
         if (intent.action == Intent.ACTION_BOOT_COMPLETED || intent.action == Intent.ACTION_MY_PACKAGE_REPLACED) {
-            runCatching { EngineService.start(context) }
+            // After a crash, wait for the user to open the app and see it, instead of crashing in a loop.
+            if (Crash.pending(context) == null) runCatching { EngineService.start(context) }
         }
     }
 }

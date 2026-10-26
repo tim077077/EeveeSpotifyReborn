@@ -63,6 +63,12 @@ class MainActivity : Activity() {
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
+        // After a crash, show what happened before starting anything that could crash again.
+        val crash = Crash.pending(this)
+        if (crash != null) Crash.show(this, crash) { start() } else start()
+    }
+
+    private fun start() {
         Prefs.init(this)
         if (Build.VERSION.SDK_INT >= 33 && checkSelfPermission(Manifest.permission.POST_NOTIFICATIONS) != PackageManager.PERMISSION_GRANTED) {
             requestPermissions(arrayOf(Manifest.permission.POST_NOTIFICATIONS), 1)
@@ -97,6 +103,7 @@ class MainActivity : Activity() {
 
     @Deprecated("Deprecated in Java")
     override fun onBackPressed() {
+        if (!::tabs.isInitialized) return super.onBackPressed() // on the crash report
         val web = when (current) {
             "Dashboard" -> dashboard
             "TikTok" -> TikTokWeb.get(this)

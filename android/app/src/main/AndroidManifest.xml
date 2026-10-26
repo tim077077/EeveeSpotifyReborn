@@ -23,6 +23,7 @@
 
     <!-- Cleartext is allowed only because the dashboard is served by the app itself on http://127.0.0.1. -->
     <application
+        android:name=".SlidemillApp"
         android:label="Slidemill"
         android:icon="@mipmap/ic_launcher"
         android:theme="@style/AppTheme"
