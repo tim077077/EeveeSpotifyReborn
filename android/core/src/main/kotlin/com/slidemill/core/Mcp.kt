@@ -399,6 +399,7 @@ How to work with it:
     private fun withSlides(show: Obj): MutableList<Any?> {
         val slim = obj()
         for (k in listOf("id", "title", "status", "error", "caption", "description", "draft")) slim[k] = show[k]
+        show.str("warning").takeIf { it.isNotEmpty() }?.let { slim["warning"] = it }
         show.objOrNull("prediction")?.let { p ->
             slim["prediction"] = obj().also { o ->
                 for (k in listOf("viral_potential", "verdict", "hook_score", "hold_rate", "tips", "better_hook", "rank", "similar")) o[k] = p[k]

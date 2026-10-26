@@ -1,8 +1,6 @@
 package com.slidemill.app
 
 import android.content.Context
-import android.os.Handler
-import android.os.Looper
 import com.slidemill.core.DraftError
 import com.slidemill.core.TikTokTab
 import org.json.JSONArray
@@ -19,16 +17,14 @@ import java.util.concurrent.atomic.AtomicReference
  */
 class AndroidTikTok(private val context: Context) : TikTokTab {
     companion object {
-        private const val LOAD_WAIT_MS = 25_000L
-        private const val HELLO_MS = 8_000L
+        private const val READY_MS = 30_000L
+        private const val HELLO_MS = 4_000L
         private const val DRAFT_MS = 4 * 60_000L
 
         /** The last logged-in username the page reported (for the app's screen). */
         @Volatile var lastUsername = ""
             private set
     }
-
-    private val main = Handler(Looper.getMainLooper())
 
     private fun ask(kind: String, payload: JSONObject, timeoutMs: Long): JSONObject? {
         val latch = CountDownLatch(1)
@@ -38,31 +34,26 @@ class AndroidTikTok(private val context: Context) : TikTokTab {
         return out.get()
     }
 
-    /** Make sure tiktok.com is loaded, running (not paused) and answering. */
-    private fun ready() {
-        val created = CountDownLatch(1)
-        main.post {
-            runCatching { TikTokWeb.get(context).also { it.onResume(); it.resumeTimers() } }
-            created.countDown()
+    /**
+     * Wait until the tiktok.com page answers. Never reloads it: a reload while it's still loading starts
+     * the wait over, and repeated calls would keep it from ever getting ready.
+     */
+    private fun hello(): JSONObject {
+        val until = System.currentTimeMillis() + READY_MS
+        while (System.currentTimeMillis() < until) {
+            TikTokWeb.wake(context)
+            if (TikTokWeb.pageReady) {
+                val hello = ask("hello", JSONObject(), HELLO_MS)
+                if (hello != null && hello.optBoolean("ready")) return hello
+            }
+            Thread.sleep(1_000)
         }
-        created.await(5, TimeUnit.SECONDS)
-        val until = System.currentTimeMillis() + LOAD_WAIT_MS
-        while (!TikTokWeb.pageReady && System.currentTimeMillis() < until) Thread.sleep(250)
-        if (!TikTokWeb.pageReady) {
-            TikTokWeb.reload()
-            throw DraftError("tiktok.com didn't finish loading in the app (no connection?). Try again in a minute.")
-        }
+        throw DraftError(
+            "tiktok.com isn't answering in the app. Open Slidemill → TikTok once to check the page loads and you're logged in, then try again.",
+        )
     }
 
-    override fun username(): String {
-        ready()
-        val hello = ask("hello", JSONObject(), HELLO_MS)
-        if (hello == null || !hello.optBoolean("ready")) {
-            TikTokWeb.reload()
-            throw DraftError("The TikTok tab didn't answer; it's reloading. Try again in a minute.")
-        }
-        return hello.optString("username").also { lastUsername = it }
-    }
+    override fun username(): String = hello().optString("username").also { lastUsername = it }
 
     override fun saveDraft(title: String, caption: String, slides: List<File>): String {
         if (username().isEmpty()) throw DraftError("Not logged in to TikTok in the app: open Slidemill → TikTok and log in (username/email + password).")

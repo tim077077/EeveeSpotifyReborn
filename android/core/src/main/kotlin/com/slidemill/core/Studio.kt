@@ -55,8 +55,14 @@ class Studio(
     fun build(id: String, source: String) {
         try {
             val spec = db.tx { get("slideshows", id)?.objAt("spec")?.copyObj() } ?: throw PipelineError("slideshow not found")
-            assignImages(spec, source)
-            db.tx { get("slideshows", id)?.set("spec", spec) }
+            val missing = assignImages(spec, source)
+            db.tx {
+                get("slideshows", id)?.let {
+                    it["spec"] = spec
+                    it["warning"] = if (missing == 0) "" else
+                        "$missing of ${spec.objs("slides").size} backgrounds couldn't be found or generated, so those slides have a plain background."
+                }
+            }
             val outDir = File(mediaDir, "slideshows/$id")
             if (outDir.exists()) outDir.deleteRecursively()
             val rendered = renderer.renderSlideshow(Models.SPEC.of(spec), outDir)
@@ -73,8 +79,11 @@ class Studio(
         }
     }
 
-    /** Fill each slide's background: stock search (Pexels/Unsplash key) or AI generation, AI being the fallback. */
-    fun assignImages(spec: Obj, source0: String) {
+    /**
+     * Fill each slide's background: stock search (Pexels/Unsplash key) or AI generation, AI being the
+     * fallback. Returns how many slides got none.
+     */
+    fun assignImages(spec: Obj, source0: String): Int {
         val source = if (source0 == "auto") (if (images.providers().isNotEmpty()) "stock" else "ai") else source0
         val orientation = images.orientationFor(spec.str("aspect_ratio"))
         val usedUrls = mutableSetOf<String>()
@@ -84,14 +93,17 @@ class Studio(
             val picked = if (source == "stock") images.autoImage(slide.str("image_query").ifEmpty { spec.str("title") }, orientation, usedUrls)?.str("path") else null
             if (picked != null) slide["image"] = picked else needsAi += slide
         }
-        if (needsAi.isEmpty()) return
-        val pool = Executors.newFixedThreadPool(4)
+        if (needsAi.isEmpty()) return 0
+        // The free AI source serves one image at a time per address: in parallel they'd all be refused.
+        val free = runCatching { imageGen.resolve().provider == "pollinations" }.getOrDefault(true)
+        val pool = Executors.newFixedThreadPool(if (free) 1 else 4)
         try {
             val futures = needsAi.map { slide -> pool.submit<String?> { aiBackground(slide, spec) } }
             needsAi.forEachIndexed { i, slide -> slide["image"] = futures[i].get() }
         } finally {
             pool.shutdown()
         }
+        return needsAi.count { it["image"] == null }
     }
 
     private fun aiBackground(slide: Map<String, Any?>, spec: Map<String, Any?>): String? {

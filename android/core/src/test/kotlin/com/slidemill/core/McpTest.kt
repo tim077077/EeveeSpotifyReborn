@@ -132,6 +132,13 @@ class McpTest {
         assertEquals("saved", row(id).objAt("draft").str("status"))
     }
 
+    @Test fun missing_backgrounds_are_reported() {
+        e.imageGen.override = { _, _ -> throw ImageGenError("pollinations error 429") }
+        val out = Json.parseObj(text(create()))
+        assertEquals("completed", out.str("status"))
+        assertTrue("4 of 4 backgrounds couldn't be found or generated" in out.str("warning"), out.toString())
+    }
+
     @Test fun interrupted_work_is_never_left_pending() {
         val id = idOf(create())
         e.db.tx { get("slideshows", id)!!["draft"] = obj("status" to "saving") }
