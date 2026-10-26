@@ -10,6 +10,7 @@ class Store(private val db: Db, private val platform: Platform) {
             "image_provider" to listOf("IMAGE_PROVIDER"),
             "image_api_key" to listOf("IMAGE_API_KEY"),
             "image_model" to listOf("IMAGE_MODEL"),
+            "claude_schedules" to listOf(), // "1": schedule_slideshow schedules on TikTok without asking
         )
         val SECRET_KEYS = setOf("image_api_key", "pexels_api_key", "unsplash_access_key")
 

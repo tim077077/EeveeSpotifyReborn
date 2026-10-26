@@ -111,4 +111,31 @@ const bad = await failed;
 assert.equal(bad.ok, false);
 assert.match(bad.error, /save draft failed/);
 
-console.log("tiktok-inject: draft checks passed");
+// A scheduled publish: TikTok Studio's Schedule is schedule_time (unix seconds) on the post request.
+const posts = [];
+win.fetch = async (url, init) => {
+  if (new URL(url).pathname === "/tiktok/web/project/post/v1/") {
+    posts.push(JSON.parse(init.body));
+    return reply({ status_code: 0, project_id: "pr1", single_post_resp_list: [{ item_id: "7500000000000000001" }] });
+  }
+  return fetch(url, init);
+};
+const at = Math.floor(Date.now() / 1000) + 3 * 3600;
+const scheduled = new Promise((resolve) => (win.postMessage = (m) => m.__vbtt === "jobResult" && resolve(m.result)));
+listeners.forEach((f) => f({ source: page, data: { __vbtt: "job", id: 4, job: { id: "p3", action: "publish", title: "t", caption: "c #x", images: [png], schedule: at } } }));
+const sch = await scheduled;
+assert.equal(sch.ok, true, sch.error);
+assert.equal(sch.itemId, "7500000000000000001");
+assert.equal(sch.scheduleTime, at);
+assert.equal(posts[0].feature_common_info_list[0].schedule_time, at);
+
+// Too soon (the upload ate the margin) is pushed out to what TikTok accepts; no schedule means now.
+const soon = new Promise((resolve) => (win.postMessage = (m) => m.__vbtt === "jobResult" && resolve(m.result)));
+listeners.forEach((f) => f({ source: page, data: { __vbtt: "job", id: 5, job: { id: "p4", action: "publish", title: "t", caption: "", images: [png], schedule: Math.floor(Date.now() / 1000) + 60 } } }));
+assert.ok((await soon).scheduleTime >= Math.floor(Date.now() / 1000) + 15 * 60);
+const now = new Promise((resolve) => (win.postMessage = (m) => m.__vbtt === "jobResult" && resolve(m.result)));
+listeners.forEach((f) => f({ source: page, data: { __vbtt: "job", id: 6, job: { id: "p5", action: "publish", title: "t", caption: "", images: [png] } } }));
+assert.equal((await now).scheduleTime, 0);
+assert.ok(!("schedule_time" in posts[2].feature_common_info_list[0]));
+
+console.log("tiktok-inject: draft and schedule checks passed");

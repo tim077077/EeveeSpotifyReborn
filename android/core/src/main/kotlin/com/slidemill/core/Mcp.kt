@@ -40,7 +40,7 @@ How to work with it:
 1. Call writing_guide once, and research_library to see which real slideshows in the user's niche beat their account's usual views. Write in that spirit; never copy a post. (add_to_library imports accounts; read_library_slides lets you read slide text the library doesn't have yet.)
 2. Write each slideshow yourself and pass it to create_slideshow (the phone finds backgrounds and draws your text). Or, if you made finished slide images yourself, pass them to import_slides as https links or small data URIs. Look at the slides that come back and fix what reads badly.
 3. predict_virality scores a slideshow with you as the reader: call it once for the rules, the slides and real library posts to rank it against, write your read, and call it again with that read. Use the scores to choose.
-4. Every finished slideshow is a draft in the Slidemill app on the phone: the user taps it, sees the preview, and taps POST to publish it live on TikTok. You don't post; tell the user it's waiting in the Slidemill app. list_slideshows and view_slideshow show whether it's been posted, with the post's link.
+4. Every finished slideshow is a draft in the Slidemill app on the phone: the user taps it, sees the preview, and taps POST to publish it live on TikTok. You don't post; tell the user it's waiting in the Slidemill app. To time it, schedule_slideshow (pick the time with best_times) puts it on TikTok Studio's own schedule, or proposes the time for the user's one-tap approval, depending on the user's setting. list_slideshows and view_slideshow show whether it's been posted, with the post's link.
 5. Only if the user asks for web drafts: save_draft (or save_draft: true) also saves it to TikTok Studio's web drafts and answers with TikTok's draft id. Those drafts appear on tiktok.com/tiktokstudio (or the Slidemill app's "Web drafts" button), NOT in the TikTok app's Drafts."""
 
         private fun str(description: String = "", enum: List<String>? = null): Obj =
@@ -130,6 +130,20 @@ How to work with it:
             input(listOf("slideshow_id"), "slideshow_id" to str(), "again" to bool("Save another copy of one that's already in drafts.")),
         ) { a -> saveDraft(id(a), a.bool("again")) },
 
+        "schedule_slideshow" to Tool(
+            "Pick when a rendered slideshow should go live, using TikTok Studio's own Schedule (TikTok publishes it at " +
+                "that time even if the phone is off). Between 15 minutes and 30 days ahead (some accounts: 10 days). " +
+                "By default this only PROPOSES the time: the user approves it with one tap (SCHEDULE) in the Slidemill app. " +
+                "If the user turned on \"Let Claude schedule posts\" in the app, it's scheduled on TikTok right away. " +
+                "Use best_times to choose the time. The answer says which happened.",
+            input(
+                listOf("slideshow_id", "at"),
+                "slideshow_id" to str(),
+                "at" to str("When, as ISO 8601: 2026-10-27T18:30:00+01:00, or without an offset for the phone's own time zone."),
+                "sound" to bool("Attach TikTok's top suggested sound (default true)."),
+            ),
+        ) { a -> schedule(id(a), a.str("at"), a["sound"] as? Boolean ?: true) },
+
         "view_slideshow" to Tool("A slideshow's details, its draft status and its rendered slides.", input(listOf("slideshow_id"), "slideshow_id" to str())) { a ->
             withSlides(show(id(a)))
         },
@@ -144,7 +158,10 @@ How to work with it:
                     "id" to s.str("id"), "title" to s.str("title"), "status" to s.str("status"),
                     "draft" to s.objOrNull("draft")?.let { d -> if (d.str("status") == "saved") "saved (${d.str("draft_id")})" else d.str("status") },
                     "score" to s.objOrNull("prediction")?.get("viral_potential"),
-                    "posted" to s.objOrNull("post")?.let { p -> if (p.str("status") == "posted") p.str("url") else p.str("status") },
+                    "posted" to s.objOrNull("post")?.let { p ->
+                        when (p.str("status")) { "posted" -> p.str("url"); "scheduled" -> "scheduled for ${p.str("scheduled_for")}"; else -> p.str("status") }
+                    },
+                    "suggested_time" to s.long("suggested_time").takeIf { it > 0 }?.let { localTime(it) },
                 )
             })
         },
@@ -406,6 +423,30 @@ How to work with it:
         }
     }
 
+    /** Unix seconds for an ISO 8601 time; without an offset it's the phone's local time. */
+    private fun parseAt(raw: String): Long = runCatching { java.time.OffsetDateTime.parse(raw.trim()).toEpochSecond() }.getOrElse {
+        runCatching { java.time.LocalDateTime.parse(raw.trim()).atZone(java.time.ZoneId.of(e.platform.defaultTimezone())).toEpochSecond() }
+            .getOrElse { throw ToolError("at must be ISO 8601, like 2026-10-27T18:30:00+01:00 (got \"$raw\").") }
+    }
+
+    private fun localTime(at: Long): String = java.time.Instant.ofEpochSecond(at).atZone(java.time.ZoneId.of(e.platform.defaultTimezone()))
+        .format(java.time.format.DateTimeFormatter.ofPattern("EEE d MMM, HH:mm", java.util.Locale.ENGLISH)) + " (phone time, ${e.platform.defaultTimezone()})"
+
+    private fun schedule(id: String, raw: String, sound: Boolean): String {
+        val s = show(id)
+        if (s.str("status") != "completed") throw ToolError("Slideshow $id isn't rendered (${s.str("status")}).")
+        val at = parseAt(raw)
+        Studio.scheduleProblem(at)?.let { throw ToolError(it) }
+        if (e.store.get("claude_schedules") != "1") {
+            e.studio.suggest(id, at)
+            return "Proposed for ${localTime(at)}. It isn't scheduled yet: the user approves it with one tap (SCHEDULE) on " +
+                "this slideshow in the Slidemill app. Tell them."
+        }
+        val record = within { e.studio.publish(id, e.tiktok, sound, at) }
+            ?: return "TikTok is still uploading the slides. Call view_slideshow in a minute: it shows the scheduled time, or why it failed."
+        return "Scheduled on TikTok for ${localTime(at)} (post id ${record.str("item_id")}). It's in TikTok Studio → Scheduled; TikTok publishes it then, phone on or off."
+    }
+
     private fun saveDraft(id: String, again: Boolean): String {
         show(id) // a clear "not found" first
         val record = within { e.studio.saveDraft(id, e.tiktok, again) }
@@ -457,6 +498,9 @@ How to work with it:
             "backgrounds" to if (e.images.providers().isNotEmpty()) "stock photos (${e.images.providers().joinToString()}), AI as fallback"
             else "AI only: ${e.imageGen.describe()}. A free Pexels key in the app gives real photos.",
             "library" to "$posts slideshows from $profiles accounts",
+            "phone_time" to localTime(Db.nowMs() / 1000),
+            "claude_can_schedule" to if (e.store.get("claude_schedules") == "1") "yes: schedule_slideshow schedules on TikTok directly"
+            else "no: schedule_slideshow proposes a time; the user approves it in the app",
         ))
     }
 
@@ -470,6 +514,7 @@ How to work with it:
     private fun withSlides(show: Obj): MutableList<Any?> {
         val slim = obj()
         for (k in listOf("id", "title", "status", "error", "caption", "description", "draft", "post")) slim[k] = show[k]
+        show.long("suggested_time").takeIf { it > 0 }?.let { slim["suggested_time"] = localTime(it) }
         show.str("warning").takeIf { it.isNotEmpty() }?.let { slim["warning"] = it }
         show.objOrNull("prediction")?.let { p ->
             slim["prediction"] = obj().also { o ->

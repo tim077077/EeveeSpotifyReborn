@@ -12,7 +12,8 @@ open class PipelineError(message: String) : RuntimeException(message)
  * A slideshow row keeps the draft attempt's outcome in `draft`: {status: saving | saved | failed,
  * draft_id, error, at}, so a save that outlives Claude's tool call is still reported truthfully.
  * A live post made from the app's POST button is kept the same way in `post`: {status: posting |
- * posted | failed, item_id, url, error, at}.
+ * posted | scheduled | failed, item_id, url, error, at, scheduled_for}. `suggested_time` (unix seconds)
+ * is a posting time Claude proposed, waiting for the user's tap.
  */
 class Studio(
     private val db: Db,
@@ -26,6 +27,15 @@ class Studio(
 
     companion object {
         const val MAX_SLIDES = 35 // TikTok's photo-post limit
+        const val MIN_SCHEDULE_S = 15 * 60L // TikTok Studio's Schedule window
+        const val MAX_SCHEDULE_S = 30 * 86_400L // (some accounts only get 10 days)
+
+        /** Why TikTok would refuse a schedule at [at] (unix seconds), or null if it's in the window. */
+        fun scheduleProblem(at: Long, nowS: Long = Db.nowMs() / 1000): String? = when {
+            at < nowS + MIN_SCHEDULE_S -> "TikTok can only schedule at least 15 minutes ahead."
+            at > nowS + MAX_SCHEDULE_S -> "TikTok can only schedule up to 30 days ahead (some accounts: 10)."
+            else -> null
+        }
     }
 
     fun specFromPlan(plan: Map<String, Any?>, aspectRatio: String): Obj {
@@ -197,13 +207,15 @@ class Studio(
      * Publish a rendered slideshow as a live TikTok photo post through the phone's TikTok tab. Blocks
      * until TikTok answers; returns the post record. Throws [DraftError] with the reason (also recorded).
      */
-    fun publish(id: String, tab: TikTokTab?, sound: Boolean = true): Obj {
+    fun publish(id: String, tab: TikTokTab?, sound: Boolean = true, at: Long = 0): Obj {
+        if (at > 0) scheduleProblem(at)?.let { throw DraftError(it) }
         val (title, caption, slides) = db.tx {
             val s = get("slideshows", id) ?: throw PipelineError("Slideshow $id not found.")
             if (s.str("status") != "completed") throw DraftError("This slideshow isn't rendered (${s.str("status")}).")
             when (s.objOrNull("post")?.str("status")) {
                 "posting" -> throw DraftError("It's already being posted.")
                 "posted" -> throw DraftError("Already posted: ${s.objAt("post").str("url")}")
+                "scheduled" -> throw DraftError("Already scheduled on TikTok for ${s.objAt("post").str("scheduled_for")}.")
             }
             s["post"] = obj("status" to "posting", "item_id" to "", "url" to "", "error" to "", "at" to Db.iso(Db.nowMs()))
             Triple(s.str("caption").ifEmpty { s.str("title") }.take(90), s.str("description"), s.strings("rendered").map { File(mediaDir, it) })
@@ -212,15 +224,30 @@ class Studio(
             if (tab == null) throw DraftError("The phone's TikTok tab isn't running: reopen the Slidemill app.")
             if (slides.isEmpty() || slides.any { !it.isFile }) throw DraftError("The rendered slides are missing on this phone.")
             val user = tab.username()
-            val itemId = tab.publish(title, caption, slides, sound)
-            obj("status" to "posted", "item_id" to itemId, "url" to "https://www.tiktok.com/@$user/photo/$itemId", "error" to "")
+            val itemId = tab.publish(title, caption, slides, sound, at)
+            obj(
+                "status" to if (at > 0) "scheduled" else "posted", "item_id" to itemId,
+                "url" to "https://www.tiktok.com/@$user/photo/$itemId", "error" to "",
+                "scheduled_for" to if (at > 0) Db.iso(at * 1000) else "",
+            )
         } catch (x: Exception) {
             obj("status" to "failed", "item_id" to "", "url" to "", "error" to (x.message ?: x.toString()))
         }
         record["at"] = Db.iso(Db.nowMs())
         db.tx { get("slideshows", id)?.set("post", record) }
-        if (record.str("status") != "posted") throw DraftError(record.str("error"))
+        if (record.str("status") == "failed") throw DraftError(record.str("error"))
+        db.tx { get("slideshows", id)?.set("suggested_time", 0L) }
         return record
+    }
+
+    /** Claude's proposed posting time (unix seconds), shown in the app for the user to approve with one tap. */
+    fun suggest(id: String, at: Long) {
+        scheduleProblem(at)?.let { throw DraftError(it) }
+        db.tx {
+            val s = get("slideshows", id) ?: throw PipelineError("Slideshow $id not found.")
+            if (s.objOrNull("post")?.str("status") in setOf("posted", "scheduled", "posting")) throw DraftError("It's already ${s.objAt("post").str("status")}.")
+            s["suggested_time"] = at
+        }
     }
 
     fun delete(id: String): Boolean {

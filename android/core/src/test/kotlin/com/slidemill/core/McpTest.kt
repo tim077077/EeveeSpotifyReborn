@@ -49,7 +49,7 @@ class McpTest {
         val names = result("tools/list").objs("tools").map { it.str("name") }
         assertEquals(listOf(
             "writing_guide", "research_library", "add_to_library", "read_library_slides", "save_slide_texts", "create_slideshow",
-            "import_slides", "save_draft", "view_slideshow", "list_slideshows", "delete_slideshow", "predict_virality", "my_posts", "best_times", "phone_status",
+            "import_slides", "save_draft", "schedule_slideshow", "view_slideshow", "list_slideshows", "delete_slideshow", "predict_virality", "my_posts", "best_times", "phone_status",
         ), names)
         // Notifications get no body; modern-era discovery falls back to the handshake; GET isn't served.
         assertEquals(202, e.relay.mcp.handle("POST", """{"jsonrpc":"2.0","method":"notifications/initialized"}""").status)
@@ -104,6 +104,41 @@ class McpTest {
         assertEquals("failed", row(other).objAt("post").str("status"))
         tiktok.refuse = null
         assertEquals("posted", e.studio.publish(other, tiktok).str("status"))
+    }
+
+    @Test fun schedule_proposes_by_default_and_schedules_on_tiktok_when_allowed() {
+        val id = idOf(create())
+        val at = Db.nowMs() / 1000 + 3 * 3600
+        val iso = java.time.Instant.ofEpochSecond(at).toString()
+
+        // Default: only a proposal, nothing sent to TikTok; the user approves it in the app.
+        val proposed = call("schedule_slideshow", obj("slideshow_id" to id, "at" to iso))
+        assertEquals(false, proposed["isError"], proposed.toString())
+        assertTrue("isn't scheduled yet" in text(proposed), text(proposed))
+        assertEquals(at, row(id).long("suggested_time"))
+        assertTrue(tiktok.published.isEmpty())
+
+        // The app's SCHEDULE tap: TikTok gets the time, and the proposal is used up.
+        val rec = e.studio.publish(id, tiktok, at = at)
+        assertEquals("scheduled", rec.str("status"))
+        assertEquals(at, tiktok.scheduledAt.single())
+        assertEquals(0L, row(id).long("suggested_time"))
+        assertTrue("scheduled for" in text(call("list_slideshows")))
+        assertTrue("Already scheduled" in assertFailsWith<DraftError> { e.studio.publish(id, tiktok) }.message!!)
+
+        // With "Let Claude schedule posts" on, Claude's call schedules it directly.
+        e.store.setMany(mapOf("claude_schedules" to "1"))
+        val other = idOf(create())
+        val direct = call("schedule_slideshow", obj("slideshow_id" to other, "at" to iso))
+        assertTrue("Scheduled on TikTok" in text(direct), text(direct))
+        assertEquals("scheduled", row(other).objAt("post").str("status"))
+
+        // Outside TikTok's window, or unreadable: refused before anything is sent.
+        val third = idOf(create())
+        assertTrue("15 minutes" in text(call("schedule_slideshow", obj("slideshow_id" to third, "at" to java.time.Instant.now().plusSeconds(60).toString()))))
+        assertTrue("30 days" in text(call("schedule_slideshow", obj("slideshow_id" to third, "at" to java.time.Instant.now().plusSeconds(40L * 86400).toString()))))
+        assertTrue("ISO 8601" in text(call("schedule_slideshow", obj("slideshow_id" to third, "at" to "tomorrow at 6"))))
+        assertEquals(2, tiktok.published.size)
     }
 
     @Test fun slides_claude_made_are_imported_and_saved_as_a_draft() {

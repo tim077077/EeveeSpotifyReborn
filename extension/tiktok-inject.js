@@ -352,7 +352,10 @@
     return out;
   }
 
-  async function createPost({ title, caption, uploaded, creation_id, music }) {
+  // TikTok Studio's "Schedule" takes a unix time 15 minutes to 30 days ahead (some accounts: 10 days).
+  const MIN_SCHEDULE_S = 15 * 60;
+
+  async function createPost({ title, caption, uploaded, creation_id, music, schedule }) {
     const images = uploaded.map((u, idx) => ({
       id: "file_" + Date.now() + "_" + idx,
       uri: u.uri,
@@ -401,6 +404,12 @@
         },
       ],
     };
+    let scheduleTime = 0;
+    if (schedule) {
+      // The upload can take a while: never send a time TikTok would refuse as too soon.
+      scheduleTime = Math.max(Math.floor(Number(schedule)), Math.floor(Date.now() / 1000) + MIN_SCHEDULE_S + 60);
+      body.feature_common_info_list[0].schedule_time = scheduleTime;
+    }
     const q = new URLSearchParams({ app_name: "tiktok_web", channel: "tiktok_web", device_platform: "web", aid: "1988" });
     // NOTE: msToken / X-Bogus / X-Gnarly are appended automatically by TikTok's
     // in-page webmssdk fetch hook — do NOT add them here.
@@ -413,7 +422,7 @@
     const j = await r.json();
     if (j.status_code !== 0) throw new Error("create post failed: " + JSON.stringify(j).slice(0, 400));
     const item = j.single_post_resp_list && j.single_post_resp_list[0];
-    return { projectId: j.project_id, itemId: item && item.item_id };
+    return { projectId: j.project_id, itemId: item && item.item_id, scheduleTime };
   }
 
   // Steps 0-3: upload every slide to TikTok's image store (used by posts and drafts alike).
@@ -444,7 +453,8 @@
 
   // sound: falsy = silent (default, proven path); true = auto-pick the top
   // recommended web-library sound; a string = use that exact music_id.
-  async function post({ title, caption, images, sound }) {
+  // schedule: unix seconds to publish at (TikTok Studio's Schedule); falsy = publish now.
+  async function post({ title, caption, images, sound, schedule }) {
     if (!images || !images.length) throw new Error("no images");
     if (location.host !== "www.tiktok.com") warn("run this on www.tiktok.com while logged in");
 
@@ -465,7 +475,7 @@
     }
 
     log("creating post…");
-    const res = await createPost({ title, caption, uploaded, creation_id, music });
+    const res = await createPost({ title, caption, uploaded, creation_id, music, schedule });
     log("%c✓ POSTED", "color:#12b886;font-weight:bold", res);
     if (!music) log("Posted silent. Pass sound:true to auto-attach a web-library sound, or add a viral sound in the app for max reach.");
     return res;
@@ -577,8 +587,8 @@
       try {
         const run = job.action === "draft" ? saveDraft : post;
         log(`Slidemill job ${job.id}: ${job.action || "publish"} "${job.title}" (${(job.images || []).length} slides)`);
-        const res = await run({ title: job.title, caption: job.caption, images: job.images, sound: job.sound });
-        result = { ok: true, itemId: (res && res.itemId) || "", draftId: (res && res.draftId) || "", username: currentUsername() };
+        const res = await run({ title: job.title, caption: job.caption, images: job.images, sound: job.sound, schedule: job.schedule });
+        result = { ok: true, itemId: (res && res.itemId) || "", draftId: (res && res.draftId) || "", scheduleTime: (res && res.scheduleTime) || 0, username: currentUsername() };
       } catch (e) {
         result = { ok: false, error: String((e && e.message) || e), unsupported: !!(e && e.unsupported), username: currentUsername() };
       } finally {
