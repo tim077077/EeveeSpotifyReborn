@@ -116,9 +116,12 @@ async def create_slideshow(
     image_source: Literal["auto", "stock", "ai", "collection"] = "auto",
     collection_id: str | None = None,
     aspect_ratio: Literal["4:5", "9:16", "1:1"] = "4:5",
+    post: Literal["none", "draft", "publish"] = "none",
 ) -> list[Any]:
     """Render a slideshow you wrote. Slidemill finds or generates each background from the slide's
-    image_query / image_prompt, renders the text, and returns the finished slides so you can check them."""
+    image_query / image_prompt, renders the text, and returns the finished slides so you can check them.
+    post: queue it for TikTok through the browser poster once rendered (only when the user asked for
+    that), the same as queue_post."""
     if not plan.slides:
         raise ToolError("A slideshow needs at least one slide.")
 
@@ -142,7 +145,11 @@ async def create_slideshow(
             return show.id
 
     show_id = await anyio.to_thread.run_sync(build)
-    return _with_slides(await _api("GET", f"/slideshows/{show_id}"))
+    out = _with_slides(await _api("GET", f"/slideshows/{show_id}"))
+    if post != "none" and json.loads(out[0])["status"] == "completed":
+        await _api("POST", f"/slideshows/{show_id}/publish", json={"post_mode": "BROWSER", "browser_action": post})
+        out.insert(1, f"Queued for TikTok as a {'draft' if post == 'draft' else 'post'}.")
+    return out
 
 
 @server.tool(structured_output=False)  # text plus slide images, not JSON

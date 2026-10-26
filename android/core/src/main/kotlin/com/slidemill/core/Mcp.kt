@@ -2,6 +2,9 @@ package com.slidemill.core
 
 import java.io.File
 import java.util.Base64
+import java.util.concurrent.Executors
+import java.util.concurrent.TimeUnit
+import java.util.concurrent.TimeoutException
 
 /**
  * Slidemill as an MCP server on the phone (same tools as app/mcp_server.py), so Claude can research,
@@ -20,6 +23,14 @@ class Mcp(private val e: Engine) {
     private class ToolError(message: String) : RuntimeException(message)
 
     private class Tool(val description: String, val schema: Obj, val run: (Obj) -> Any?)
+
+    /**
+     * How long a tool may run before Claude gets a "still working" answer. Claude's apps give up on a
+     * tool call after about a minute, while rendering with fresh backgrounds can take longer on a phone;
+     * the work carries on either way.
+     */
+    var waitMs = 40_000L
+    private val work = Executors.newCachedThreadPool { r -> Thread(r, "mcp").apply { isDaemon = true } }
 
     companion object {
         /** Handshake-era protocol revisions this server speaks, oldest to newest. */
@@ -63,13 +74,16 @@ How to work with it:
 
         "create_slideshow" to Tool(
             "Render a slideshow you wrote. Slidemill finds or generates each background from the slide's image_query / " +
-                "image_prompt, renders the text, and returns the finished slides so you can check them.",
+                "image_prompt, renders the text, and returns the finished slides so you can check them. If rendering takes " +
+                "longer than about 40 seconds you get its id instead: check it with view_slideshow a little later. " +
+                "post: queue it for TikTok as soon as it's rendered (only when the user asked for that), the same as queue_post.",
             input(
                 listOf("plan"),
                 "plan" to Shapes.SLIDESHOW_PLAN.toJson(),
                 "image_source" to str("Where backgrounds come from.", listOf("auto", "stock", "ai", "collection")),
                 "collection_id" to str("With image_source collection: which collection."),
                 "aspect_ratio" to str("", listOf("4:5", "9:16", "1:1")),
+                "post" to str("Queue for TikTok once rendered: none (default), draft or publish.", listOf("none", "draft", "publish")),
             ),
         ) { a -> create(a) },
 
@@ -172,7 +186,18 @@ How to work with it:
     private fun call(name: String, args: Obj): Obj {
         val tool = tools[name] ?: return obj("content" to arr(text("Unknown tool: $name")), "isError" to true)
         val out = try {
-            tool.run(args)
+            // create_slideshow keeps its own (shorter) deadline, so it can hand back the new slideshow's id.
+            val job = work.submit<Any?> { tool.run(args) }
+            try {
+                job.get(waitMs + 10_000, TimeUnit.MILLISECONDS)
+            } catch (x: TimeoutException) {
+                return obj("content" to arr(text(
+                    "Still working on the phone; it carries on in the background. Check the result in a minute " +
+                        "(list_slideshows / view_slideshow).",
+                )), "isError" to false)
+            } catch (x: java.util.concurrent.ExecutionException) {
+                throw x.cause ?: x
+            }
         } catch (x: ToolError) {
             return obj("content" to arr(text(x.message ?: "failed")), "isError" to true)
         } catch (x: ValidationError) {
@@ -226,12 +251,13 @@ How to work with it:
     private fun create(a: Obj): List<Any?> {
         val plan = Shapes.SLIDESHOW_PLAN.validate(a["plan"]) as Obj
         if (plan.objs("slides").isEmpty()) throw ToolError("A slideshow needs at least one slide.")
+        val post = a.str("post", "none").ifEmpty { "none" }
+        if (post !in setOf("none", "draft", "publish")) throw ToolError("post must be none, draft or publish")
         val aspect = a.str("aspect_ratio", "4:5").ifEmpty { "4:5" }
         val settings = Models.IMAGE_SETTINGS.of(obj(
             "source" to a.str("image_source", "auto").ifEmpty { "auto" }, "collection_id" to a.strOrNull("collection_id"), "aspect_ratio" to aspect,
         ))
         val spec = e.pipeline.specFromPlan(plan, settings, aspect)
-        e.pipeline.assignImages(spec, settings)
         val firstText = spec.objs("slides").firstOrNull()?.objs("text_items")?.joinToString(" ") { it.str("text") }.orEmpty()
         val id = e.db.tx {
             insert("slideshows", obj(
@@ -240,17 +266,35 @@ How to work with it:
                 "rendered" to arr(), "video_path" to "", "fingerprint" to Generator.fingerprint(firstText), "error" to "",
             ))
         }.str("id")
-        try {
-            e.pipeline.render(id)
-            e.db.tx { get("slideshows", id)?.let { it["status"] = "completed"; it["error"] = "" } }
-        } catch (x: Exception) {
-            e.db.tx { get("slideshows", id)?.let { it["status"] = "failed"; it["error"] = x.message ?: x.toString() } }
+        // Backgrounds and rendering run on their own, so a slow render can't make Claude's call time out.
+        val job = work.submit<String?> {
+            try {
+                e.pipeline.assignImages(spec, settings)
+                e.db.tx { get("slideshows", id)?.set("spec", spec) }
+                e.pipeline.render(id)
+                e.db.tx { get("slideshows", id)?.let { it["status"] = "completed"; it["error"] = "" } }
+            } catch (x: Exception) {
+                e.db.tx { get("slideshows", id)?.let { it["status"] = "failed"; it["error"] = x.message ?: x.toString() } }
+                return@submit null
+            }
+            if (post == "none") null else runCatching {
+                api("POST", "/slideshows/$id/publish", obj("post_mode" to "BROWSER", "browser_action" to post))
+                "Queued for TikTok as a ${if (post == "draft") "draft" else "post"}."
+            }.getOrElse { "Rendered, but queuing it failed: ${it.message}" }
         }
-        return withSlides(api("GET", "/slideshows/$id"))
+        val note = try {
+            job.get(waitMs, TimeUnit.MILLISECONDS)
+        } catch (x: TimeoutException) {
+            return arr(text(
+                "Still rendering on the phone (slideshow id $id). Call view_slideshow with this id in about a minute" +
+                    (if (post == "none") "." else "; it's queued for TikTok as soon as it's done."),
+            ))
+        }
+        return withSlides(api("GET", "/slideshows/$id")).also { out -> note?.let { out.add(1, text(it)) } }
     }
 
     /** The slideshow as JSON text plus each slide, scaled down so a conversation can hold a whole slideshow. */
-    private fun withSlides(show0: Any?): List<Any?> {
+    private fun withSlides(show0: Any?): MutableList<Any?> {
         val show = show0 as Map<String, Any?>
         val slim = obj()
         for (k in listOf("id", "title", "status", "error", "caption", "description", "prediction", "posts")) slim[k] = show[k]

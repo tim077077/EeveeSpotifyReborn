@@ -13,6 +13,9 @@ const VERSIONS = ["2024-11-05", "2025-03-26", "2025-06-18", "2025-11-25"];
 const TIMEOUT_MS = 290_000; // rendering with AI backgrounds can take a few minutes
 const MAX_BODY = 1_000_000;
 const ORIGINS = ["https://claude.ai", "https://claude.com"];
+// Tools that change things: while the phone is offline these wait here and run when it's back.
+const QUEUEABLE = ["create_slideshow", "queue_post", "delete_slideshow"];
+const MAX_QUEUE = 20;
 
 const json = (status, body, headers = {}) =>
   new Response(JSON.stringify(body), { status, headers: { "content-type": "application/json", ...headers } });
@@ -59,8 +62,10 @@ export class Relay extends DurableObject {
 
     // The newest open connection (a replaced one can still be closing).
     const phone = this.ctx.getWebSockets().filter((ws) => ws.readyState === WebSocket.OPEN).at(-1);
-    const reply = phone ? await this.ask(phone, body) : null;
-    if (!reply) return this.offline(msg);
+    if (!phone) return this.offline(msg, body);
+    const reply = await this.ask(phone, body);
+    // Connected but no answer (dropped mid-call): don't queue it, the phone may have done it already.
+    if (!reply) return this.offline(msg, null);
 
     // Remember what the phone says about itself, so Claude can still connect while it's offline.
     if (reply.status === 200 && msg && (msg.method === "initialize" || msg.method === "tools/list")) {
@@ -79,6 +84,7 @@ export class Relay extends DurableObject {
     }
     const [client, server] = Object.values(new WebSocketPair());
     this.ctx.acceptWebSocket(server);
+    this.flushQueue(server); // what Claude asked for while the phone was away
     return new Response(null, { status: 101, webSocket: client });
   }
 
@@ -104,6 +110,7 @@ export class Relay extends DurableObject {
     if (typeof data !== "string") return;
     let m;
     try { m = JSON.parse(data); } catch { return; }
+    if (m.t === "ack") return this.forget(m.id);
     const p = this.pending.get(m.id);
     if (!p) return;
     if (m.t === "part") p.parts.push(m.data);
@@ -120,9 +127,34 @@ export class Relay extends DurableObject {
   }
 
   // The phone isn't connected (or didn't answer): answer what we can so Claude can tell the user.
-  async offline(msg) {
+  async flushQueue(ws) {
+    for (const item of (await this.ctx.storage.get("queue")) || []) {
+      try { ws.send(JSON.stringify({ t: "queued", id: item.id, body: item.body })); } catch { return; }
+    }
+  }
+
+  // The phone has it (and remembers it, so a resend can't run it twice).
+  async forget(id) {
+    const queue = (await this.ctx.storage.get("queue")) || [];
+    await this.ctx.storage.put("queue", queue.filter((q) => q.id !== id));
+  }
+
+  async offline(msg, body) {
     if (!msg || Array.isArray(msg) || msg.id === undefined || !msg.method) return new Response(null, { status: 202 });
-    const say = "Slidemill's phone is offline. Open the Slidemill app on the phone (and keep it running), then try again.";
+    const queue = (await this.ctx.storage.get("queue")) || [];
+    const waiting = queue.length ? ` ${queue.length} earlier request(s) are waiting for it.` : "";
+    const say = `Slidemill's phone is offline. Open the Slidemill app on the phone (and keep it running), then try again.${waiting}`;
+    if (body && msg.method === "tools/call" && QUEUEABLE.includes(msg.params?.name)) {
+      if (queue.length >= MAX_QUEUE) {
+        return json(200, { jsonrpc: "2.0", id: msg.id, result: { content: [{ type: "text", text: `${say} The waiting list is full (${MAX_QUEUE}).` }], isError: true } });
+      }
+      queue.push({ id: crypto.randomUUID(), body, at: Date.now() });
+      await this.ctx.storage.put("queue", queue);
+      const text = `Slidemill's phone is offline, so this is saved and runs as soon as the phone is back online ` +
+        `(${queue.length} waiting). You can't see the result yet: check list_slideshows once the phone is online. ` +
+        `A slideshow made later can't be referred to by id now; to post one, pass post to create_slideshow instead.`;
+      return json(200, { jsonrpc: "2.0", id: msg.id, result: { content: [{ type: "text", text }], isError: false } });
+    }
     switch (msg.method) {
       case "initialize": {
         const cached = (await this.ctx.storage.get("initialize")) || {

@@ -145,6 +145,31 @@ class Relay(private val e: Engine) {
         }
     }
 
+    private val queueWork = Executors.newSingleThreadExecutor(daemon)
+
+    /**
+     * Something Claude asked for while the phone was offline (the relay kept it). Acknowledged first,
+     * so the relay forgets it, and remembered, so a resend after a dropped connection can't run it twice;
+     * then run one at a time. Claude sees the outcome in list_slideshows.
+     */
+    private fun runQueued(webSocket: WebSocket, msg: Obj) {
+        val id = msg.str("id")
+        val fresh = e.db.tx {
+            val row = get("state", "relay_queue") ?: insert("state", obj("id" to "relay_queue", "done" to arr()))
+            val done = row.strings("done")
+            if (id in done) false else {
+                row["done"] = (done + id).takeLast(200).toMutableList<Any?>()
+                true
+            }
+        }
+        webSocket.send(Json.write(obj("t" to "ack", "id" to id)))
+        if (!fresh) return
+        queueWork.submit {
+            e.platform.awake { runCatching { mcp.handle("POST", msg.str("body")) }.onFailure { e.platform.log("queued request failed: $it") } }
+            handled++
+        }
+    }
+
     private inner class Listener(private val gen: Int) : WebSocketListener() {
         override fun onOpen(webSocket: WebSocket, response: Response) {
             if (synchronized(lock) { gen != generation }) {
@@ -159,6 +184,7 @@ class Relay(private val e: Engine) {
 
         override fun onMessage(webSocket: WebSocket, text: String) {
             val msg = runCatching { Json.parseObj(text) }.getOrNull() ?: return
+            if (msg.str("t") == "queued") return runQueued(webSocket, msg)
             if (msg.str("t") != "req") return
             work.submit {
                 val reply = e.platform.awake {

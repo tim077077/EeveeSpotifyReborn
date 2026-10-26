@@ -16,10 +16,16 @@ async function waitUp() {
   throw new Error("wrangler dev didn't start");
 }
 
-function phone(secret, answer) {
+function phone(secret, answer, { ack = true } = {}) {
   const ws = new WebSocket(`ws://127.0.0.1:${PORT}/phone`, { headers: { authorization: `Bearer ${secret}` } });
+  ws.queued = [];
   ws.onmessage = async (ev) => {
     const m = JSON.parse(ev.data);
+    if (m.t === "queued") {
+      ws.queued.push(JSON.parse(m.body).params.name);
+      if (ack) ws.send(JSON.stringify({ t: "ack", id: m.id }));
+      return;
+    }
     const { status, data } = await answer(JSON.parse(m.body));
     // Split like the phone does, to prove the relay joins the parts.
     const text = data === null ? "" : JSON.stringify(data);
@@ -50,6 +56,33 @@ try {
   r = await (await rpc(url, "tools/call", { name: "list_slideshows", arguments: {} })).json();
   assert.equal(r.result.isError, true);
   assert.match(r.result.content[0].text, /offline/);
+
+  // Changes asked for while offline wait in the relay; reads don't.
+  const call = (name, args = {}) => rpc(url, "tools/call", { name, arguments: args }).then((x) => x.json());
+  r = await call("create_slideshow", { plan: { title: "a" }, post: "draft" });
+  assert.equal(r.result.isError, false);
+  assert.match(r.result.content[0].text, /saved and runs as soon as the phone is back online \(1 waiting\)/);
+  r = await call("delete_slideshow", { slideshow_id: "x" });
+  assert.match(r.result.content[0].text, /\(2 waiting\)/);
+  r = await call("list_slideshows");
+  assert.match(r.result.content[0].text, /2 earlier request\(s\) are waiting/);
+
+  // A phone that drops before acknowledging gets them again; once acknowledged they're gone.
+  const flaky = await phone(SECRET, () => null, { ack: false });
+  await new Promise((r) => setTimeout(r, 500));
+  assert.deepEqual(flaky.queued, ["create_slideshow", "delete_slideshow"]);
+  flaky.close();
+  await new Promise((r) => setTimeout(r, 300));
+  const steady = await phone(SECRET, () => null);
+  await new Promise((r) => setTimeout(r, 500));
+  assert.deepEqual(steady.queued, ["create_slideshow", "delete_slideshow"]);
+  steady.close();
+  await new Promise((r) => setTimeout(r, 300));
+  const again = await phone(SECRET, () => null);
+  await new Promise((r) => setTimeout(r, 500));
+  assert.deepEqual(again.queued, []);
+  again.close();
+  await new Promise((r) => setTimeout(r, 300));
 
   // A bad secret is refused; GET is not allowed; a wrong token is a separate, empty room.
   await assert.rejects(phone("nope", () => null));
