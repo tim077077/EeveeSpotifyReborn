@@ -10,7 +10,7 @@ import kotlin.math.ln
  * Best posting times per target country (port of app/timing.py).
  *
  * Score for posting at a local time = expected audience activity over the next ~2 hours, from a
- * workday/rest-day baseline curve, blended with what your library and your own posts show.
+ * workday/rest-day baseline curve, blended with what your research library shows.
  */
 class Timing(private val db: Db) {
     data class Country(
@@ -205,32 +205,12 @@ class Timing(private val db: Db) {
         return ev
     }
 
-    /** Your own published posts: the given TikTok account's, or the phone's own (browser) posts. */
-    fun ownEvidence(country: Country, tiktokAccountId: String?): Evidence {
-        val ev = Evidence()
-        val tz = zone(country.primaryZone)
-        db.tx {
-            val posts = where("posts") {
-                it.str("status") == "published" && it.long("views") > 0 &&
-                    (if (tiktokAccountId != null) it.str("tiktok_account_id") == tiktokAccountId else it.str("post_mode") == "BROWSER")
-            }
-            if (posts.size < 3) return@tx
-            val med = median(posts.map { it.long("views") }).takeIf { it != 0.0 } ?: 1.0
-            for (p in posts) {
-                val local = java.time.Instant.ofEpochMilli(p.long("created_at")).atZone(tz).toLocalDateTime()
-                ev.add(DAYS[dayIndex(local)] in country.weekend, local.hour, p.long("views") / med)
-            }
-        }
-        return ev
-    }
-
     /** Throws NoSuchElementException for an unsupported country. */
-    fun bestTimes(code: String, postsPerDay0: Int = 3, tiktokAccountId: String? = null): Obj {
+    fun bestTimes(code: String, postsPerDay0: Int = 3): Obj {
         val country = COUNTRIES[code.uppercase()] ?: throw NoSuchElementException(code)
         val postsPerDay = postsPerDay0.coerceIn(1, 6)
         val lib = libraryEvidence(country)
-        val own = ownEvidence(country, tiktokAccountId)
-        val grid = scoreGrid(country, listOf(lib to 8.0, own to 5.0))
+        val grid = scoreGrid(country, listOf(lib to 8.0))
         val hourly = grid.map { row -> DoubleArray(row.size / 2) { row[it * 2] } }
         val lo = hourly.minOf { r -> r.minOrNull()!! }
         val hi = hourly.maxOf { r -> r.maxOrNull()!! }
@@ -251,7 +231,6 @@ class Timing(private val db: Db) {
 
         val sources = mutableListOf<Any?>("engagement baseline")
         if (lib.posts > 0) sources += "${lib.posts} library posts from ${country.name} accounts"
-        if (own.posts > 0) sources += "${own.posts} of your published posts"
         return obj(
             "country" to country.code,
             "name" to country.name,
@@ -264,8 +243,7 @@ class Timing(private val db: Db) {
             "heatmap" to hourly.map { row -> row.map { Math.round((it - lo) / span * 1000) / 1000.0 }.toMutableList() }.toMutableList(),
             "sources" to sources,
             "confidence" to when {
-                own.posts >= 30 -> "high"
-                lib.posts + own.posts >= 40 -> "medium"
+                lib.posts >= 40 -> "medium"
                 else -> "baseline"
             },
         )

@@ -1,8 +1,5 @@
 package com.slidemill.core
 
-import java.io.File
-import java.time.Instant
-import java.util.Base64
 import kotlin.random.Random
 
 class LibraryError(message: String) : RuntimeException(message)
@@ -10,26 +7,19 @@ class LibraryError(message: String) : RuntimeException(message)
 /**
  * Slideshow library (port of app/library.py): public TikTok accounts and slideshow posts in a
  * searchable database. Post URLs and profile stats come from the public pages over plain HTTP; a
- * profile's post list comes from the platform (the phone's TikTok page) or Apify.
+ * profile's post list comes from the platform (the phone's TikTok page). Claude reads the slide text
+ * off the images ([unread] / [saveSlideTexts]); no AI key is involved.
  */
 class Library(
     private val db: Db,
-    private val store: Store,
-    private val llm: Llm,
     private val images: Images,
     private val platform: Platform,
-    private val mediaDir: File,
-    private val pipeline: Pipeline,
 ) {
     companion object {
         val REHYDRATION_RE = Regex("<script id=\"__UNIVERSAL_DATA_FOR_REHYDRATION__\"[^>]*>(.*?)</script>", RegexOption.DOT_MATCHES_ALL)
         val POST_URL_RE = Regex("tiktok\\.com/@([\\w.\\-]+)/(?:video|photo)/(\\d+)")
         val PROFILE_URL_RE = Regex("tiktok\\.com/@([\\w.\\-]+)/?(?:\\?|$)")
         val SHORT_URL_RE = Regex("^https?://(?:vm|vt)\\.tiktok\\.com/\\w+")
-        const val APIFY_ACTOR = "clockworks~tiktok-scraper"
-        const val CLASSIFY_PROMPT = "You categorize TikTok accounts for a creator-inspiration database."
-        const val READ_PROMPT = "These images are the slides of one TikTok photo carousel, in order. Transcribe the overlay text on each slide " +
-            "exactly as written (keep line breaks as spaces). Use an empty string for slides without overlay text."
 
         private fun firstUrls(urls: Any?): MutableList<Any?> =
             (urls as? List<*>).orEmpty().filter { it is String && it.startsWith("http") }.toMutableList()
@@ -65,34 +55,6 @@ class Library(
                 "shares" to stats.long("shareCount"),
                 "saves" to stats.long("collectCount"),
                 "posted_at" to item.long("createTime"),
-            )
-        }
-
-        fun normalizeApifyItem(it: Map<String, Any?>): Obj {
-            val author = it.objAt("authorMeta")
-            val slides = it.objs("slideshowImageLinks").map { s -> firstUrls(listOf(s["downloadLink"], s["tiktokLink"])) }
-            val music = it.objAt("musicMeta")
-            var posted = it.long("createTime")
-            if (posted == 0L && it.str("createTimeISO").isNotEmpty()) {
-                posted = runCatching { Instant.parse(it.str("createTimeISO")).epochSecond }.getOrDefault(0)
-            }
-            return obj(
-                "id" to it.str("id"),
-                "username" to author.str("name"),
-                "author" to obj(
-                    "nickname" to author.str("nickName"), "avatar" to author.str("avatar"), "bio" to author.str("signature"),
-                    "bio_link" to author.str("bioLink"), "verified" to author.bool("verified"), "region" to author.str("region"),
-                    "followers" to author.long("fans"), "following" to author.long("following"),
-                    "total_likes" to author.long("heart"), "video_count" to author.long("video"),
-                ),
-                "description" to it.str("text"),
-                "is_slideshow" to (it.bool("isSlideshow") || slides.isNotEmpty()),
-                "slide_urls" to slides.toMutableList<Any?>(),
-                "cover_urls" to firstUrls(listOf(it.objAt("videoMeta")["coverUrl"])),
-                "music" to listOf(music.str("musicName"), music.str("musicAuthor")).filter { s -> s.isNotEmpty() }.joinToString(" - "),
-                "views" to it.long("playCount"), "likes" to it.long("diggCount"), "comments" to it.long("commentCount"),
-                "shares" to it.long("shareCount"), "saves" to it.long("collectCount"),
-                "posted_at" to posted,
             )
         }
 
@@ -159,23 +121,6 @@ class Library(
     private fun resolveShort(url: String): String = runCatching { Net.get(url, mapOf("User-Agent" to Net.BROWSER_UA), 20).url }.getOrDefault(url)
 
     // --- Apify ------------------------------------------------------------------------------------
-
-    fun apifyAvailable(): Boolean = store.get("apify_token").isNotEmpty()
-
-    fun apifyScrape(profiles: List<String>? = null, hashtags: List<String>? = null, queries: List<String>? = null, maxPosts: Int = 30): List<Obj> {
-        val token = store.get("apify_token")
-        if (token.isEmpty()) throw LibraryError("Discovery by search/hashtag needs an Apify token (Settings -> APIFY_TOKEN).")
-        val body = obj("resultsPerPage" to maxPosts, "shouldDownloadVideos" to false, "shouldDownloadCovers" to false)
-        profiles?.let { body["profiles"] = it.toMutableList<Any?>() }
-        hashtags?.let { body["hashtags"] = it.toMutableList<Any?>() }
-        queries?.let { body["searchQueries"] = it.toMutableList<Any?>() }
-        val resp = Net.postJson(Net.withQuery("https://api.apify.com/v2/acts/$APIFY_ACTOR/run-sync-get-dataset-items", mapOf("token" to token)), body, timeoutSec = 330)
-        if (resp.status >= 400) throw LibraryError("Apify error ${resp.status}: ${resp.text.take(300)}")
-        @Suppress("UNCHECKED_CAST")
-        return (resp.json() as? List<Any?>).orEmpty().mapNotNull { it as? Obj }.filter { it.str("id").isNotEmpty() }.map { normalizeApifyItem(it) }
-    }
-
-    // --- persistence -------------------------------------------------------------------------------
 
     /** Store the first candidate URL that decodes as an image; "" if none do. */
     private fun download(candidates: List<String>, folder: String): String {
@@ -265,121 +210,48 @@ class Library(
         return touched.toList()
     }
 
-    // --- AI enrichment -------------------------------------------------------------------------------
+    // --- slide text, read by Claude --------------------------------------------------------------
 
-    fun classifyProfile(profileId: String) {
-        if (!llm.configured()) return
-        val text = db.tx {
-            val p = get("library_profiles", profileId) ?: return@tx null
-            val captions = where("library_posts") { it.str("profile_id") == profileId }.sortedByDescending { it.long("views") }
-                .take(12).map { it.str("description") }.filter { it.isNotEmpty() }
-            "@${p.str("username")} (${p.str("nickname")})\nbio: ${p.str("bio")}\nlink: ${p.str("bio_link")}\ntop captions:\n" +
-                captions.joinToString("\n") { "- $it" }
-        } ?: return
-        val result = try { llm.completeJson(CLASSIFY_PROMPT, text, Shapes.PROFILE_CLASSIFICATION) } catch (e: LlmError) {
-            platform.log("classification skipped for $profileId: ${e.message}")
-            return
-        }
-        db.tx {
-            get("library_profiles", profileId)?.let {
-                it["niche"] = result.str("niche").trim().lowercase().take(64)
-                it["product_medium"] = result.str("product_medium")
-            }
-        }
+    /** Library slideshows whose slide text nobody has read yet, most viewed first. */
+    fun unread(limit: Int): List<Obj> = db.tx {
+        where("library_posts") { it.bool("is_slideshow") && it.strings("images").isNotEmpty() && it.strings("slide_texts").none { t -> t.isNotBlank() } }
+            .sortedByDescending { it.long("views") }.take(limit).map { it.copyObj() }
     }
 
-    /** Read slide text off a library slideshow with a vision model. */
-    fun analyzePost(postId: String): List<String> {
-        val paths = db.tx { get("library_posts", postId)?.strings("images") } ?: throw LibraryError("post not found")
-        if (paths.isEmpty()) throw LibraryError("This post has no slide images to read.")
-        val cfg = llm.resolve()
-        if (cfg == null || !cfg.vision) throw LibraryError("Reading slide text needs a vision-capable AI key (Anthropic, OpenAI, Gemini, xAI, Mistral or OpenRouter).")
-        val dataUrls = paths.take(20).map { "data:image/jpeg;base64," + Base64.getEncoder().encodeToString(File(mediaDir, it).readBytes()) }
-        val result = try {
-            llm.completeJson(READ_PROMPT, "${dataUrls.size} slides.", Shapes.SLIDE_TEXT_READ, images = dataUrls)
-        } catch (e: LlmError) {
-            throw LibraryError(e.message ?: "AI error")
-        }
-        val slides = result.strings("slides")
-        db.tx { get("library_posts", postId)?.set("slide_texts", slides.toMutableList<Any?>()) }
-        return slides
+    /** Store what Claude read off a library post's slides (one string per slide, in order). */
+    fun saveSlideTexts(postId: String, texts: List<String>) = db.tx {
+        val post = get("library_posts", postId) ?: throw LibraryError("Library post $postId not found.")
+        post["slide_texts"] = texts.map { it.trim() }.toMutableList<Any?>()
     }
 
-    /** (reference block for the writer, default topic) for remixing a library post. */
-    fun referenceText(postId: String): Pair<String, String> = db.tx {
-        val post = get("library_posts", postId) ?: throw LibraryError("post not found")
-        val slides = post.strings("slide_texts")
-        val lines = mutableListOf(
-            "caption: ${post.str("description")}",
-            "views: ${"%,d".format(post.long("views"))}  likes: ${"%,d".format(post.long("likes"))}  slides: ${post.strings("images").size}",
-        )
-        slides.forEachIndexed { i, t -> if (t.isNotEmpty()) lines += "slide ${i + 1}: $t" }
-        val topic = slides.firstOrNull()?.takeIf { it.isNotEmpty() }
-            ?: post.str("description").replace(Regex("#\\S+"), "").trim().ifEmpty { "the same topic" }
-        lines.joinToString("\n") to topic
-    }
+    // --- importing ------------------------------------------------------------------------------
 
-    // --- jobs ----------------------------------------------------------------------------------------
-
-    fun importJob(jobId: String, rawItems: List<String>, maxPosts: Int) {
-        pipeline.job(jobId, status = "running", message = "Starting…")
-        var done = 0
-        val errors = mutableListOf<String>()
-        val profileIds = sortedSetOf<String>()
+    /** Import TikTok accounts (usernames or URLs) or single post URLs. Returns a line per item. */
+    fun add(rawItems: List<String>, maxPosts: Int): List<String> = rawItems.map { raw ->
         try {
-            for (raw in rawItems) {
-                try {
-                    val (kind, value) = parseItem(raw, ::resolveShort)
-                    if (kind == "post") {
-                        pipeline.job(jobId, message = "Fetching $value")
-                        profileIds += savePosts(listOf(fetchPost(value)))
-                    } else {
-                        pipeline.job(jobId, message = "Fetching @$value")
-                        profileIds += importProfile(value, maxPosts)
-                    }
-                    done++
-                } catch (e: Exception) {
-                    errors += "$raw: ${e.message}"
+            val (kind, value) = parseItem(raw, ::resolveShort)
+            if (kind == "post") {
+                savePosts(listOf(fetchPost(value)))
+                "$raw: imported the post"
+            } else {
+                importProfile(value, maxPosts)
+                val n = db.tx {
+                    val pid = where("library_profiles") { it.str("username") == value }.firstOrNull()?.str("id")
+                    where("library_posts") { it.str("profile_id") == pid && it.bool("is_slideshow") }.size
                 }
-                pause()
+                "@$value: $n slideshow posts in the library"
             }
-            profileIds.forEach { classifyProfile(it) }
-            pipeline.job(
-                jobId,
-                status = if (done > 0) "completed" else "failed",
-                message = "Imported $done/${rawItems.size}" + if (errors.isNotEmpty()) ". Errors: ${errors.joinToString("; ").take(1500)}" else "",
-                result = obj("profile_ids" to profileIds.toMutableList<Any?>()),
-            )
         } catch (e: Exception) {
-            pipeline.job(jobId, status = "failed", message = (e.message ?: e.toString()).take(2000))
-        }
+            "$raw: failed (${e.message})"
+        }.also { pause() }
     }
 
     fun importProfile(username: String, maxPosts: Int): Set<String> {
-        if (apifyAvailable()) {
-            val ids = savePosts(apifyScrape(profiles = listOf(username), maxPosts = maxPosts)).toSet()
-            if (ids.isNotEmpty()) return ids
-        }
         val info = fetchProfile(username)
         val pid = upsertProfile(info)
         val posts = platform.listProfilePosts(info.str("username"), maxPosts).map { normalizeWebItem(it) }
         savePosts(posts)
         return setOf(pid)
-    }
-
-    fun discoverJob(jobId: String, query: String, maxPosts: Int) {
-        pipeline.job(jobId, status = "running", message = "Searching TikTok for '$query'…")
-        try {
-            val q = query.trim()
-            val posts = if (q.startsWith("#")) apifyScrape(hashtags = listOf(q.trimStart('#')), maxPosts = maxPosts)
-            else apifyScrape(queries = listOf(q), maxPosts = maxPosts)
-            pipeline.job(jobId, message = "Saving ${posts.size} posts…")
-            val ids = savePosts(posts, slideshowsOnly = true)
-            ids.forEach { classifyProfile(it) }
-            pipeline.job(jobId, status = "completed", message = "Found ${ids.size} slideshow accounts", result = obj("profile_ids" to ids.toMutableList<Any?>()))
-        } catch (e: Exception) {
-            pipeline.job(jobId, status = "failed", message = (e.message ?: e.toString()).take(2000))
-        }
     }
 
     /** Daily refresh of tracked profiles (stats + new posts). */

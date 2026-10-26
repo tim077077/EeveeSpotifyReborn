@@ -1,0 +1,163 @@
+package com.slidemill.core
+
+import java.io.File
+import java.util.concurrent.Executors
+
+open class PipelineError(message: String) : RuntimeException(message)
+
+/**
+ * Slideshows Claude writes: build the spec from Claude's plan, find or generate the backgrounds,
+ * render the slides, and save them to the user's TikTok Studio drafts through the phone's TikTok tab.
+ *
+ * A slideshow row keeps the draft attempt's outcome in `draft`: {status: saving | saved | failed,
+ * draft_id, error, at}, so a save that outlives Claude's tool call is still reported truthfully.
+ */
+class Studio(
+    private val db: Db,
+    private val platform: Platform,
+    private val mediaDir: File,
+    private val imageGen: ImageGen,
+    private val images: Images,
+    private val renderer: Renderer,
+) {
+    val sources = listOf("auto", "stock", "ai")
+
+    fun specFromPlan(plan: Map<String, Any?>, aspectRatio: String): Obj {
+        val slides = plan.objs("slides").map { ps ->
+            Models.SLIDE.of(obj(
+                "role" to ps.str("role", "body"),
+                "text_items" to ps.objs("text_items").map { Models.TEXT_ITEM.of(it) }.toMutableList<Any?>(),
+                "image_query" to ps.str("image_query"), "image_prompt" to ps.str("image_prompt"),
+            ))
+        }
+        return Models.SPEC.of(obj(
+            "title" to plan.str("title", "Untitled slideshow"),
+            "aspect_ratio" to aspectRatio,
+            "text_position" to plan.str("text_position", "center"),
+            "background_opacity" to 30L,
+            "slides" to slides.take(20).toMutableList<Any?>(),
+        ))
+    }
+
+    /** Store a new slideshow (status "rendering"); [build] fills it in. */
+    fun create(plan: Map<String, Any?>, aspectRatio: String): String {
+        val spec = specFromPlan(plan, aspectRatio)
+        return db.tx {
+            insert("slideshows", obj(
+                "title" to plan.str("title"), "status" to "rendering", "spec" to spec,
+                "caption" to plan.str("caption").take(89), "description" to plan.str("description"),
+                "rendered" to arr(), "error" to "", "draft" to null, "prediction" to null,
+            ))
+        }.str("id")
+    }
+
+    /** Backgrounds, then the slides. Never throws: a failure is recorded on the row. */
+    fun build(id: String, source: String) {
+        try {
+            val spec = db.tx { get("slideshows", id)?.objAt("spec")?.copyObj() } ?: throw PipelineError("slideshow not found")
+            assignImages(spec, source)
+            db.tx { get("slideshows", id)?.set("spec", spec) }
+            val outDir = File(mediaDir, "slideshows/$id")
+            if (outDir.exists()) outDir.deleteRecursively()
+            val rendered = renderer.renderSlideshow(Models.SPEC.of(spec), outDir)
+            db.tx {
+                get("slideshows", id)?.let {
+                    it["rendered"] = rendered.toMutableList<Any?>()
+                    it["status"] = "completed"
+                    it["error"] = ""
+                }
+            }
+        } catch (x: Exception) {
+            platform.log("render of $id failed: $x")
+            db.tx { get("slideshows", id)?.let { it["status"] = "failed"; it["error"] = x.message ?: x.toString() } }
+        }
+    }
+
+    /** Fill each slide's background: stock search (Pexels/Unsplash key) or AI generation, AI being the fallback. */
+    fun assignImages(spec: Obj, source0: String) {
+        val source = if (source0 == "auto") (if (images.providers().isNotEmpty()) "stock" else "ai") else source0
+        val orientation = images.orientationFor(spec.str("aspect_ratio"))
+        val usedUrls = mutableSetOf<String>()
+        val needsAi = mutableListOf<Obj>()
+        for (slide in spec.objs("slides")) {
+            if (slide.strOrNull("image") != null) continue
+            val picked = if (source == "stock") images.autoImage(slide.str("image_query").ifEmpty { spec.str("title") }, orientation, usedUrls)?.str("path") else null
+            if (picked != null) slide["image"] = picked else needsAi += slide
+        }
+        if (needsAi.isEmpty()) return
+        val pool = Executors.newFixedThreadPool(4)
+        try {
+            val futures = needsAi.map { slide -> pool.submit<String?> { aiBackground(slide, spec) } }
+            needsAi.forEachIndexed { i, slide -> slide["image"] = futures[i].get() }
+        } finally {
+            pool.shutdown()
+        }
+    }
+
+    private fun aiBackground(slide: Map<String, Any?>, spec: Map<String, Any?>): String? {
+        val prompt = slide.str("image_prompt").ifEmpty { slide.str("image_query") }.ifEmpty { spec.str("title") }
+        val data = try {
+            imageGen.generate(prompt, spec.str("aspect_ratio", "4:5"))
+        } catch (e: Exception) {
+            platform.log("AI background failed (${e.message}); slide keeps the plain background")
+            return null
+        }
+        val (rel, w, h) = images.storeBytes(data, "library/ai")
+        db.tx { insert("images", obj("path" to rel, "source" to "ai", "source_url" to "", "query" to prompt.take(500), "width" to w, "height" to h, "use_count" to 1L)) }
+        return rel
+    }
+
+    /**
+     * Save a rendered slideshow to the user's TikTok Studio drafts, now, through the phone's TikTok tab.
+     * Blocks until TikTok answers; returns the draft record. Throws [DraftError] with the reason
+     * (also recorded on the slideshow).
+     */
+    fun saveDraft(id: String, tab: TikTokTab?, again: Boolean = false): Obj {
+        val (title, caption, slides) = db.tx {
+            val s = get("slideshows", id) ?: throw PipelineError("Slideshow $id not found.")
+            when (s.str("status")) {
+                "rendering" -> throw DraftError("Still rendering: try again in a minute.")
+                "failed" -> throw DraftError("This slideshow failed to render (${s.str("error")}); create it again.")
+            }
+            val draft = s.objOrNull("draft")
+            if (draft?.str("status") == "saving") throw DraftError("A save of this slideshow is already running.")
+            if (draft?.str("status") == "saved" && !again) {
+                throw DraftError("Already in TikTok drafts (draft id ${draft.str("draft_id")}). Pass again=true to save another copy.")
+            }
+            s["draft"] = obj("status" to "saving", "draft_id" to "", "error" to "", "at" to Db.iso(Db.nowMs()))
+            Triple(
+                s.str("caption").ifEmpty { s.str("title") }.take(90), // the line shown on the carousel
+                s.str("description"), // the caption with hashtags
+                s.strings("rendered").map { File(mediaDir, it) },
+            )
+        }
+        val record = try {
+            if (tab == null) throw DraftError("The phone's TikTok tab isn't running: open the Slidemill app on the phone.")
+            if (slides.isEmpty() || slides.any { !it.isFile }) throw DraftError("The rendered slides are missing: create the slideshow again.")
+            obj("status" to "saved", "draft_id" to tab.saveDraft(title, caption, slides), "error" to "")
+        } catch (x: Exception) {
+            obj("status" to "failed", "draft_id" to "", "error" to (x.message ?: x.toString()))
+        }
+        record["at"] = Db.iso(Db.nowMs())
+        db.tx { get("slideshows", id)?.set("draft", record) }
+        if (record.str("status") != "saved") throw DraftError(record.str("error"))
+        return record
+    }
+
+    fun delete(id: String): Boolean {
+        val s = db.tx { delete("slideshows", id) } ?: return false
+        s.strings("rendered").forEach { images.deleteFile(it) }
+        return true
+    }
+
+    /** Rows killed mid-flight by a closed app. */
+    fun recoverInterrupted() = db.tx {
+        for (s in where("slideshows") { it.str("status") == "rendering" }) {
+            s["status"] = "failed"
+            s["error"] = "Interrupted (the app was closed while this was rendering)."
+        }
+        for (s in where("slideshows") { it.objOrNull("draft")?.str("status") == "saving" }) {
+            s["draft"] = obj("status" to "failed", "draft_id" to "", "error" to "Interrupted (the app was closed while saving). Check TikTok Studio drafts before saving again.", "at" to Db.iso(Db.nowMs()))
+        }
+    }
+}

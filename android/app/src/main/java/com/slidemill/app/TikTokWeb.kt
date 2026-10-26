@@ -23,8 +23,8 @@ import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.Executors
 
 /**
- * One long-lived tiktok.com WebView shared by the TikTok tab (where you log in) and the poster
- * service (which posts in the background). It runs the same tiktok-inject.js as the browser
+ * One long-lived tiktok.com WebView shared by the TikTok tab (where you log in) and Claude's
+ * draft saves ([AndroidTikTok], in the background). It runs the same tiktok-inject.js as the browser
  * extension; android-bridge.js plays the extension bridge's role, and native code does what the
  * extension's background worker did (CDN uploads with TikTok's Origin/Referer).
  */

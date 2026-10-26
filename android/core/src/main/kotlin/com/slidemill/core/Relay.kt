@@ -15,7 +15,7 @@ import javax.crypto.spec.SecretKeySpec
  * Keeps the phone connected to the user's Slidemill relay (a free Cloudflare Worker, relay/), so
  * Claude can reach the phone's MCP server at a fixed https address while the phone has no public
  * one. The phone dials out and holds a WebSocket open; the relay hands it each request from Claude
- * and returns the answer. Only MCP goes through it: the dashboard and the REST API stay on 127.0.0.1.
+ * and returns the answer.
  *
  * The phone's secret proves it to the relay; Claude's URL carries only a token derived from it, so
  * that URL can't be used to impersonate the phone.

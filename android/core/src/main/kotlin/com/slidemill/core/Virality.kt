@@ -1,24 +1,18 @@
 package com.slidemill.core
 
-import java.io.File
-import java.util.Base64
 import kotlin.math.ln
 
 /**
  * Virality prediction for a slideshow, before it's posted (Slidemill's take on Higgsfield's Virality
  * Predictor, built for photo carousels instead of video).
  *
- * Higgsfield runs a brain-response model over a video and turns predicted cortex activity into a
- * hook score, a hold rate and a viral-potential number. A slideshow has no motion or sound, so here
- * a vision model reads the actual rendered slides like a scrolling viewer (calibrated with real hooks
- * from your library that over- and under-performed), and plain rules check the format. Every
- * prediction is stored, so analytics can later show whether it actually tracks your views.
+ * Claude is the reader: [briefFor] hands it the rules, the slideshow and real library posts to rank
+ * it against blind (calibrated with real hooks that over- and under-performed); Claude sends back its
+ * read, and [predict] turns it plus plain format rules into the score, attention curve and rank
+ * among real posts. No AI key is involved.
  */
-class Virality(private val db: Db, private val llm: Llm, private val mediaDir: File) {
+class Virality(private val db: Db) {
     companion object {
-        const val BACKTEST_MIN = 8
-        const val NOISE_POSTS = 2
-        const val BACKTEST_VERSION = 2 // results measured before the read and the ranking shared one call don't pick a method
         const val LETTERS = "ABCDEFG"
         const val MAX_IMAGES = 12 // some vision APIs cap images per request (Mistral: reportedly 8-12); past this, rank by text alone
 
@@ -201,22 +195,8 @@ For each slide in order, give swipe_on: the percent of viewers who reach this sl
         )
     }
 
-    fun features(result: Map<String, Any?>, rank: Map<String, Any?>?, similar: Map<String, Any?>?): Obj {
-        val d = result.objAt("dimensions")
-        return obj(
-            "current" to result.int("viral_potential"), "hook" to result.int("hook_score"), "hold" to result.int("hold_rate"),
-            "engagement" to Math.round(listOf(d.dbl("curiosity"), d.dbl("relatability"), d.dbl("shareability"), result.dbl("payoff")).average()).toInt(),
-            "format" to result.int("format_score"), "rank" to rank?.int("score"), "similar" to similar?.int("score"),
-        )
-    }
-
     private fun slideTexts(spec: Map<String, Any?>): List<String> =
         spec.objs("slides").map { s -> s.objs("text_items").joinToString(" ") { it.str("text") }.trim() }.filter { it.isNotEmpty() }
-
-    private fun picked(bt: Obj?): Pair<Obj, String> {
-        val b = bt ?: obj()
-        return b to if (b.long("version") == BACKTEST_VERSION.toLong()) b.str("method").ifEmpty { "current" } else "current"
-    }
 
     /** A rendered slideshow and its inputs, as predict and briefFor both need them. */
     private fun subject(showId: String): Triple<Obj, Obj, List<Obj>> {
@@ -240,52 +220,25 @@ For each slide in order, give swipe_on: the percent of viewers who reach this sl
      * the method the library test picked. The read comes from the app's AI key (one call), or is `claudeRead`:
      * Claude's own answer to [briefFor]. Unchanged slideshows return the stored prediction (no call).
      */
-    fun predict(showId: String, claudeRead: Map<String, Any?>? = null): Obj {
+    /** Score a slideshow from Claude's read (its answer to [briefFor]) and store the result on it. */
+    fun predict(showId: String, claudeRead: Map<String, Any?>): Obj {
         val (show, spec, rows) = subject(showId)
-        val (bt, method) = picked(lastBacktest())
-        val texts = slideTexts(spec)
-        val fingerprint = java.security.MessageDigest.getInstance("SHA-1").digest(Json.write(listOf(
-            texts, show.strings("rendered"), show.str("caption"), show.str("description"), bt["ran_at"], method, rows.size,
-        )).toByteArray()).joinToString("") { "%02x".format(it) }
-        val stored = show.objAt("prediction")
-        if (claudeRead == null && stored.str("fingerprint") == fingerprint) return stored.also { it["cached"] = true }
         val refs = references(rows)
-        val (result, rank) = if (claudeRead != null) {
-            val b = brief(spec, show.str("caption"), show.str("description"), show.strings("rendered"), refs = refs, seed = showId)
-            @Suppress("UNCHECKED_CAST")
-            val checked = try {
-                b.schema.validate(claudeRead) as Map<String, Any?>
-            } catch (x: SchemaError) {
-                throw PipelineError("The read doesn't match answer_schema: ${x.message}")
-            }
-            score(checked, spec, visionUsed = true, calibrated = b.calibrated, reader = "Claude's") to
-                refs?.let { rankFromOrder(checked.strings("rank_order"), it, b.pos) }
-        } else {
-            read(spec, show.str("caption"), show.str("description"), show.strings("rendered"), refs = refs, seed = showId).let { it.first to it.second }
+        val b = brief(spec, show.str("caption"), show.str("description"), show.strings("rendered"), refs = refs, seed = showId)
+        @Suppress("UNCHECKED_CAST")
+        val read = try {
+            b.schema.validate(claudeRead) as Map<String, Any?>
+        } catch (x: SchemaError) {
+            throw PipelineError("The read doesn't match answer_schema: ${x.message}")
         }
-        val similar = Methods.similarEvidence(texts.joinToString(" "), rows)
-        if (similar != null) result["similar"] = similar
-        if (rank != null) result["rank"] = rank
-        val value = if (method != "current") Methods.methodValue(method, features(result, rank, similar), bt) else null
-        result["ai_score"] = result.int("viral_potential")
-        result["method"] = "current"
-        if (value != null) {
-            result["viral_potential"] = value
-            val (v, tag) = verdict(value)
-            result["verdict"] = v
-            result["verdict_tag"] = tag
-            val rho = bt.objs("methods").firstOrNull { it.str("method") == method }?.get("spearman")
-            result["basis"] = result.str("basis") + "; final score from ${Methods.LABELS[method]!!.lowercase()} (the library test's pick, ρ = $rho)"
-            result["method"] = method
-        }
-        result["fingerprint"] = fingerprint
+        val result = score(read, spec, visionUsed = true, calibrated = b.calibrated, reader = "Claude's")
+        refs?.let { rankFromOrder(read.strings("rank_order"), it, b.pos) }?.let { result["rank"] = it }
+        Methods.similarEvidence(slideTexts(spec).joinToString(" "), rows)?.let { result["similar"] = it }
         db.tx { get("slideshows", showId)?.set("prediction", result) }
         return result
     }
 
-    private fun dataUrl(path: String) = "data:image/jpeg;base64," + Base64.getEncoder().encodeToString(File(mediaDir, path).readBytes())
-
-    /** Everything a reader (the app's AI key, or Claude itself through MCP) is given to score a slideshow. */
+    /** Everything Claude is given to score a slideshow. */
     class Brief(
         val user: String, val images: List<String>, val schema: Schema.Object,
         val refs: List<Obj>?, val pos: Int, val calibrated: Int,
@@ -340,31 +293,6 @@ For each slide in order, give swipe_on: the percent of viewers who reach this sl
         return Brief(user, attached, readSchema(refs != null, transcribe), refs, pos, good.size + bad.size)
     }
 
-    /** One AI call with the app's key. Returns (result, rank, slide texts). */
-    private fun read(
-        spec0: Obj, caption: String, description: String, images: List<String>, exclude: String = "",
-        refs: List<Obj>? = null, seed: String = "", transcribe: Boolean = false,
-    ): Triple<Obj, Obj?, List<String>> {
-        var spec = spec0
-        val slides = spec.objs("slides")
-        val cfg = llm.resolve() ?: throw LlmError("Add an AI key in Settings first.")
-        if (transcribe && !cfg.vision) throw LlmError("Reading slide text needs a vision-capable AI key.")
-        val b = brief(spec, caption, description, images, exclude, refs, seed, transcribe, cfg.vision)
-        val read = llm.completeJson(SYSTEM_PROMPT, b.user, b.schema, images = b.images.map { dataUrl(it) }.ifEmpty { null }, cfg = cfg)
-        var texts = slideTexts(spec)
-        if (transcribe) {
-            val got = read.strings("slide_texts").map { it.trim() }.take(slides.size)
-            spec = Models.SPEC.of(spec.copyObj().also { sp ->
-                sp["slides"] = sp.objs("slides").mapIndexed { i, sl ->
-                    sl.also { it["text_items"] = got.getOrNull(i)?.takeIf { t -> t.isNotEmpty() }?.let { t -> arr(obj("text" to t)) } ?: arr() }
-                }.toMutableList<Any?>()
-            })
-            texts = got.filter { it.isNotEmpty() }
-        }
-        val rank = refs?.let { rankFromOrder(read.strings("rank_order"), it, b.pos) }
-        return Triple(score(read, spec, visionUsed = cfg.vision, calibrated = b.calibrated), rank, texts)
-    }
-
     /** Turn the model's read plus the rule checks into the numbers shown in the app. */
     fun score(read: Map<String, Any?>, spec: Map<String, Any?>, visionUsed: Boolean, calibrated: Int, reader: String = "AI"): Obj {
         val n = spec.objs("slides").size
@@ -416,123 +344,4 @@ For each slide in order, give swipe_on: the percent of viewers who reach this sl
             "predicted_at" to Db.iso(Db.nowMs()),
         )
     }
-
-    private fun summary(rho: Double?, what: String): String = when {
-        rho == null -> "Not enough variation in views yet."
-        rho >= 0.4 -> "The score tracks $what well (ρ = ${"%.2f".format(rho)}): trust it to pick between drafts."
-        rho >= 0.15 -> "The score weakly tracks $what (ρ = ${"%.2f".format(rho)}): use it as a tiebreaker."
-        else -> "The score isn't tracking $what (ρ = ${"%.2f".format(rho)}): don't rely on it yet."
-    }
-
-    /** Does the prediction track reality? Compare predicted scores with views of posted slideshows. */
-    fun calibration(): Obj {
-        val pairs = db.tx {
-            val out = mutableListOf<Pair<Double, Double>>()
-            for (s in where("slideshows") { it["prediction"] is Map<*, *> }) {
-                val views = where("posts") { it.str("slideshow_id") == s.str("id") && it.str("status") == "published" }.maxOfOrNull { it.long("views") } ?: continue
-                if (views <= 0) continue
-                out += s.objAt("prediction").dbl("viral_potential") to ln(views.toDouble())
-            }
-            out
-        }
-        val rho = spearman(pairs.map { it.first }, pairs.map { it.second })
-        return obj(
-            "posts" to pairs.size,
-            "spearman" to rho?.let { Math.round(it * 100) / 100.0 },
-            "summary" to if (pairs.size < 8) {
-                "Post at least 8 predicted slideshows to see whether the score tracks your views (${pairs.size} so far)."
-            } else summary(rho, "your views"),
-            "backtest" to lastBacktest(),
-        )
-    }
-
-    // --- backtest: race the methods on real library posts whose views are already known -------------
-
-    private fun librarySpec(post: Map<String, Any?>): Obj {
-        val texts = post.strings("slide_texts")
-        val slides = post.strings("images").take(10).mapIndexed { i, path ->
-            val t = texts.getOrNull(i).orEmpty()
-            obj("role" to if (i == 0) "hook" else "body", "image" to path,
-                "text_items" to if (t.isBlank()) mutableListOf<Any?>() else mutableListOf<Any?>(obj("text" to t)))
-        }
-        return Models.SPEC.of(obj("title" to post.str("description").take(80).ifEmpty { "Library post" }, "slides" to slides.toMutableList<Any?>()))
-    }
-
-    /**
-     * Score real library slideshows blind with every method (each post is left out of its own calibration
-     * examples, references and look-alikes), measure how well each ranks them like their real views did,
-     * and pick the method the app should use. One AI call per post: the read, the ranking and, for posts
-     * not read yet, the slide text all come back together. Throws PipelineError when the library is too small.
-     */
-    fun backtest(limit: Int = 20, progress: (Int, Int) -> Unit = { _, _ -> }): Obj {
-        val all = libraryRows().filter { it.strings("images").isNotEmpty() }
-        val alreadyRead = all.filter { it.bool("read") }
-        val sample = Methods.spread(if (alreadyRead.size >= limit) alreadyRead else all, limit) // read posts need no transcription
-        if (sample.size < BACKTEST_MIN) throw PipelineError(
-            "The library has ${sample.size} usable slideshows; it needs $BACKTEST_MIN. " +
-                "Add accounts in your niche (3+ slideshow posts each) to the Slideshow library first.",
-        )
-        val cfg = llm.resolve() ?: throw LlmError("Add an AI key in Settings first.")
-        val rows = mutableListOf<Obj>()
-        sample.forEachIndexed { n, row ->
-            val postId = row.str("id")
-            progress(n, sample.size)
-            if (!row.bool("read") && !cfg.vision) return@forEachIndexed // neither the slide text nor a way to read it
-            val post = db.tx { get("library_posts", postId)?.copyObj() } ?: return@forEachIndexed
-            val others = libraryRows().filter { it.str("id") != postId }
-            val images = post.strings("images")
-            val (result, rank, texts) = try {
-                read(librarySpec(post), post.str("description"), "", images, exclude = postId,
-                    refs = references(others), seed = postId, transcribe = !row.bool("read"))
-            } catch (e: RuntimeException) { return@forEachIndexed }
-            if (!row.bool("read") && texts.isNotEmpty()) {
-                db.tx { get("library_posts", postId)?.set("slide_texts", texts.toMutableList<Any?>()) } // the library gets read for free
-            }
-            val similar = Methods.similarEvidence(texts.joinToString(" "), others)
-            rows += obj(
-                "post_id" to postId, "url" to row.str("url"), "username" to row.str("username"),
-                "hook" to (texts.firstOrNull() ?: post.str("description").take(80)), "views" to row.long("views"),
-                "lift" to Methods.round2(Math.exp(row.dbl("lift"))), "lift_log" to row.dbl("lift"),
-                "score" to result.int("viral_potential"), "f" to features(result, rank, similar),
-            )
-        }
-        // Noise: the same slideshow read twice should get about the same score.
-        val drifts = rows.take(NOISE_POSTS).mapNotNull { r ->
-            val id = r.str("post_id")
-            val post = db.tx { get("library_posts", id)?.copyObj() } ?: return@mapNotNull null
-            val others = libraryRows().filter { it.str("id") != id }
-            try {
-                val again = read(librarySpec(post), post.str("description"), "", post.strings("images"), exclude = id, refs = references(others), seed = id).first
-                Math.abs(again.int("viral_potential") - r.int("score")).toDouble()
-            } catch (e: RuntimeException) { null }
-        }
-        progress(sample.size, sample.size)
-        val cmp = if (rows.size >= BACKTEST_MIN) Methods.compare(rows) else null
-        val rho = cmp?.methods?.first { it.str("method") == "current" }?.get("spearman") as? Double
-        var summary = if (cmp == null) "Only ${rows.size} library slideshows could be scored; the test needs $BACKTEST_MIN."
-        else summary(rho, "real views in your library")
-        if (cmp != null) {
-            if (cmp.winner != "current") {
-                val won = cmp.methods.first { it.str("method") == cmp.winner }
-                summary += " ${won.str("label")} did better (ρ = ${won["spearman"]}), so the app now scores with it."
-            } else if ((rho == null || rho < Methods.USEFUL) && cmp.methods.all { ((it["spearman"] as? Double) ?: 0.0) < Methods.USEFUL }) {
-                summary += " No other method tracked views either, so treat every score as a guess for now."
-            }
-        }
-        val out = obj(
-            "version" to BACKTEST_VERSION, "posts" to rows.size, "spearman" to rho, "summary" to summary,
-            "method" to (cmp?.winner ?: "current"), "methods" to (cmp?.methods ?: emptyList()).toMutableList<Any?>(),
-            "model" to cmp?.model, "populations" to (cmp?.populations ?: obj()),
-            "noise" to if (drifts.isEmpty()) null else Math.round(drifts.average() * 10) / 10.0,
-            "rows" to rows.sortedByDescending { it.int("score") }.map { r ->
-                val f = r.objAt("f")
-                (r.filterKeys { it != "f" && it != "lift_log" } + mapOf("rank" to f["rank"], "similar" to f["similar"])).toMutableMap()
-            }.toMutableList<Any?>(),
-            "ran_at" to Db.iso(java.time.Instant.now()),
-        )
-        db.tx { (get("state", "virality_backtest") ?: insert("state", obj("id" to "virality_backtest")))["result"] = out }
-        return out
-    }
-
-    fun lastBacktest(): Obj? = db.tx { get("state", "virality_backtest")?.get("result") as? Map<String, Any?> }?.toMutableMap()
 }

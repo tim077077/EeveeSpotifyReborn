@@ -83,6 +83,7 @@ const caption = "3 sleep fixes that work\nSave this #sleep #sleeptips";
 listeners.forEach((f) => f({ source: page, data: { __vbtt: "job", id: 2, job: { id: "p1", action: "draft", title: "Sleep fixes", caption, images: [png, png] } } }));
 const result = await done;
 assert.equal(result.ok, true, result.error);
+assert.equal(result.draftId, "46508480535"); // the app reports TikTok's draft id back to Claude
 assert.ok(!calls.some((c) => c.path.includes("/project/post/")), "a draft must never call the publish endpoint");
 const saves = calls.filter((c) => c.path === "/api/v1/draft/create_update/");
 assert.equal(saves.length, 1);

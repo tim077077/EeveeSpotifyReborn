@@ -21,28 +21,21 @@ import javax.imageio.IIOImage
 import javax.imageio.ImageIO
 import javax.imageio.ImageWriteParam
 
-/** The engine's platform on a desktop JVM: Java2D drawing, files from the repo, no encryption key store. */
+/** The engine's platform on a desktop JVM: Java2D drawing, fonts from the repo, no encryption key store. */
 class JvmPlatform(
     override val name: String = "android",
     private val repoRoot: File = findRepoRoot(),
     private val envMap: Map<String, String> = emptyMap(),
 ) : Platform {
-    val notices = mutableListOf<Notice>()
-    val videos = mutableListOf<File>()
+    /** What the "TikTok page" lists for a profile (tests fill it). */
+    val profilePosts = mutableMapOf<String, List<Obj>>()
 
     override fun env(name: String): String? = envMap[name]
     override fun encryptSecret(plain: String): String = "b64:" + Base64.getEncoder().encodeToString(plain.toByteArray())
     override fun decryptSecret(stored: String): String = String(Base64.getDecoder().decode(stored.removePrefix("b64:")))
     override val imaging: Imaging = Java2DImaging(File(repoRoot, "fonts"))
 
-    override fun exportVideo(frames: List<File>, secondsPerSlide: Double, target: File) {
-        target.parentFile.mkdirs()
-        target.writeBytes("fake mp4 of ${frames.size} frames".toByteArray())
-        videos += target
-    }
-
-    override fun asset(path: String): ByteArray? = File(repoRoot, path).takeIf { it.isFile }?.readBytes()
-    override fun notify(notice: Notice) { synchronized(notices) { notices += notice } }
+    override fun listProfilePosts(username: String, max: Int): List<Obj> = profilePosts[username].orEmpty().take(max)
     override fun defaultTimezone(): String = "Europe/Bucharest"
     override fun log(message: String) {}
 
@@ -50,7 +43,7 @@ class JvmPlatform(
         fun findRepoRoot(): File {
             var dir: File? = File("").absoluteFile
             while (dir != null) {
-                if (File(dir, "static/index.html").isFile && File(dir, "fonts").isDirectory) return dir
+                if (File(dir, "extension/tiktok-inject.js").isFile && File(dir, "fonts").isDirectory) return dir
                 dir = dir.parentFile
             }
             error("repo root not found")
