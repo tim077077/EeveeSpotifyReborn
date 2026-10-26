@@ -1,6 +1,6 @@
 # Connect Claude to Slidemill
 
-Slidemill is also an MCP server, both on a server and in the phone app. Add it to Claude as a custom connector, and Claude (in claude.ai, the Claude phone and desktop apps, or Claude Code) can research your library, write slideshows, look at the rendered slides, score them and save them to your TikTok Studio drafts, all in conversation.
+Slidemill is also an MCP server, both on a server and in the phone app. Add it to Claude as a custom connector, and Claude (in claude.ai, the Claude phone and desktop apps, or Claude Code) can research your library, write slideshows, look at the rendered slides, and score them, all in conversation. Each finished slideshow waits as a draft in the Slidemill app; you preview it there and tap **POST** to publish it live. Optionally, Claude also saves a copy to TikTok Studio's web drafts (those appear on tiktok.com/tiktokstudio, not in the TikTok app's Drafts).
 
 Claude is the writer. It sends a structured plan (`SlideshowPlan`), and Slidemill finds or generates the backgrounds and renders the slides. Writing uses your Claude plan. On the phone, Claude is also the scorer, so the phone app needs no AI key at all. The server version scores with the AI key in Settings.
 
@@ -21,7 +21,7 @@ You set it up once, from the phone's browser, in about 10 minutes:
 
 Claude can reach Slidemill whenever the app is running on the phone (the "Slidemill running" notification).
 
-**Drafts are saved inside the call.** `save_draft`, or `create_slideshow` with `save_draft: true`, uploads the slides from the phone's logged-in TikTok page and makes TikTok Studio's own "Save draft" request. The answer is TikTok's draft id, or the exact reason it failed (for example, not logged in to TikTok in the app). The result is also stored on the slideshow, so `view_slideshow` and the app show it.
+**Web drafts are saved inside the call** (optional; they show on tiktok.com/tiktokstudio, not in the TikTok app). `save_draft`, or `create_slideshow` with `save_draft: true`, uploads the slides from the phone's logged-in TikTok page and makes TikTok Studio's own "Save draft" request. The answer is TikTok's draft id, or the exact reason it failed (for example, not logged in to TikTok in the app). The result is also stored on the slideshow, so `view_slideshow` and the app show it.
 
 **Slow work doesn't time out.** Claude's apps give up on a tool call after about a minute, and generating backgrounds or uploading to TikTok can take longer on a phone. Past about 45 seconds, the tool answers with the slideshow's id, the phone finishes, and `view_slideshow` shows the outcome (the draft id or the error).
 

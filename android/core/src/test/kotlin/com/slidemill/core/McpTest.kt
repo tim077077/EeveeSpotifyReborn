@@ -3,6 +3,7 @@ package com.slidemill.core
 import kotlin.test.AfterTest
 import kotlin.test.Test
 import kotlin.test.assertEquals
+import kotlin.test.assertFailsWith
 import kotlin.test.assertTrue
 
 /** The phone as Claude sees it: Claude writes and decides, the phone renders and saves TikTok drafts in the same call. */
@@ -43,7 +44,7 @@ class McpTest {
         val init = result("initialize", obj("protocolVersion" to "2025-06-18", "capabilities" to obj(), "clientInfo" to obj("name" to "t", "version" to "1")))
         assertEquals("2025-06-18", init.str("protocolVersion"))
         assertEquals("Slidemill", init.objAt("serverInfo").str("name"))
-        assertTrue("TikTok Studio drafts" in init.str("instructions"))
+        assertTrue("taps POST" in init.str("instructions"))
         assertEquals("2025-11-25", result("initialize", obj("protocolVersion" to "1999-01-01")).str("protocolVersion"))
         val names = result("tools/list").objs("tools").map { it.str("name") }
         assertEquals(listOf(
@@ -80,6 +81,29 @@ class McpTest {
         assertTrue("Already in TikTok drafts (draft id 70000000001)" in text(twice), text(twice))
         assertTrue("draft id 70000000002" in text(call("save_draft", obj("slideshow_id" to id, "again" to true))))
         assertEquals(2, tiktok.saved.size)
+    }
+
+    @Test fun post_button_publishes_once_and_records_the_link() {
+        val id = idOf(create())
+        val post = e.studio.publish(id, tiktok)
+        assertEquals("posted", post.str("status"))
+        assertEquals("https://www.tiktok.com/@tim/photo/7500000000000000001", post.str("url"))
+        val (title, caption, slides) = tiktok.published.single()
+        assertEquals(plan.str("caption"), title)
+        assertEquals(plan.str("description"), caption)
+        assertEquals(4, slides.size)
+        assertTrue("7500000000000000001" in text(call("list_slideshows")))
+        // A second tap can't post a duplicate.
+        assertTrue("Already posted" in assertFailsWith<DraftError> { e.studio.publish(id, tiktok) }.message!!)
+        assertEquals(1, tiktok.published.size)
+
+        // TikTok refusing is recorded, and the slideshow can be posted again later.
+        val other = idOf(create())
+        tiktok.refuse = "spam"
+        assertTrue("spam" in assertFailsWith<DraftError> { e.studio.publish(other, tiktok) }.message!!)
+        assertEquals("failed", row(other).objAt("post").str("status"))
+        tiktok.refuse = null
+        assertEquals("posted", e.studio.publish(other, tiktok).str("status"))
     }
 
     @Test fun slides_claude_made_are_imported_and_saved_as_a_draft() {

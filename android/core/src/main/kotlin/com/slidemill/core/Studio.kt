@@ -11,6 +11,8 @@ open class PipelineError(message: String) : RuntimeException(message)
  *
  * A slideshow row keeps the draft attempt's outcome in `draft`: {status: saving | saved | failed,
  * draft_id, error, at}, so a save that outlives Claude's tool call is still reported truthfully.
+ * A live post made from the app's POST button is kept the same way in `post`: {status: posting |
+ * posted | failed, item_id, url, error, at}.
  */
 class Studio(
     private val db: Db,
@@ -191,6 +193,36 @@ class Studio(
         return record
     }
 
+    /**
+     * Publish a rendered slideshow as a live TikTok photo post through the phone's TikTok tab. Blocks
+     * until TikTok answers; returns the post record. Throws [DraftError] with the reason (also recorded).
+     */
+    fun publish(id: String, tab: TikTokTab?, sound: Boolean = true): Obj {
+        val (title, caption, slides) = db.tx {
+            val s = get("slideshows", id) ?: throw PipelineError("Slideshow $id not found.")
+            if (s.str("status") != "completed") throw DraftError("This slideshow isn't rendered (${s.str("status")}).")
+            when (s.objOrNull("post")?.str("status")) {
+                "posting" -> throw DraftError("It's already being posted.")
+                "posted" -> throw DraftError("Already posted: ${s.objAt("post").str("url")}")
+            }
+            s["post"] = obj("status" to "posting", "item_id" to "", "url" to "", "error" to "", "at" to Db.iso(Db.nowMs()))
+            Triple(s.str("caption").ifEmpty { s.str("title") }.take(90), s.str("description"), s.strings("rendered").map { File(mediaDir, it) })
+        }
+        val record = try {
+            if (tab == null) throw DraftError("The phone's TikTok tab isn't running: reopen the Slidemill app.")
+            if (slides.isEmpty() || slides.any { !it.isFile }) throw DraftError("The rendered slides are missing on this phone.")
+            val user = tab.username()
+            val itemId = tab.publish(title, caption, slides, sound)
+            obj("status" to "posted", "item_id" to itemId, "url" to "https://www.tiktok.com/@$user/photo/$itemId", "error" to "")
+        } catch (x: Exception) {
+            obj("status" to "failed", "item_id" to "", "url" to "", "error" to (x.message ?: x.toString()))
+        }
+        record["at"] = Db.iso(Db.nowMs())
+        db.tx { get("slideshows", id)?.set("post", record) }
+        if (record.str("status") != "posted") throw DraftError(record.str("error"))
+        return record
+    }
+
     fun delete(id: String): Boolean {
         val s = db.tx { delete("slideshows", id) } ?: return false
         s.strings("rendered").forEach { images.deleteFile(it) }
@@ -205,6 +237,9 @@ class Studio(
         }
         for (s in where("slideshows") { it.objOrNull("draft")?.str("status") == "saving" }) {
             s["draft"] = obj("status" to "failed", "draft_id" to "", "error" to "Interrupted (the app was closed while saving). Check TikTok Studio drafts before saving again.", "at" to Db.iso(Db.nowMs()))
+        }
+        for (s in where("slideshows") { it.objOrNull("post")?.str("status") == "posting" }) {
+            s["post"] = obj("status" to "failed", "item_id" to "", "url" to "", "error" to "Interrupted (the app was closed while posting). Check your TikTok profile before posting again.", "at" to Db.iso(Db.nowMs()))
         }
     }
 }
