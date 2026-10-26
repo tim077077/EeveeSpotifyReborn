@@ -174,7 +174,7 @@ class EngineService : Service() {
             username = user
             if (user.isEmpty()) return finish("Not logged in to TikTok: open the TikTok tab and log in")
             val res = engine.queue.claimNext(
-                // The tab saves drafts to TikTok Studio itself (drafts only go to the TikTok app while it can't).
+                // The tab saves drafts to TikTok Studio itself.
                 client = mapOf("version" to "android-3", "username" to user, "draft" to "1"),
                 draftsOnly = !Prefs.autoPost, // drafts aren't public, so they don't wait for auto-posting
             )

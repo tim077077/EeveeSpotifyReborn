@@ -579,7 +579,8 @@ class Api(private val e: Engine, private val token: String, port: Int) : NanoHTT
             if (viaBrowser) {
                 val (perDay, _) = e.queue.limits()
                 if (body.str("browser_action") == "draft") {
-                    warnings += "At each time you'll get a notification to open the slideshow in the TikTok app, pick a sound and post."
+                    warnings += if (phone) "Each slideshow is saved to your TikTok Studio drafts by the TikTok tab: log in there once, or drafts wait in the queue."
+                    else "Keep a logged-in tiktok.com tab open with the Slidemill extension, or drafts wait in the queue."
                 } else {
                     if (body.int("posts_per_day") > perDay) warnings += "Posting is capped at $perDay posts a day (Settings); extra ones wait in the queue."
                     warnings += if (phone) "Log in on the TikTok tab once and keep auto-posting on, or posts wait in the queue."
@@ -767,7 +768,7 @@ class Api(private val e: Engine, private val token: String, port: Int) : NanoHTT
             obj("status" to post.str("status"))
         }
 
-        route("GET", "/extension/status") { _ -> e.queue.status(shareMode = phone) }
+        route("GET", "/extension/status") { _ -> e.queue.status() }
 
         // --- settings ---
         route("GET", "/settings") { _ -> settingsOut() }

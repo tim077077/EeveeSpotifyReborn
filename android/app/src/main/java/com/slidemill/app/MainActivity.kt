@@ -287,9 +287,9 @@ class MainActivity : Activity() {
             }, spaced())
         }
         col.addView(label(
-            "\"Post by itself\" uses TikTok's private web endpoints, which is against TikTok's terms: keep the daily limit low " +
-                "(Dashboard → Settings) and use an account you can afford to lose. \"Send to the TikTok app\" just opens TikTok's " +
-                "own editor with your slides at the planned time; you add a sound and post.",
+            "Posting and saving drafts use TikTok's private web endpoints, which is against TikTok's terms: keep the daily limit " +
+                "low (Dashboard → Settings) and use an account you can afford to lose. Drafts land in TikTok Studio's drafts; you " +
+                "add a sound and post.",
             12f, muted,
         ), spaced(18))
         return ScrollView(this).apply { addView(col) }

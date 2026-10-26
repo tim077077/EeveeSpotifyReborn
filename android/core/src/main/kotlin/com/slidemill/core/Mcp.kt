@@ -122,8 +122,8 @@ How to work with it:
 
         "queue_post" to Tool(
             "Queue a slideshow for TikTok. Only when the user asked for it. publish: this phone posts it from its logged-in " +
-                "TikTok tab, within the daily limits (auto-posting must be on). draft: the phone notifies the user to finish " +
-                "it in the TikTok app.",
+                "TikTok tab, within the daily limits (auto-posting must be on). draft: the TikTok tab saves it to the user's " +
+                "TikTok Studio drafts (never public), where they add a sound and post it.",
             input(listOf("slideshow_id"), "slideshow_id" to str(), "browser_action" to str("", listOf("publish", "draft"))),
         ) { a ->
             val body = obj("post_mode" to "BROWSER", "browser_action" to a.str("browser_action", "publish"))

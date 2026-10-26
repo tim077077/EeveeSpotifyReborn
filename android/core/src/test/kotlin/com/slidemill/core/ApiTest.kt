@@ -147,37 +147,19 @@ class ApiTest {
         assertEquals(ids, listOf(j1.str("id"), j2.str("id"), j3.str("id")))
     }
 
-    @Test fun drafts_go_to_the_tiktok_app_never_public() {
+    @Test fun drafts_are_saved_by_the_tiktok_tab_never_shared_or_public() {
         val pid = queue(action = "draft")
-        val r = e.queue.claimNext(T0, skipDrafts = true)
-        assertNull(r["job"])
-        assertEquals("queue empty", r.str("reason"))
-        e.tick(T0)
-        val notice = platform.notices.single()
-        assertEquals("share", notice.kind)
-        assertEquals(pid, notice.postId)
-        assertEquals("ready_to_share", e.db.tx { get("posts", pid)!!.str("status") })
-        assertTrue(e.queue.claimNext(T0, skipDrafts = true)["job"] == null)
-        e.queue.markShared(pid)
-        assertEquals("sent_to_drafts", e.db.tx { get("posts", pid)!!.str("status") })
-    }
+        // No poster that can save drafts: the draft waits. It is never handed to the TikTok app.
+        assertEquals("1 draft(s) waiting: this poster can't save drafts yet", e.queue.claimNext(T0).str("reason"))
+        e.tick(T0.plus(Duration.ofHours(1)))
+        assertTrue(platform.notices.none { it.kind == "share" })
+        assertEquals("queued", e.db.tx { get("posts", pid)!!.str("status") })
 
-    @Test fun a_tiktok_tab_that_saves_drafts_takes_them_instead_of_the_tiktok_app() {
-        val canDraft = mapOf("username" to "tim", "draft" to "1")
-        val pid = queue(action = "draft")
-        val job = e.queue.claimNext(T0, client = canDraft).objAt("job")
+        // The TikTok tab (which can) takes it as a draft job, never a publish.
+        val job = e.queue.claimNext(T0.plus(Duration.ofHours(1)), client = mapOf("username" to "tim", "draft" to "1")).objAt("job")
         assertEquals(pid, job.str("id"))
-        assertEquals("draft", job.str("action")) // saved as a draft, never published
-        e.tick(T0)
-        assertTrue(platform.notices.none { it.kind == "share" })
+        assertEquals("draft", job.str("action"))
         assertEquals("sent_to_drafts", e.queue.recordResult(pid, true, username = "tim")!!.str("status"))
-
-        // The tab stops checking in (logged out, phone asleep): drafts go back to the TikTok app.
-        val later = queue(action = "draft")
-        e.tick(T0.plus(Duration.ofMinutes(5)))
-        assertTrue(platform.notices.none { it.kind == "share" })
-        e.tick(T0.plus(Duration.ofMinutes(11)))
-        assertEquals(later, platform.notices.single { it.kind == "share" }.postId)
     }
 
     @Test fun with_auto_posting_off_only_drafts_are_handed_out() {
@@ -243,7 +225,7 @@ class ApiTest {
         val ps = r.objAt("automation").objAt("post_settings")
         assertEquals("BROWSER", ps.str("post_mode"))
         assertEquals("draft", ps.str("browser_action"))
-        assertTrue(r.strings("warnings").any { "TikTok app" in it })
+        assertTrue(r.strings("warnings").any { "TikTok Studio drafts" in it })
         assertEquals(404, c.call("POST", "/api/v1/automations/$aid/apply-timing", obj("country" to "XX")).first)
         assertEquals(422, c.call("POST", "/api/v1/automations", obj("schedule" to arr("99 9 * * *"))).first)
         assertEquals(422, c.call("POST", "/api/v1/automations", obj("timezone" to "Mars/Base")).first)

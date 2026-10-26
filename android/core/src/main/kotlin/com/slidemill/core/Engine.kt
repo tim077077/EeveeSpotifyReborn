@@ -78,16 +78,12 @@ class Engine(val platform: Platform, val dataDir: File, val token: String) {
         pipeline.shutdown()
     }
 
-    /** Called every ~30 s by the host: scheduled runs, posts due for sharing, periodic refreshes. */
+    /** Called every ~30 s by the host: scheduled runs and periodic refreshes. */
     fun tick(now: Instant = Db.clock()) {
         scheduler.tick(now)
     }
 
     private fun periodic(now: Instant) {
-        for (post in queue.dueShares(now)) {
-            val title = db.tx { get("slideshows", post.str("slideshow_id"))?.str("title") } ?: "Slideshow"
-            platform.notify(Notice("share", "Ready to post: $title", "Tap to open it in TikTok, add a sound and post.", post.str("id")))
-        }
         if (lastMetrics == null || Duration.between(lastMetrics, now) >= Duration.ofMinutes(10)) {
             lastMetrics = now
             pipeline.executor.submit { refreshMetrics() }
