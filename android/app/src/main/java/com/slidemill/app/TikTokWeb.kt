@@ -91,6 +91,25 @@ object TikTokWeb {
 
     fun reload() = main.post { web?.loadUrl(HOME) }
 
+    /** Run the bridge and tiktok-inject.js in the current page (both skip themselves if already there). */
+    private fun inject(view: WebView, url: String?) {
+        if (!isTikTok(Uri.parse(url ?: ""))) return
+        val assets = view.context.assets
+        val bridge = assets.open("android-bridge.js").bufferedReader().use { it.readText() }
+        val poster = assets.open("tiktok-inject.js").bufferedReader().use { it.readText() }
+        view.evaluateJavascript(bridge, null)
+        view.evaluateJavascript("if (!window.VBTikTok) {\n$poster\n}", null)
+        pageReady = true
+    }
+
+    /** Make sure the page is running and has the scripts (main thread posted). */
+    fun wake(context: Context) = main.post {
+        val view = get(context)
+        view.onResume()
+        view.resumeTimers()
+        inject(view, view.url)
+    }
+
     private fun isTikTok(uri: Uri?): Boolean {
         val host = uri?.host ?: return false
         return TIKTOK_HOSTS.any { host == it || host.endsWith(".$it") }
@@ -101,15 +120,11 @@ object TikTokWeb {
             pageReady = false
         }
 
-        override fun onPageFinished(view: WebView, url: String?) {
-            if (!isTikTok(Uri.parse(url ?: ""))) return
-            val assets = view.context.assets
-            val bridge = assets.open("android-bridge.js").bufferedReader().use { it.readText() }
-            val poster = assets.open("tiktok-inject.js").bufferedReader().use { it.readText() }
-            view.evaluateJavascript(bridge, null)
-            view.evaluateJavascript("if (!window.VBTikTok) {\n$poster\n}", null)
-            pageReady = true
-        }
+        // Inject as soon as the page is visible: a heavy tiktok.com page (video feed) can take a long
+        // time to "finish", or never, while its scripts are already running.
+        override fun onPageCommitVisible(view: WebView, url: String?) = inject(view, url)
+
+        override fun onPageFinished(view: WebView, url: String?) = inject(view, url)
 
         // Keep the logged-in session (and the JS bridge) on TikTok; open anything else in the browser.
         override fun shouldOverrideUrlLoading(view: WebView, request: WebResourceRequest): Boolean {
