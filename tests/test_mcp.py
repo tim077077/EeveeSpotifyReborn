@@ -90,3 +90,11 @@ def test_research_is_best_first_and_errors_come_back_readable(client):
     assert [r["slides"][0] for r in rows] == ["post5 hook", "post4 hook", "post3 hook"]
     r = rpc(client, "tools/call", {"name": "view_slideshow", "arguments": {"slideshow_id": "nope"}}).json()["result"]
     assert r["isError"] and "not found" in r["content"][0]["text"]
+
+
+def test_create_can_queue_the_post(client):
+    content = call(client, "create_slideshow", plan=PLAN, post="draft")
+    assert content[1]["text"] == "Queued for TikTok as a draft."
+    info = json.loads(content[0]["text"])
+    with db.session_scope() as s:
+        assert s.query(db.Post).filter_by(slideshow_id=info["id"]).count() == 1

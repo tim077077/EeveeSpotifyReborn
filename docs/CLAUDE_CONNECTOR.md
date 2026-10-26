@@ -17,7 +17,11 @@ You set it up once, from the phone's browser, in about 10 minutes:
 5. In the Slidemill app, go to **Settings → Connect Claude**, paste the relay address and tap **Connect**. The pill turns green ("Connected").
 6. Copy the **Connector URL for Claude**. In Claude, open **Settings → Connectors**, add a custom connector and paste it.
 
-Claude can reach Slidemill whenever the app is running on the phone (the "Slidemill running" notification). When the phone is off or offline, Claude still sees the tools, but every call answers "Slidemill's phone is offline", so Claude can tell you why. Auto-posting keeps working either way: it never needed the relay.
+Claude can reach Slidemill whenever the app is running on the phone (the "Slidemill running" notification).
+
+**While the phone is offline, the relay keeps a waiting list.** Requests that change something (`create_slideshow`, `queue_post`, `delete_slideshow`) are saved, up to 20, and run on the phone as soon as it's back online. Claude is told the request was saved and can't see the result yet. Requests that only read (listing, viewing, analytics) answer "Slidemill's phone is offline". To have a slideshow made and posted later in one step, Claude passes `post` (`draft` or `publish`) to `create_slideshow`. The phone acknowledges each saved request before running it and remembers it, so a dropped connection can't make it run twice. Auto-posting never needed the relay.
+
+**Slow renders don't time out.** Claude's apps give up on a tool call after about a minute, and finding or generating backgrounds can take longer on a phone. When rendering runs past about 40 seconds, `create_slideshow` answers with the slideshow's id, the phone carries on, and Claude checks it with `view_slideshow`.
 
 The relay fits well inside Cloudflare's free plan. One Durable Object holds the phone's connection, and WebSocket hibernation means an idle connection uses no paid time.
 

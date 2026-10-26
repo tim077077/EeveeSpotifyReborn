@@ -100,4 +100,27 @@ class McpTest {
         assertTrue(fresh != claude) // the old link stops working
         assertEquals("off", c.put("/api/v1/relay", obj("url" to "")).str("state"))
     }
+
+    @Test fun slow_renders_answer_in_time_and_post_when_done() {
+        e.relay.mcp.waitMs = 0 // as if the backgrounds took longer than Claude waits
+        val out = call("create_slideshow", obj("plan" to plan, "image_source" to "ai", "post" to "draft"))
+        assertEquals(false, out["isError"])
+        val note = out.objs("content")[0].str("text")
+        assertTrue("Still rendering on the phone" in note, note)
+        val id = Regex("slideshow id ([0-9a-f]+)").find(note)!!.groupValues[1]
+        var posts = listOf<Obj>()
+        repeat(100) {
+            posts = e.db.tx { where("posts") { it.str("slideshow_id") == id }.map { it.copyObj() } }
+            if (posts.isEmpty()) Thread.sleep(100)
+        }
+        e.db.tx { assertEquals("completed", get("slideshows", id)!!.str("status")) }
+        assertEquals(1, posts.size) // queued for TikTok once rendered
+        assertEquals("draft", posts[0].objAt("options").str("action"))
+    }
+
+    @Test fun fast_renders_report_the_queued_post() {
+        val content = call("create_slideshow", obj("plan" to plan, "image_source" to "ai", "post" to "draft")).objs("content")
+        assertEquals("Queued for TikTok as a draft.", content[1].str("text"))
+        assertEquals(4, content.count { it.str("type") == "image" })
+    }
 }
