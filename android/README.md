@@ -9,8 +9,8 @@ The app has two tabs:
 
 ## How a draft gets saved
 
-1. Claude calls `create_slideshow` (with `save_draft: true`) or `save_draft`.
-2. The phone renders the slides, then hands them to its logged-in tiktok.com page (`extension/tiktok-inject.js`). The page uploads them and makes TikTok Studio's own "Save draft" request.
+1. Claude calls `create_slideshow` (Claude writes, the phone draws the text over backgrounds) or `import_slides` (Claude made the finished images itself and passes them as links), with `save_draft: true`; or `save_draft` later.
+2. The phone renders or downloads the slides, then hands them to its logged-in tiktok.com page (`extension/tiktok-inject.js`). The page uploads them and makes TikTok Studio's own "Save draft" request.
 3. Claude's tool call answers with **TikTok's draft id**, or with the exact reason it failed: not logged in, TikTok refused, tiktok.com didn't load. The slideshow remembers the result, and the Slidemill tab shows it ("✓ in TikTok drafts" or "✗ not saved: …").
 
 If the work takes longer than Claude waits (about 45 seconds), Claude gets the slideshow's id; the phone finishes, records the result, and `view_slideshow` shows it. Nothing waits in a queue for a timer.

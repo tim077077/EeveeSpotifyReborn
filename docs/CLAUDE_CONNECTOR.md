@@ -25,7 +25,7 @@ Claude can reach Slidemill whenever the app is running on the phone (the "Slidem
 
 **Slow work doesn't time out.** Claude's apps give up on a tool call after about a minute, and generating backgrounds or uploading to TikTok can take longer on a phone. Past about 45 seconds, the tool answers with the slideshow's id, the phone finishes, and `view_slideshow` shows the outcome (the draft id or the error).
 
-**While the phone is offline, the relay keeps a waiting list.** Requests that change something (`create_slideshow`, `save_draft`, `delete_slideshow`) are saved, up to 20, and run on the phone as soon as it's back online. Claude is told the request was saved and can't see the result yet. Requests that only read (listing, viewing) answer "Slidemill's phone is offline". The phone acknowledges each saved request before running it and remembers it, so a dropped connection can't make it run twice.
+**While the phone is offline, the relay keeps a waiting list.** Requests that change something (`create_slideshow`, `import_slides`, `save_draft`, `delete_slideshow`) are saved, up to 20, and run on the phone as soon as it's back online. Claude is told the request was saved and can't see the result yet. Requests that only read (listing, viewing) answer "Slidemill's phone is offline". The phone acknowledges each saved request before running it and remembers it, so a dropped connection can't make it run twice.
 
 The relay fits well inside Cloudflare's free plan. One Durable Object holds the phone's connection, and WebSocket hibernation means an idle connection uses no paid time.
 
@@ -51,6 +51,7 @@ On the phone:
 | `add_to_library` | Import TikTok accounts or posts into the research library |
 | `read_library_slides` / `save_slide_texts` | Claude reads slide text the library doesn't have yet, off the slide images |
 | `create_slideshow` | Render a slideshow Claude wrote and return the slides as images; with `save_draft: true`, also save it to TikTok drafts |
+| `import_slides` | Use finished slide images Claude made itself (https links, or small `data:image` URIs): stored as they are, in order; with `save_draft: true`, saved to TikTok drafts in the same call. The relay takes about 1 MB per call, so inline images must be small; links have no such limit |
 | `save_draft` | Save a slideshow to TikTok Studio drafts now; answers with TikTok's draft id or why it failed |
 | `view_slideshow` | Details, draft status and rendered slides of one slideshow |
 | `list_slideshows` | Recent slideshows with their draft status and scores |
