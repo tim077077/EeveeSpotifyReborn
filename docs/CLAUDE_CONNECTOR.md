@@ -45,7 +45,7 @@ The URL is `https://<your domain>/mcp/<token>`. The token is derived from `SLIDE
 | `create_slideshow` | Render a slideshow Claude wrote; returns the slides as images |
 | `view_slideshow` | Details and rendered slides of one slideshow |
 | `list_slideshows` | Recent slideshows with their scores |
-| `predict_virality` | Score a slideshow (one AI call with Slidemill's key; none if unchanged) |
+| `predict_virality` | Score a slideshow. On the phone, Claude is the reader, so no AI key is used: the first call returns the scoring rules, the slides and real library posts to rank it against blind; Claude sends its read back and Slidemill turns it into the score, attention curve and rank. The server version uses Slidemill's AI key (one call; none if unchanged). |
 | `delete_slideshow` | Remove a weaker draft |
 | `queue_post` | Queue a slideshow for TikTok, the same as the dashboard's Post button |
 | `analytics` | Views, likes, comments and shares of posted slideshows |

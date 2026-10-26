@@ -409,15 +409,23 @@ class Api(private val e: Engine, private val token: String, port: Int) : NanoHTT
             obj("video_url" to url(rel))
         }
 
+        // Body {"read": {...}}: a read written by Claude from /predict/brief, scored without an AI key.
         route("POST", "/slideshows/{id}/predict") { r ->
             if (e.db.tx { get("slideshows", r.params[0]) } == null) throw notFound("slideshow")
             try {
-                e.virality.predict(r.params[0])
+                @Suppress("UNCHECKED_CAST")
+                val read = (r.body() as? Map<String, Any?>)?.get("read")?.let { it as? Map<String, Any?> ?: throw invalid("read: expected an object") }
+                e.virality.predict(r.params[0], read)
             } catch (x: LlmError) {
                 throw invalid(x.message ?: "AI error")
             } catch (x: PipelineError) {
                 throw invalid(x.message ?: "can't predict")
             }
+        }
+
+        route("GET", "/slideshows/{id}/predict/brief") { r ->
+            if (e.db.tx { get("slideshows", r.params[0]) } == null) throw notFound("slideshow")
+            try { e.virality.briefFor(r.params[0]) } catch (x: PipelineError) { throw invalid(x.message ?: "can't predict") }
         }
 
         route("GET", "/virality/calibration") { _ -> e.virality.calibration() }
@@ -571,7 +579,8 @@ class Api(private val e: Engine, private val token: String, port: Int) : NanoHTT
             if (viaBrowser) {
                 val (perDay, _) = e.queue.limits()
                 if (body.str("browser_action") == "draft") {
-                    warnings += "At each time you'll get a notification to open the slideshow in the TikTok app, pick a sound and post."
+                    warnings += if (phone) "Each slideshow is saved to your TikTok Studio drafts by the TikTok tab: log in there once, or drafts wait in the queue."
+                    else "Keep a logged-in tiktok.com tab open with the Slidemill extension, or drafts wait in the queue."
                 } else {
                     if (body.int("posts_per_day") > perDay) warnings += "Posting is capped at $perDay posts a day (Settings); extra ones wait in the queue."
                     warnings += if (phone) "Log in on the TikTok tab once and keep auto-posting on, or posts wait in the queue."
@@ -759,7 +768,7 @@ class Api(private val e: Engine, private val token: String, port: Int) : NanoHTT
             obj("status" to post.str("status"))
         }
 
-        route("GET", "/extension/status") { _ -> e.queue.status(shareMode = phone) }
+        route("GET", "/extension/status") { _ -> e.queue.status() }
 
         // --- settings ---
         route("GET", "/settings") { _ -> settingsOut() }

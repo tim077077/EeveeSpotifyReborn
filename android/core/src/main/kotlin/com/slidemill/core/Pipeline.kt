@@ -393,7 +393,7 @@ class Pipeline(
 
     /**
      * Queue a rendered slideshow. Every post goes through the queue: the phone's TikTok tab (or the
-     * browser extension) publishes it, and "draft" posts are handed to the TikTok app on the phone.
+     * browser extension) publishes it, or saves it to TikTok Studio's drafts for "draft" posts.
      * The official TikTok API modes map onto those: DIRECT_POST -> publish, MEDIA_UPLOAD -> draft.
      */
     fun publish(

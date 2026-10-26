@@ -60,13 +60,12 @@ const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
 // ---- phone app mode ------------------------------------------------------------------
 // The Android app runs this same dashboard against its built-in engine (/status.platform ==
-// "android"). There is no TikTok developer app there: posts and drafts go out from the app's TikTok
-// tab, or, while it isn't logged in, drafts are handed to the TikTok app to finish.
+// "android"). There is no TikTok developer app there: posts and drafts go out from the app's TikTok tab.
 let PHONE = false;
 const APP = window.SlidemillApp; // native bridge, only inside the Android app
 const PHONE_MODES = {
   publish: "Post by itself from this phone (TikTok tab)",
-  draft: "Send to the TikTok app at that time (you add a sound, post)",
+  draft: "Save to my TikTok Studio drafts (you add a sound, post)",
 };
 function phoneModes(sel) {
   if (!PHONE || !sel) return;
@@ -159,7 +158,7 @@ function gauge(v) {
     <div><b>${v}</b><span>of 100</span></div></div>`;
 }
 
-const POST_LABELS = { queued: "Queued", posting: "Posting", published: "Posted", sent_to_drafts: "Sent to TikTok", ready_to_share: "Ready to post", failed: "Failed", processing: "Processing", pending: "Pending" };
+const POST_LABELS = { queued: "Queued", posting: "Posting", published: "Posted", sent_to_drafts: "Saved to drafts", ready_to_share: "Ready to post", failed: "Failed", processing: "Processing", pending: "Pending" };
 
 function showStatus(s) {
   if (s.status === "failed") return `<span class="pill err">Failed</span>`;
@@ -172,7 +171,7 @@ function showStatus(s) {
 const scorePill = (p) => (p ? `<span class="pill score" title="Predicted viral potential, out of 100">Score ${p.viral_potential}</span>` : "");
 
 function modeLabel(ps = {}) {
-  if (ps.post_mode === "BROWSER") return ps.browser_action === "draft" ? "Hands off to the TikTok app" : PHONE ? "Posts by itself from this phone" : "Posts from your browser";
+  if (ps.post_mode === "BROWSER") return ps.browser_action === "draft" ? (PHONE ? "Saves to TikTok Studio drafts" : "Saves drafts from your browser") : PHONE ? "Posts by itself from this phone" : "Posts from your browser";
   return ps.post_mode === "DIRECT_POST" ? "Posts by itself (TikTok API)" : "Goes to TikTok drafts (API)";
 }
 
@@ -363,7 +362,7 @@ views.slideshow = async (id) => {
           <div class="row" style="margin-top:16px"><button class="primary" id="publish">Send to TikTok</button><button id="save-meta">Save caption</button></div>
           ${s.posts.length ? `<h3 style="margin-top:22px">History</h3><div class="list">${s.posts
             .map((p) => `<div class="list-row" style="min-height:44px"><div class="what"><b>${esc(POST_LABELS[p.status] || p.status)}</b>
-              <span>${esc(new Date(p.created_at).toLocaleString())} · ${esc(PHONE ? (p.action === "draft" ? "TikTok app" : "from this phone") : p.post_mode)}${p.scheduled_for && p.status === "queued" ? ` · for ${esc(new Date(p.scheduled_for).toLocaleString())}` : ""}${p.error ? ` · ${esc(p.error)}` : ""}</span></div>
+              <span>${esc(new Date(p.created_at).toLocaleString())} · ${esc(PHONE ? (p.action === "draft" ? "draft" : "from this phone") : p.post_mode)}${p.scheduled_for && p.status === "queued" ? ` · for ${esc(new Date(p.scheduled_for).toLocaleString())}` : ""}${p.error ? ` · ${esc(p.error)}` : ""}</span></div>
               ${PHONE && p.action === "draft" && ["queued", "ready_to_share"].includes(p.status) ? `<button class="small" data-share="${p.id}">Open in TikTok</button>` : ""}</div>`).join("")}</div>` : ""}
         </section>
         <section class="card">
@@ -1244,9 +1243,9 @@ function wireRelayCard() {
 }
 
 function phoneCard(ext, field, setRow) {
-  return setRow("Posting from this phone", "The TikTok tab posts your queue by itself, within the limits below. “Send to the TikTok app” posts open TikTok's own editor instead, for you to finish.", `
+  return setRow("Posting from this phone", "The TikTok tab posts your queue by itself, within the limits below, and saves drafts to TikTok Studio.", `
       <p class="small" id="poster-line" style="display:flex;flex-wrap:wrap;gap:8px;align-items:center"><span class="spinner"></span></p>
-      <p class="small muted">${ext.queued} queued · ${ext.done_last_24h} of ${ext.posts_per_day} posted in 24 hours${ext.waiting_to_share ? ` · ${ext.waiting_to_share} waiting to hand to the TikTok app` : ""}${ext.next_due_at ? ` · next ${esc(new Date(ext.next_due_at).toLocaleString())}` : ""}</p>
+      <p class="small muted">${ext.queued} queued · ${ext.done_last_24h} of ${ext.posts_per_day} posted in 24 hours${ext.waiting_for_draft_support ? ` · ${ext.waiting_for_draft_support} draft(s) waiting for the TikTok tab` : ""}${ext.next_due_at ? ` · next ${esc(new Date(ext.next_due_at).toLocaleString())}` : ""}</p>
       <div class="form-grid">
         ${field("browser_posts_per_day", "Most posts per 24 hours", "text", "6")}
         ${field("browser_min_gap_minutes", "Minutes between posts, at least", "text", "20")}
