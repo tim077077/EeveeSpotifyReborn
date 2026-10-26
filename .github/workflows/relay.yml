@@ -1,8 +1,14 @@
-# Deploys the Claude relay (relay/) to your free Cloudflare account. Run it by hand from the Actions tab.
+# Deploys the Claude relay (relay/) to your free Cloudflare account: by itself whenever a change to
+# relay/ is merged into swift, or by hand from the Actions tab (the first time, or to redeploy).
 # Needs two repository secrets: CLOUDFLARE_API_TOKEN ("Edit Cloudflare Workers" template) and CLOUDFLARE_ACCOUNT_ID.
 name: Deploy Claude relay
 
 on:
+  push:
+    branches: [swift]
+    paths:
+      - "relay/**"
+      - ".github/workflows/relay.yml"
   workflow_dispatch:
 
 permissions:
@@ -29,6 +35,8 @@ jobs:
             exit 1
           fi
       - run: npm ci --no-audit --no-fund
+      - name: Test (a failing relay never goes live)
+        run: npm test
       - name: Deploy
         env:
           CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
