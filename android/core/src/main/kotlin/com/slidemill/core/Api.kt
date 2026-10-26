@@ -409,15 +409,23 @@ class Api(private val e: Engine, private val token: String, port: Int) : NanoHTT
             obj("video_url" to url(rel))
         }
 
+        // Body {"read": {...}}: a read written by Claude from /predict/brief, scored without an AI key.
         route("POST", "/slideshows/{id}/predict") { r ->
             if (e.db.tx { get("slideshows", r.params[0]) } == null) throw notFound("slideshow")
             try {
-                e.virality.predict(r.params[0])
+                @Suppress("UNCHECKED_CAST")
+                val read = (r.body() as? Map<String, Any?>)?.get("read")?.let { it as? Map<String, Any?> ?: throw invalid("read: expected an object") }
+                e.virality.predict(r.params[0], read)
             } catch (x: LlmError) {
                 throw invalid(x.message ?: "AI error")
             } catch (x: PipelineError) {
                 throw invalid(x.message ?: "can't predict")
             }
+        }
+
+        route("GET", "/slideshows/{id}/predict/brief") { r ->
+            if (e.db.tx { get("slideshows", r.params[0]) } == null) throw notFound("slideshow")
+            try { e.virality.briefFor(r.params[0]) } catch (x: PipelineError) { throw invalid(x.message ?: "can't predict") }
         }
 
         route("GET", "/virality/calibration") { _ -> e.virality.calibration() }

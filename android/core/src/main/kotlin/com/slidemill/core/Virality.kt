@@ -218,23 +218,51 @@ For each slide in order, give swipe_on: the percent of viewers who reach this sl
         return b to if (b.long("version") == BACKTEST_VERSION.toLong()) b.str("method").ifEmpty { "current" } else "current"
     }
 
-    /**
-     * One AI call: the viewer read plus a blind ranking among real library posts; the final score uses
-     * the method the library test picked. Unchanged slideshows return the stored prediction (no call).
-     */
-    fun predict(showId: String): Obj {
+    /** A rendered slideshow and its inputs, as predict and briefFor both need them. */
+    private fun subject(showId: String): Triple<Obj, Obj, List<Obj>> {
         val show = db.tx { get("slideshows", showId)?.copyObj() } ?: throw PipelineError("slideshow not found")
         if (show.str("status") != "completed" || show.strings("rendered").isEmpty()) throw PipelineError("Render the slideshow first.")
-        val spec = Models.SPEC.of(show.objAt("spec"))
-        val rows = libraryRows()
+        return Triple(show, Models.SPEC.of(show.objAt("spec")), libraryRows())
+    }
+
+    /**
+     * What Claude needs to score a slideshow itself, with no AI key: the same rules, prompt and blind
+     * comparison the app's AI gets, and the shape of the answer to send back to [predict].
+     */
+    fun briefFor(showId: String): Obj {
+        val (show, spec, rows) = subject(showId)
+        val b = brief(spec, show.str("caption"), show.str("description"), show.strings("rendered"), refs = references(rows), seed = showId)
+        return obj("rules" to SYSTEM_PROMPT, "prompt" to b.user, "answer_schema" to b.schema.toJson(), "images" to b.images.toMutableList<Any?>())
+    }
+
+    /**
+     * Score a slideshow: the viewer read plus a blind ranking among real library posts; the final score uses
+     * the method the library test picked. The read comes from the app's AI key (one call), or is `claudeRead`:
+     * Claude's own answer to [briefFor]. Unchanged slideshows return the stored prediction (no call).
+     */
+    fun predict(showId: String, claudeRead: Map<String, Any?>? = null): Obj {
+        val (show, spec, rows) = subject(showId)
         val (bt, method) = picked(lastBacktest())
         val texts = slideTexts(spec)
         val fingerprint = java.security.MessageDigest.getInstance("SHA-1").digest(Json.write(listOf(
             texts, show.strings("rendered"), show.str("caption"), show.str("description"), bt["ran_at"], method, rows.size,
         )).toByteArray()).joinToString("") { "%02x".format(it) }
         val stored = show.objAt("prediction")
-        if (stored.str("fingerprint") == fingerprint) return stored.also { it["cached"] = true }
-        val (result, rank, _) = read(spec, show.str("caption"), show.str("description"), show.strings("rendered"), refs = references(rows), seed = showId)
+        if (claudeRead == null && stored.str("fingerprint") == fingerprint) return stored.also { it["cached"] = true }
+        val refs = references(rows)
+        val (result, rank) = if (claudeRead != null) {
+            val b = brief(spec, show.str("caption"), show.str("description"), show.strings("rendered"), refs = refs, seed = showId)
+            @Suppress("UNCHECKED_CAST")
+            val checked = try {
+                b.schema.validate(claudeRead) as Map<String, Any?>
+            } catch (x: SchemaError) {
+                throw PipelineError("The read doesn't match answer_schema: ${x.message}")
+            }
+            score(checked, spec, visionUsed = true, calibrated = b.calibrated, reader = "Claude's") to
+                refs?.let { rankFromOrder(checked.strings("rank_order"), it, b.pos) }
+        } else {
+            read(spec, show.str("caption"), show.str("description"), show.strings("rendered"), refs = refs, seed = showId).let { it.first to it.second }
+        }
         val similar = Methods.similarEvidence(texts.joinToString(" "), rows)
         if (similar != null) result["similar"] = similar
         if (rank != null) result["rank"] = rank
@@ -257,20 +285,24 @@ For each slide in order, give swipe_on: the percent of viewers who reach this sl
 
     private fun dataUrl(path: String) = "data:image/jpeg;base64," + Base64.getEncoder().encodeToString(File(mediaDir, path).readBytes())
 
+    /** Everything a reader (the app's AI key, or Claude itself through MCP) is given to score a slideshow. */
+    class Brief(
+        val user: String, val images: List<String>, val schema: Schema.Object,
+        val refs: List<Obj>?, val pos: Int, val calibrated: Int,
+    )
+
     /**
-     * One AI call: read the slideshow like a viewer and score it, rank it blind among `refs` (real library
-     * posts) when given, and transcribe its slide text when `transcribe`. Returns (result, rank, slide texts).
+     * The request for one read: score the slideshow like a viewer, rank it blind among `refs` (real library
+     * posts) when given, and transcribe its slide text when `transcribe`. `images` are media paths: the
+     * slides, then the references' covers when they fit.
      */
-    private fun read(
-        spec0: Obj, caption: String, description: String, images: List<String>, exclude: String = "",
-        refs: List<Obj>? = null, seed: String = "", transcribe: Boolean = false,
-    ): Triple<Obj, Obj?, List<String>> {
-        var spec = spec0
+    private fun brief(
+        spec: Obj, caption: String, description: String, images: List<String>, exclude: String = "",
+        refs: List<Obj>? = null, seed: String = "", transcribe: Boolean = false, vision: Boolean = true,
+    ): Brief {
         val slides = spec.objs("slides")
-        val cfg = llm.resolve() ?: throw LlmError("Add an AI key in Settings first.")
-        if (transcribe && !cfg.vision) throw LlmError("Reading slide text needs a vision-capable AI key.")
         val (good, bad) = calibrationExamples(exclude = exclude)
-        val dataUrls = if (cfg.vision) images.take(10).map { dataUrl(it) }.toMutableList() else null
+        val attached = if (vision) images.take(10).toMutableList() else mutableListOf()
         // Where this slideshow sits among the references is fixed per slideshow, so position bias can't favour it.
         val pos = if (refs == null) 0 else (java.util.zip.CRC32().apply { update(seed.toByteArray()) }.value % (refs.size + 1)).toInt()
         val user = buildString {
@@ -286,7 +318,7 @@ For each slide in order, give swipe_on: the percent of viewers who reach this sl
             }
             append("\nThere are ${slides.size} slides; return exactly ${slides.size} entries in `slides`.")
             if (transcribe) append(" Also return `slide_texts`: the overlay text of each slide, in order.")
-            if (dataUrls != null) append(" The rendered slides are attached in order: judge the actual images and how readable the text is on them.")
+            if (vision) append(" The rendered slides are attached in order: judge the actual images and how readable the text is on them.")
             if (refs != null) {
                 val names = LETTERS.take(refs.size + 1).toList()
                 val own = if (transcribe) "its slides are attached" else slideTexts(spec).take(10).joinToString(" / ") { it.take(160) }
@@ -299,13 +331,26 @@ For each slide in order, give swipe_on: the percent of viewers who reach this sl
                     else append("\nSlideshow $letter: " + refs[k++].strings("texts").take(10).joinToString(" / ") { it.take(160) })
                 }
                 val covers = refs.map { it.strings("images").firstOrNull() }
-                if (dataUrls != null && covers.all { it != null } && dataUrls.size + covers.size <= MAX_IMAGES) {
-                    covers.forEach { dataUrls += dataUrl(it!!) }
+                if (vision && covers.all { it != null } && attached.size + covers.size <= MAX_IMAGES) {
+                    covers.forEach { attached += it!! }
                     append("\nAfter this slideshow's slides, the cover slide of each other slideshow is attached in letter order.")
                 }
             }
         }
-        val read = llm.completeJson(SYSTEM_PROMPT, user, readSchema(refs != null, transcribe), images = dataUrls, cfg = cfg)
+        return Brief(user, attached, readSchema(refs != null, transcribe), refs, pos, good.size + bad.size)
+    }
+
+    /** One AI call with the app's key. Returns (result, rank, slide texts). */
+    private fun read(
+        spec0: Obj, caption: String, description: String, images: List<String>, exclude: String = "",
+        refs: List<Obj>? = null, seed: String = "", transcribe: Boolean = false,
+    ): Triple<Obj, Obj?, List<String>> {
+        var spec = spec0
+        val slides = spec.objs("slides")
+        val cfg = llm.resolve() ?: throw LlmError("Add an AI key in Settings first.")
+        if (transcribe && !cfg.vision) throw LlmError("Reading slide text needs a vision-capable AI key.")
+        val b = brief(spec, caption, description, images, exclude, refs, seed, transcribe, cfg.vision)
+        val read = llm.completeJson(SYSTEM_PROMPT, b.user, b.schema, images = b.images.map { dataUrl(it) }.ifEmpty { null }, cfg = cfg)
         var texts = slideTexts(spec)
         if (transcribe) {
             val got = read.strings("slide_texts").map { it.trim() }.take(slides.size)
@@ -316,12 +361,12 @@ For each slide in order, give swipe_on: the percent of viewers who reach this sl
             })
             texts = got.filter { it.isNotEmpty() }
         }
-        val rank = refs?.let { rankFromOrder(read.strings("rank_order"), it, pos) }
-        return Triple(score(read, spec, visionUsed = cfg.vision, calibrated = good.size + bad.size), rank, texts)
+        val rank = refs?.let { rankFromOrder(read.strings("rank_order"), it, b.pos) }
+        return Triple(score(read, spec, visionUsed = cfg.vision, calibrated = b.calibrated), rank, texts)
     }
 
     /** Turn the model's read plus the rule checks into the numbers shown in the app. */
-    fun score(read: Map<String, Any?>, spec: Map<String, Any?>, visionUsed: Boolean, calibrated: Int): Obj {
+    fun score(read: Map<String, Any?>, spec: Map<String, Any?>, visionUsed: Boolean, calibrated: Int, reader: String = "AI"): Obj {
         val n = spec.objs("slides").size
         val per = read.objs("slides").take(n).toMutableList()
         while (per.size < n) per += obj("swipe_on" to "60", "visual_pull" to "50", "clarity" to "50", "note" to "")
@@ -364,7 +409,7 @@ For each slide in order, give swipe_on: the percent of viewers who reach this sl
             "tips" to tips.toMutableList<Any?>(),
             "better_hook" to read.str("better_hook"),
             "basis" to buildString {
-                append(if (visionUsed) "AI read of the rendered slides" else "AI read of the slide text (this AI key can't see images)")
+                append(if (visionUsed) "$reader read of the rendered slides" else "$reader read of the slide text (this AI key can't see images)")
                 append(" + format rules")
                 if (calibrated > 0) append(", calibrated with $calibrated real library hooks")
             },

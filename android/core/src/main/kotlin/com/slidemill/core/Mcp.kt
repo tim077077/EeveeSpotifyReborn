@@ -43,7 +43,9 @@ How to work with it:
    their account's usual views. Write in that spirit; never copy a post.
 2. Write each slideshow yourself and pass it to create_slideshow. Look at the rendered slides it returns
    and fix what reads badly (create a new version, delete the weak one).
-3. predict_virality scores a slideshow (it uses the app's AI key: one call). Use it to choose between drafts.
+3. predict_virality scores a slideshow with you as the reader (no AI key): call it once for the rules, the
+   slides and real library posts to rank it against, write your read, and call it again with that read.
+   Use the scores to choose between drafts.
 4. Only call queue_post after the user has said which slideshow to post and how. Posting is public."""
 
         private fun str(description: String = "", enum: List<String>? = null): Obj =
@@ -103,10 +105,15 @@ How to work with it:
         },
 
         "predict_virality" to Tool(
-            "Score a rendered slideshow: hook strength, how many viewers reach the last slide, where it ranks among real " +
-                "library posts, and what to fix. Uses the app's AI key (one call; none if nothing changed).",
-            input(listOf("slideshow_id"), "slideshow_id" to str()),
-        ) { a -> Json.write(api("POST", "/slideshows/${id(a)}/predict")) },
+            "Score a rendered slideshow, with you as the reader (no AI key is used). Step 1, without read: you get the " +
+                "scoring rules, the slides, real library posts to rank it against blind, and answer_schema. Step 2: judge it " +
+                "honestly by those rules and call again with read (an object matching answer_schema). Slidemill turns it into " +
+                "the score, attention curve, rank among real posts and tips, and saves it on the slideshow.",
+            input(
+                listOf("slideshow_id"), "slideshow_id" to str(),
+                "read" to obj("type" to "object", "description" to "Step 2: your read, matching answer_schema from step 1."),
+            ),
+        ) { a -> predict(id(a), a.objOrNull("read")) },
 
         "delete_slideshow" to Tool(
             "Delete a slideshow you don't want (for example a weaker draft).",
@@ -293,6 +300,29 @@ How to work with it:
         return withSlides(api("GET", "/slideshows/$id")).also { out -> note?.let { out.add(1, text(it)) } }
     }
 
+    private fun predict(id: String, read: Map<String, Any?>?): Any? {
+        if (read != null) {
+            val p = api("POST", "/slideshows/$id/predict", obj("read" to read)) as Map<String, Any?>
+            return Json.write(obj().also { o ->
+                for (k in listOf("viral_potential", "verdict", "hook_score", "hold_rate", "attention", "biggest_drop", "rank", "similar", "tips", "better_hook", "basis")) o[k] = p[k]
+            })
+        }
+        val b = api("GET", "/slideshows/$id/predict/brief") as Map<String, Any?>
+        val out = arr(text(
+            "Score this slideshow yourself by these rules, then call predict_virality again with slideshow_id and read.\n\n" +
+                "RULES\n${b.str("rules")}\n\nTHE SLIDESHOW\n${b.str("prompt")}\n\n" +
+                "ANSWER_SCHEMA (read must match it exactly)\n${Json.write(b["answer_schema"])}",
+        ))
+        b.strings("images").forEach { image(File(e.mediaDir, it))?.let { img -> out += img } }
+        return out
+    }
+
+    private fun image(f: File): Obj? {
+        if (!f.isFile) return null
+        val jpeg = e.platform.imaging.normalize(f.readBytes(), 540, 1080, 80).jpeg
+        return obj("type" to "image", "data" to Base64.getEncoder().encodeToString(jpeg), "mimeType" to "image/jpeg")
+    }
+
     /** The slideshow as JSON text plus each slide, scaled down so a conversation can hold a whole slideshow. */
     private fun withSlides(show0: Any?): MutableList<Any?> {
         val show = show0 as Map<String, Any?>
@@ -304,12 +334,7 @@ How to work with it:
             }
         }
         val out = arr(text(Json.write(slim)))
-        for (u in show.strings("slides")) {
-            val f = File(e.mediaDir, u.substringAfter("/media/"))
-            if (!f.isFile) continue
-            val jpeg = e.platform.imaging.normalize(f.readBytes(), 540, 1080, 80).jpeg
-            out += obj("type" to "image", "data" to Base64.getEncoder().encodeToString(jpeg), "mimeType" to "image/jpeg")
-        }
+        for (u in show.strings("slides")) image(File(e.mediaDir, u.substringAfter("/media/")))?.let { out += it }
         return out
     }
 }

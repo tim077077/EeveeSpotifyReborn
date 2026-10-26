@@ -65,8 +65,7 @@ class McpTest {
         val id = info.str("id")
         e.db.tx { assertEquals("Written by Claude", get("slideshows", id)!!.str("prompt")) }
 
-        val score = Json.parseObj(call("predict_virality", obj("slideshow_id" to id)).objs("content")[0].str("text"))
-        assertTrue(score.long("viral_potential") in 0..100)
+        assertTrue("Score this slideshow yourself" in call("predict_virality", obj("slideshow_id" to id)).objs("content")[0].str("text"))
         val listed = Json.parse(call("list_slideshows").objs("content")[0].str("text")) as List<*>
         assertEquals(id, (listed[0] as Map<*, *>)["id"])
         val post = Json.parseObj(call("queue_post", obj("slideshow_id" to id)).objs("content")[0].str("text"))
@@ -116,6 +115,49 @@ class McpTest {
         e.db.tx { assertEquals("completed", get("slideshows", id)!!.str("status")) }
         assertEquals(1, posts.size) // queued for TikTok once rendered
         assertEquals("draft", posts[0].objAt("options").str("action"))
+    }
+
+    @Test fun claude_scores_a_slideshow_itself_without_the_ai_key() {
+        java.io.File(e.mediaDir, "library").mkdirs()
+        java.io.File(e.mediaDir, "library/c.jpg").writeBytes(TestKit.jpeg(40, 50))
+        e.db.tx {
+            val prof = insert("library_profiles", obj("username" to "rival"))
+            repeat(6) { i ->
+                insert("library_posts", obj(
+                    "id" to "lp$i", "profile_id" to prof.str("id"), "is_slideshow" to true, "views" to 1000L * (i + 1),
+                    "images" to arr("library/c.jpg"), "slide_texts" to arr("rival hook $i", "b", "c"),
+                ))
+            }
+        }
+        val id = Json.parseObj(call("create_slideshow", obj("plan" to plan, "image_source" to "ai")).objs("content")[0].str("text")).str("id")
+        val aiCalls = ai.requests.size
+
+        // Step 1: the rules, the slides, and real posts to rank it against, blind.
+        val brief = call("predict_virality", obj("slideshow_id" to id)).objs("content")
+        val text = brief[0].str("text")
+        assertTrue("ANSWER_SCHEMA" in text && "rank_order" in text && "swipe_on" in text, text)
+        assertTrue("rival hook" in text && "views" !in text.substringAfter("Comparison:").substringAfter("\n"), text) // no results leaked
+        assertEquals(4 + 6, brief.count { it.str("type") == "image" }) // its slides, then the 6 references' covers
+        val me = Regex("Slideshow ([A-G]) \\(this one\\)").find(text)!!.groupValues[1]
+
+        // Step 2: Claude's read, ranking itself first.
+        val read = obj(
+            "hook_score" to 82, "curiosity" to 70, "relatability" to 75, "payoff" to 72, "shareability" to 66,
+            "slides" to List(4) { obj("swipe_on" to 85, "visual_pull" to 60, "clarity" to 90, "note" to "reads fast") }.toMutableList<Any?>(),
+            "tips" to arr("Say which habit matters most on slide 1"), "better_hook" to "3 night habits I wish I'd started sooner",
+            "rank_order" to (listOf(me) + "ABCDEFG".take(7).map { it.toString() }.filter { it != me }).toMutableList<Any?>(),
+        )
+        val scored = Json.parseObj(call("predict_virality", obj("slideshow_id" to id, "read" to read)).objs("content")[0].str("text"))
+        assertTrue(scored.long("viral_potential") in 1..100, scored.toString())
+        assertTrue("Claude's read" in scored.str("basis"))
+        assertEquals(6L, scored.objAt("rank").long("beats")) // ranked above all 6 real posts
+        assertEquals(aiCalls, ai.requests.size) // the app's AI key was never used
+        e.db.tx { assertEquals(scored.long("viral_potential"), get("slideshows", id)!!.objAt("prediction").long("viral_potential")) }
+
+        // A read that doesn't match the schema is refused, readably.
+        val bad = call("predict_virality", obj("slideshow_id" to id, "read" to obj("hook_score" to 80)))
+        assertEquals(true, bad["isError"])
+        assertTrue("answer_schema" in bad.objs("content")[0].str("text"), bad.toString())
     }
 
     @Test fun fast_renders_report_the_queued_post() {
