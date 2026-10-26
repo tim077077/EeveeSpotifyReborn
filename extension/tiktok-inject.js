@@ -17,6 +17,7 @@
  *   2. POST https://<UploadHost>/upload/v1/<Uri>  -> upload the bytes (Content-CRC32)
  *   3. POST /top/v1?Action=CommitImageUpload      -> final image Uri + dimensions
  *   4. POST /tiktok/web/project/post/v1/          -> create the post (auto-signed in-page)
+ *      or POST /api/v1/draft/create_update/      -> save it to TikTok Studio's drafts instead
  *
  * Usage in the console (after pasting this file):
  *   await VBTikTok.postFromPicker({
@@ -415,18 +416,10 @@
     return { projectId: j.project_id, itemId: item && item.item_id };
   }
 
-  // ---- public API -----------------------------------------------------------
-
-  // sound: falsy = silent (default, proven path); true = auto-pick the top
-  // recommended web-library sound; a string = use that exact music_id.
-  async function post({ title, caption, images, sound }) {
-    if (!images || !images.length) throw new Error("no images");
-    if (location.host !== "www.tiktok.com") warn("run this on www.tiktok.com while logged in");
-
-    const creation_id = creationId();
+  // Steps 0-3: upload every slide to TikTok's image store (used by posts and drafts alike).
+  async function uploadImages(images) {
     log("fetching upload credentials…");
     const creds = await getCreds();
-
     const uploaded = [];
     let storageU = null;
     let firstStoreUri = null;
@@ -444,6 +437,19 @@
       log(`  ✓ ${committed.uri}`);
       uploaded.push(committed);
     }
+    return { uploaded, firstStoreUri };
+  }
+
+  // ---- public API -----------------------------------------------------------
+
+  // sound: falsy = silent (default, proven path); true = auto-pick the top
+  // recommended web-library sound; a string = use that exact music_id.
+  async function post({ title, caption, images, sound }) {
+    if (!images || !images.length) throw new Error("no images");
+    if (location.host !== "www.tiktok.com") warn("run this on www.tiktok.com while logged in");
+
+    const creation_id = creationId();
+    const { uploaded, firstStoreUri } = await uploadImages(images);
 
     // Optional: attach a web-library sound. recommendMusic returns full objects
     // (id/title/author/url/album/end); createPost turns one into music_info.
@@ -486,16 +492,59 @@
     });
   }
 
-  // ---- drafts (placeholder) --------------------------------------------------
-  // TODO(slidemill): wire this to TikTok Studio's "Save draft" request. Capture it once:
-  // TikTok Studio -> F12 -> Network -> upload a carousel -> click "Save draft" -> right-click the
-  // request -> Copy as fetch. Until then draft jobs are reported as unsupported, and Slidemill
-  // keeps them queued (they are never posted publicly by mistake).
-  const DRAFT_SUPPORTED = false;
-  async function saveDraft(/* { title, caption, images, sound } */) {
-    const e = new Error("Saving drafts isn't wired up yet (waiting for the captured 'Save draft' request).");
-    e.unsupported = true;
-    throw e;
+  // ---- drafts ----------------------------------------------------------------
+  // TikTok Studio's "Save draft" (captured from a real HAR): the same image uploads as a post, then
+  // POST /api/v1/draft/create_update/. The draft lands in TikTok Studio's drafts (tiktok.com/tiktokstudio/
+  // content?tab=draft), where it can be opened, given a sound and posted. TikTok keeps drafts ~60 days.
+  const DRAFT_SUPPORTED = true;
+
+  // The caption box's rich-text state (Draft.js), one block per line, as Studio sends it.
+  function markupText(text) {
+    const blocks = String(text || "").split("\n").map((line) => ({
+      key: rand(5), text: line, type: "unstyled", depth: 0, inlineStyleRanges: [], entityRanges: [], data: {},
+    }));
+    return JSON.stringify({ blocks, entityMap: {} });
+  }
+
+  async function saveDraft({ title, caption, images }) {
+    if (!images || !images.length) throw new Error("no images");
+    if (location.host !== "www.tiktok.com") warn("run this on www.tiktok.com while logged in");
+    const { uploaded } = await uploadImages(images);
+    const list = uploaded.map((u, idx) => ({ id: "file_" + Date.now() + "_" + idx, uri: u.uri, width_px: u.w, height_px: u.h }));
+    const body = {
+      draft: {
+        web_feature_common_info: {
+          aigc_info: { aigc_label_type: 0 },
+          org_game_post_use_store_region: false,
+          vedit_common_info: {},
+          privacy_setting_info: { allow_comment: 1, allow_duet: 1, allow_stitch: 1, allow_content_reuse: 1, allow_ai_remix: 2, visibility_type: 0 },
+          tcm_params: '{"commerce_toggle_info":{}}',
+          anchors: [],
+        },
+        basic_info: {
+          creation_id: creationId(),
+          enter_post_page_from: 1,
+          media_draft_info: { aweme_type: 150, image_post_content: { title: title || "", images: list, cover: list[0] } },
+        },
+        draft_id: "",
+        web_video_param_list: [
+          { single_post_feature_info: { text: caption || "", text_extra: hashtagExtra(caption || ""), markup_text: markupText(caption) } },
+        ],
+      },
+    };
+    log("saving draft…");
+    // msToken / X-Bogus / X-Gnarly are added by TikTok's in-page fetch hook, as for posts.
+    const r = await fetch(ORIGIN + "/api/v1/draft/create_update/?aid=1988", {
+      method: "POST",
+      credentials: "include",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify(body),
+    });
+    const j = await r.json();
+    const draftId = j && j.draft && j.draft.draft && j.draft.draft.draft_id;
+    if (j.status_code !== 0 || !draftId) throw new Error("save draft failed: " + JSON.stringify(j).slice(0, 400));
+    log("%c✓ SAVED TO DRAFTS", "color:#12b886;font-weight:bold", draftId);
+    return { draftId };
   }
 
   // ---- Slidemill jobs (sent by bridge.js) -------------------------------------

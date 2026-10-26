@@ -5,6 +5,7 @@ on:
     paths:
       - "android/**"
       - "extension/tiktok-inject.js"
+      - "extension/test/**"
       - "static/**"
       - "fonts/**"
       - ".github/workflows/android.yml"
@@ -19,6 +20,8 @@ jobs:
         with:
           distribution: temurin
           java-version: "17"
+      - name: Test the TikTok poster script
+        run: node extension/test/draft.test.mjs
       - name: Test the engine
         working-directory: android
         run: ./gradlew :core:test --no-daemon

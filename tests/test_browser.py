@@ -1,4 +1,4 @@
-"""Browser-extension posting: queue, caps, gaps, drafts placeholder, retries, API endpoints."""
+"""Browser-extension posting: queue, caps, gaps, drafts, retries, API endpoints."""
 
 from __future__ import annotations
 

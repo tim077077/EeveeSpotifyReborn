@@ -149,7 +149,8 @@ object Models {
         f("auto_post", true, V.bool),
         // BROWSER = posted from a logged-in TikTok web session (the phone's TikTok tab or the extension).
         f("post_mode", "MEDIA_UPLOAD", V.str(listOf("DIRECT_POST", "MEDIA_UPLOAD", "BROWSER"))),
-        // publish right away, or "draft": on the phone, hand it to the TikTok app to finish.
+        // publish right away, or "draft": saved to TikTok Studio's drafts (or, on a phone whose TikTok
+        // tab isn't logged in, handed to the TikTok app to finish).
         f("browser_action", "publish", V.str(listOf("publish", "draft"))),
         f("visibility", "PUBLIC_TO_EVERYONE", V.str(Shapes.PRIVACY)),
         f("auto_music", true, V.bool),
