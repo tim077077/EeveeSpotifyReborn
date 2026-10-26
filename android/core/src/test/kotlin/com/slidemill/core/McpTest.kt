@@ -48,7 +48,7 @@ class McpTest {
         val names = result("tools/list").objs("tools").map { it.str("name") }
         assertEquals(listOf(
             "writing_guide", "research_library", "add_to_library", "read_library_slides", "save_slide_texts", "create_slideshow",
-            "save_draft", "view_slideshow", "list_slideshows", "delete_slideshow", "predict_virality", "my_posts", "best_times", "phone_status",
+            "import_slides", "save_draft", "view_slideshow", "list_slideshows", "delete_slideshow", "predict_virality", "my_posts", "best_times", "phone_status",
         ), names)
         // Notifications get no body; modern-era discovery falls back to the handshake; GET isn't served.
         assertEquals(202, e.relay.mcp.handle("POST", """{"jsonrpc":"2.0","method":"notifications/initialized"}""").status)
@@ -80,6 +80,40 @@ class McpTest {
         assertTrue("Already in TikTok drafts (draft id 70000000001)" in text(twice), text(twice))
         assertTrue("draft id 70000000002" in text(call("save_draft", obj("slideshow_id" to id, "again" to true))))
         assertEquals(2, tiktok.saved.size)
+    }
+
+    @Test fun slides_claude_made_are_imported_and_saved_as_a_draft() {
+        // One slide by link (served locally), one inline: the phone stores them as they are and saves the draft.
+        val server = com.sun.net.httpserver.HttpServer.create(java.net.InetSocketAddress("127.0.0.1", 0), 0)
+        val cover = TestKit.jpeg(1080, 1350, java.awt.Color(10, 120, 200))
+        server.createContext("/s1.jpg") { ex -> ex.sendResponseHeaders(200, cover.size.toLong()); ex.responseBody.use { it.write(cover) } }
+        server.start()
+        try {
+            val inline = "data:image/jpeg;base64," + java.util.Base64.getEncoder().encodeToString(TestKit.jpeg(1080, 1350))
+            val out = call("import_slides", obj(
+                "slides" to arr("http://127.0.0.1:${server.address.port}/s1.jpg", inline),
+                "caption" to "my own slides", "description" to "made by Claude #test", "save_draft" to true,
+            ))
+            assertEquals(false, out["isError"], out.toString())
+            assertEquals("Saved to TikTok Studio drafts (draft id 70000000001).", text(out, 1))
+            assertEquals(2, out.objs("content").count { it.str("type") == "image" })
+            val (title, caption, slides) = tiktok.saved.single()
+            assertEquals("my own slides", title)
+            assertEquals("made by Claude #test", caption)
+            assertEquals(2, slides.size)
+            val first = javax.imageio.ImageIO.read(slides[0])
+            assertEquals(1080 to 1350, first.width to first.height) // kept as made, no text drawn on it
+            assertTrue(java.awt.Color(first.getRGB(500, 600)).blue > 150)
+        } finally {
+            server.stop(0)
+        }
+
+        val bad = call("import_slides", obj("slides" to arr("data:image/png;base64,bm90IGFuIGltYWdl"), "caption" to "x"))
+        assertEquals(true, bad["isError"])
+        assertTrue("Slide 1 isn't an image" in text(bad), text(bad))
+        assertTrue("expected an https link" in text(call("import_slides", obj("slides" to arr("file:///etc/passwd"), "caption" to "x"))))
+        assertTrue("TikTok allows 89" in text(call("import_slides", obj("slides" to arr("https://x"), "caption" to "x".repeat(90)))))
+        assertEquals(1, tiktok.saved.size)
     }
 
     @Test fun a_failed_save_says_why_and_is_recorded() {

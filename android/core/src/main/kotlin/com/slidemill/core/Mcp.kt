@@ -38,9 +38,9 @@ class Mcp(private val e: Engine) {
 
 How to work with it:
 1. Call writing_guide once, and research_library to see which real slideshows in the user's niche beat their account's usual views. Write in that spirit; never copy a post. (add_to_library imports accounts; read_library_slides lets you read slide text the library doesn't have yet.)
-2. Write each slideshow yourself and pass it to create_slideshow. Look at the rendered slides it returns and fix what reads badly (create a new version, delete the weak one).
+2. Write each slideshow yourself and pass it to create_slideshow (the phone finds backgrounds and draws your text). Or, if you made finished slide images yourself, pass them to import_slides as https links or small data URIs. Look at the slides that come back and fix what reads badly.
 3. predict_virality scores a slideshow with you as the reader: call it once for the rules, the slides and real library posts to rank it against, write your read, and call it again with that read. Use the scores to choose.
-4. save_draft (or create_slideshow with save_draft: true) puts it in the user's TikTok Studio drafts right away and answers with TikTok's draft id. Drafts are never public: the user adds a sound and posts from TikTok. If it fails, the answer says why (for example: not logged in to TikTok in the app)."""
+4. save_draft (or create_slideshow / import_slides with save_draft: true) puts it in the user's TikTok Studio drafts right away and answers with TikTok's draft id. Drafts are never public: the user adds a sound and posts from TikTok. If it fails, the answer says why (for example: not logged in to TikTok in the app)."""
 
         private fun str(description: String = "", enum: List<String>? = null): Obj =
             obj("type" to "string").also { o -> if (description.isNotEmpty()) o["description"] = description; enum?.let { o["enum"] = it.toMutableList<Any?>() } }
@@ -105,6 +105,22 @@ How to work with it:
                 "save_draft" to bool("Save to TikTok Studio drafts once rendered."),
             ),
         ) { a -> create(a) },
+
+        "import_slides" to Tool(
+            "Use slide images you made yourself (for example rendered in your own sandbox and hosted, or from a design " +
+                "tool): the phone stores them as they are, in order, with no text drawn on them, and with save_draft also " +
+                "saves them to the user's TikTok Studio drafts in the same call. Each slide is an https link to a PNG/JPEG/WebP " +
+                "image, or a data:image/...;base64 URI (keep inline images small: the whole call must stay under about 900 KB). " +
+                "Portrait 1080x1350 (4:5) or 1080x1920 (9:16) works best; 2-35 slides.",
+            input(
+                listOf("slides", "caption"),
+                "slides" to strs("The slide images in order: https URLs or data:image/...;base64 URIs."),
+                "caption" to str("The TikTok post title shown on the carousel, at most 89 characters."),
+                "description" to str("The TikTok caption: one or two sentences plus 3-5 hashtags."),
+                "title" to str("A short internal name (defaults to the caption)."),
+                "save_draft" to bool("Save to TikTok Studio drafts right away."),
+            ),
+        ) { a -> importSlides(a) },
 
         "save_draft" to Tool(
             "Save a rendered slideshow to the user's TikTok Studio drafts now, from the phone's logged-in TikTok tab. " +
@@ -331,6 +347,58 @@ How to work with it:
                 done == null -> out.add(1, text("Rendered. Saving to TikTok drafts is still running: view_slideshow shows the draft id or the error."))
                 done.isEmpty() -> out.add(1, text("Saved to TikTok Studio drafts (draft id ${s.objAt("draft").str("draft_id")})."))
                 else -> out.add(1, text("Rendered, but NOT saved to TikTok drafts: $done"))
+            }
+        }
+    }
+
+    /** An https image or a data: URI as bytes. Throws ToolError naming the slide. */
+    private fun slideBytes(n: Int, ref: String): ByteArray {
+        val s = ref.trim()
+        if (s.startsWith("data:")) {
+            val comma = s.indexOf(',')
+            if (comma < 0 || !s.substring(0, comma).endsWith(";base64")) throw ToolError("Slide $n: a data URI must be data:image/...;base64,...")
+            return try {
+                Base64.getMimeDecoder().decode(s.substring(comma + 1))
+            } catch (x: IllegalArgumentException) {
+                throw ToolError("Slide $n: the base64 data is broken (${x.message}).")
+            }
+        }
+        if (!s.startsWith("https://") && !s.startsWith("http://")) throw ToolError("Slide $n: expected an https link or a data:image URI.")
+        val r = try {
+            Net.get(s, mapOf("User-Agent" to Net.BROWSER_UA), timeoutSec = 40)
+        } catch (x: Exception) {
+            throw ToolError("Slide $n: couldn't download $s (${x.message}).")
+        }
+        if (r.status >= 400) throw ToolError("Slide $n: $s answered HTTP ${r.status}.")
+        if (r.body.size > 20_000_000) throw ToolError("Slide $n is over 20 MB.")
+        return r.body
+    }
+
+    private fun importSlides(a: Obj): List<Any?> {
+        val refs = a.strings("slides").filter { it.isNotBlank() }
+        if (refs.isEmpty()) throw ToolError("slides is empty: pass the slide images in order.")
+        if (refs.size > Studio.MAX_SLIDES) throw ToolError("TikTok takes at most ${Studio.MAX_SLIDES} slides; got ${refs.size}.")
+        val caption = a.str("caption").trim()
+        if (caption.length > 89) throw ToolError("caption is ${caption.length} characters; TikTok allows 89.")
+        val draft = a.bool("save_draft")
+        // Downloading, storing and saving run as one job, so a slow upload still finishes and is recorded.
+        val holder = arrayOfNulls<String>(1)
+        val done = within {
+            val bytes = refs.mapIndexed { i, r -> slideBytes(i + 1, r) }
+            val id = e.studio.importSlides(a.str("title").trim(), caption, a.str("description").trim(), bytes)
+            holder[0] = id
+            if (!draft) null else runCatching { e.studio.saveDraft(id, e.tiktok) }.exceptionOrNull()?.message ?: ""
+        }
+        val id = holder[0] ?: return arr(text(
+            "Still downloading the slides on the phone. Call list_slideshows in a minute" + (if (draft) "; it's saved to TikTok drafts once they're in." else "."),
+        ))
+        val s = show(id)
+        return withSlides(s).also { out ->
+            when {
+                !draft -> {}
+                done == null -> out.add(1, text("Imported. Saving to TikTok drafts is still running: view_slideshow shows the draft id or the error."))
+                done.isEmpty() -> out.add(1, text("Saved to TikTok Studio drafts (draft id ${s.objAt("draft").str("draft_id")})."))
+                else -> out.add(1, text("Imported, but NOT saved to TikTok drafts: $done"))
             }
         }
     }

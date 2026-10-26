@@ -22,6 +22,10 @@ class Studio(
 ) {
     val sources = listOf("auto", "stock", "ai")
 
+    companion object {
+        const val MAX_SLIDES = 35 // TikTok's photo-post limit
+    }
+
     fun specFromPlan(plan: Map<String, Any?>, aspectRatio: String): Obj {
         val slides = plan.objs("slides").map { ps ->
             Models.SLIDE.of(obj(
@@ -49,6 +53,37 @@ class Studio(
                 "rendered" to arr(), "error" to "", "draft" to null, "prediction" to null,
             ))
         }.str("id")
+    }
+
+    /**
+     * Store finished slide images Claude made elsewhere, as a ready slideshow (no rendering). Each image is
+     * re-encoded as a JPEG of at most 2160x2700, keeping its shape.
+     */
+    fun importSlides(title: String, caption: String, description: String, images: List<ByteArray>): String {
+        if (images.isEmpty()) throw PipelineError("No slides.")
+        if (images.size > MAX_SLIDES) throw PipelineError("TikTok takes at most $MAX_SLIDES slides; got ${images.size}.")
+        val jpegs = images.mapIndexed { i, data ->
+            try {
+                platform.imaging.normalize(data, 2160, 2700, 92).jpeg
+            } catch (x: Exception) {
+                throw PipelineError("Slide ${i + 1} isn't an image Slidemill can read (${x.message ?: "unknown format"}).")
+            }
+        }
+        val id = db.tx {
+            insert("slideshows", obj(
+                "title" to title.ifEmpty { caption }.ifEmpty { "Imported slideshow" }, "status" to "rendering", "source" to "imported",
+                "spec" to Models.SPEC.of(obj("title" to title, "slides" to jpegs.map { obj() }.toMutableList<Any?>())),
+                "caption" to caption.take(89), "description" to description,
+                "rendered" to arr(), "error" to "", "draft" to null, "prediction" to null,
+            ))
+        }.str("id")
+        val dir = File(mediaDir, "slideshows/$id").also { it.mkdirs() }
+        val rendered = jpegs.mapIndexed { i, jpeg ->
+            File(dir, "slide_${i + 1}.jpg").writeBytes(jpeg)
+            "slideshows/$id/slide_${i + 1}.jpg"
+        }
+        db.tx { get("slideshows", id)?.let { it["rendered"] = rendered.toMutableList<Any?>(); it["status"] = "completed" } }
+        return id
     }
 
     /** Backgrounds, then the slides. Never throws: a failure is recorded on the row. */

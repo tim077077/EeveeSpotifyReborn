@@ -14,7 +14,7 @@ const TIMEOUT_MS = 290_000; // rendering with AI backgrounds can take a few minu
 const MAX_BODY = 1_000_000;
 const ORIGINS = ["https://claude.ai", "https://claude.com"];
 // Tools that change things: while the phone is offline these wait here and run when it's back.
-const QUEUEABLE = ["create_slideshow", "save_draft", "delete_slideshow"];
+const QUEUEABLE = ["create_slideshow", "import_slides", "save_draft", "delete_slideshow"];
 const MAX_QUEUE = 20;
 
 const json = (status, body, headers = {}) =>
