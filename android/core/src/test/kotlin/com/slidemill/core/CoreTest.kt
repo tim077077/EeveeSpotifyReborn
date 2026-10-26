@@ -160,4 +160,21 @@ class CoreTest {
             "music" to obj("title" to "original sound", "authorName" to "glowdaily"),
         )
     }
+
+    /**
+     * Android's regex engine (ICU) rejects a bare "}" that desktop Java accepts, which crashed the app
+     * on launch. Every regex literal in the engine must escape braces that aren't quantifiers.
+     */
+    @Test fun regexes_compile_on_android() {
+        val literal = Regex("Regex\\(\"((?:[^\"\\\\]|\\\\.)*)\"")
+        val bad = java.io.File("src/main/kotlin").walk().filter { it.extension == "kt" }.flatMap { f ->
+            literal.findAll(f.readText()).map { f.name to it.groupValues[1].replace("\\\\", "\\") }
+        }.filter { (_, re) ->
+            val rest = re.replace(Regex("\\\\[pP]\\{[^}]*\\}"), "")
+                .replace(Regex("\\\\."), "")
+                .replace(Regex("\\{\\d+(,\\d*)?\\}"), "")
+            '{' in rest || '}' in rest
+        }.toList()
+        assertEquals(emptyList(), bad)
+    }
 }

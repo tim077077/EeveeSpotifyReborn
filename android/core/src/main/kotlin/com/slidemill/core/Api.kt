@@ -49,7 +49,7 @@ class Api(private val e: Engine, private val token: String, port: Int) : NanoHTT
     private val routes = mutableListOf<Route>()
 
     private fun route(method: String, path: String, status: Int = 200, handler: (Req) -> Any?) {
-        val pattern = Regex("^/api/v1" + path.replace(Regex("\\{[a-z_]+}"), "([^/]+)") + "$")
+        val pattern = Regex("^/api/v1" + path.replace(Regex("\\{[a-z_]+\\}"), "([^/]+)") + "$")
         routes += Route(method, pattern, handler, status)
     }
 
