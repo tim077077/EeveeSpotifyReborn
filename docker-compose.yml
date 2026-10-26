@@ -1,0 +1,35 @@
+# Production stack: Slidemill behind Caddy, which gets and renews HTTPS certificates automatically.
+# Configure with deploy/.env (created by deploy/install.sh).
+services:
+  app:
+    build: .
+    restart: unless-stopped
+    env_file: deploy/.env
+    environment:
+      PUBLIC_BASE_URL: https://${DOMAIN:?set DOMAIN in deploy/.env}
+    volumes:
+      - slidemill-data:/data
+    expose:
+      - "8000"
+
+  caddy:
+    image: caddy:2.8
+    restart: unless-stopped
+    depends_on:
+      - app
+    ports:
+      - "80:80"
+      - "443:443"
+      - "443:443/udp"
+    environment:
+      DOMAIN: ${DOMAIN}
+      ACME_EMAIL: ${ACME_EMAIL:-}
+    volumes:
+      - ./deploy/Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddy-data:/data
+      - caddy-config:/config
+
+volumes:
+  slidemill-data:
+  caddy-data:
+  caddy-config:

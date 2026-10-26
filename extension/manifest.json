@@ -1,0 +1,32 @@
+{
+  "manifest_version": 3,
+  "name": "Slidemill TikTok Poster",
+  "version": "2.0.0",
+  "description": "Posts Slidemill slideshows to TikTok from your logged-in tiktok.com tab, on Slidemill's schedule. No API key or developer app.",
+  "icons": { "128": "icon128.png" },
+  "action": { "default_popup": "popup.html", "default_icon": { "128": "icon128.png" } },
+  "permissions": ["declarativeNetRequestWithHostAccess", "storage", "alarms"],
+  "background": { "service_worker": "bg.js" },
+  "host_permissions": [
+    "https://www.tiktok.com/*",
+    "https://*.tiktokcdn-eu.com/*",
+    "https://*.tiktokcdn.com/*",
+    "https://*.byteimg.com/*",
+    "http://localhost/*",
+    "http://127.0.0.1/*"
+  ],
+  "optional_host_permissions": ["https://*/*", "http://*/*"],
+  "content_scripts": [
+    {
+      "matches": ["https://www.tiktok.com/*"],
+      "js": ["tiktok-inject.js", "panel.js"],
+      "run_at": "document_idle",
+      "world": "MAIN"
+    },
+    {
+      "matches": ["https://www.tiktok.com/*"],
+      "js": ["bridge.js"],
+      "run_at": "document_idle"
+    }
+  ]
+}

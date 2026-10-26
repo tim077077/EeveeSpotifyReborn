@@ -1,97 +1,134 @@
-# Discontinuation Notice
+# Slidemill
 
-https://t.me/SpotilifeIPAs/196
+A self-hosted TikTok slideshow factory. Describe what you want and it plans the format, writes every slide, makes or finds the background images, and renders finished slideshows. It can post them to TikTok on a schedule, as drafts or as public posts, and it tracks how each post does. It works with any AI key: Claude, OpenAI, Gemini, OpenRouter, Groq, DeepSeek, xAI, Mistral, Together, a local Ollama, or any OpenAI-compatible server.
 
-![Banner](Images/banner.png?)
+It was built by tearing down how reel.farm works; see [docs/REELFARM_TEARDOWN.md](docs/REELFARM_TEARDOWN.md).
 
-# The original EeveeSpotify repository was disabled due to a [DMCA takedown](https://github.com/github/dmca/blob/master/2025/08/2025-08-14-spotify.md). This repository will not contain the IPA packages, as they are most likely the reason for the takedown.
+## Features
 
-# EeveeSpotify
+- **Studio.** Type something like "glow-up slideshows for girls 16–22, soft pink aesthetic, 6 slides". It plans a content format (voice, slide structure, visual style and a set of hooks), then makes N complete slideshows with text and AI-generated or stock backgrounds. One checkbox turns the format into an automation that keeps posting.
+- **Slideshow library.** Scrape public TikTok slideshow accounts and posts into your own database. You get followers, link in bio, niche (AI-classified), what the account promotes, and per-post views, likes and saves. Slide images are stored locally. You can search by keyword and filter by niche. "Read slides" extracts the on-image text with a vision model, and "Remix" makes new slideshows in a winning post's format on your own topic.
+- **Any AI key.** Paste a key in Settings and the provider is detected from its prefix. The model and base URL can be overridden. Claude uses structured outputs. Everything else goes through the OpenAI-compatible API in JSON mode, with schema validation and one automatic repair retry.
+- **AI backgrounds.** Images come from OpenAI (`gpt-image-1`), Gemini (`gemini-2.5-flash-image`), Together (FLUX) or Pollinations (free, no key, watermarked). An OpenAI or Gemini writing key makes images too, so one key covers everything.
+- **AI slideshow generator.** You give it a prompt; the AI returns hook, body and CTA slides with styling, a caption and a description. Recent titles go back into the prompt so new slideshows don't repeat old ones.
+- **Best times to post, by country.** Pick the country you want to reach and how many posts a day. You get a weekly schedule in that country's local time, with a day × hour heatmap. Multi-timezone countries (US, Canada, Brazil, Australia, Mexico, Indonesia) are weighted by population, and local weekends (Fri–Sat in Saudi Arabia, Egypt and Israel) and late-evening cultures (Spain, Latin America, the Gulf) are respected. The schedule starts from an engagement baseline and adapts as real data comes in: scraped library posts from accounts in that country and your own posts' views. One click turns on **auto-posting**: each slideshow is generated 15 minutes early and published on time, plus 0–4 random minutes, either publicly or to drafts.
+- **Virality prediction (before you post).** This is our take on Higgsfield's Virality Predictor, built for photo carousels. A vision model reads the rendered slides like a scrolling viewer. Its read is calibrated with real hooks from your library that beat or missed their account's usual views, and plain format rules check the structure (for example, a "5 habits" hook needs 5 list slides). It shows:
+  - viral potential out of 100
+  - a hook score
+  - the hold rate (the share of viewers who reach the last slide)
+  - an attention curve per slide
+  - five dimensions: visual pull, curiosity, clarity, relatability and shareability
+  - concrete fixes, and a stronger hook you can apply in one tap
 
-This tweak makes Spotify think you have a Premium subscription, granting free listening, just like Spotilife, and provides some additional features like custom lyrics.
+  Automations can **pre-test**: below your threshold, Slidemill writes one more version and keeps the better one. Analytics grades the predictor against your real views (rank correlation), so you can see whether it actually works for your account. See [docs/VIRALITY.md](docs/VIRALITY.md).
+- **Slide renderer.** TikTok-style outline text and boxed text, 7 fonts, 4 aspect ratios, grid layouts, darkening overlays and Korean/Japanese/Chinese text. Every slide can be edited in the dashboard and re-rendered.
+- **Automations.** Each automation has a list of hooks that it rotates through, a style prompt, a language, an optional product for a soft CTA, image settings and posting times (cron). Automations can be paused, resumed or run now.
+- **Images.** Upload your own image collections or import them from Pexels/Unsplash. You can also let it search stock photos for each slide automatically. Collections are cycled least-used first so images don't repeat.
+- **Browser poster (no developer app).** The Chrome extension in `extension/` posts Slidemill's queue from your logged-in tiktok.com tab, using the same internal endpoints TikTok Studio's web uploader uses. Pick "Post from my browser" anywhere you choose how to post: one slideshow, an automation, Best times or Studio. Slidemill caps posts per day (6 by default) and spaces them out (20 min by default), and view counts come from each post's public page. "Save drafts from my browser" is a placeholder: those jobs wait in the queue, never posted publicly, until the "Save draft" request is captured. Download the extension in **Settings → Browser poster** and read `extension/HOW-TO-USE.txt`. This route is against TikTok's terms, so use an account you can afford to lose.
+- **Android app: everything on the phone.** `android/` is all of Slidemill in one APK, with no server. It includes the engine rewritten in Kotlin (`android/core`, same prompts, timing model and API), the same dashboard, a TikTok tab that posts by itself, and a "Send to the TikTok app" mode that opens TikTok's own editor with the slides at the planned time. The APK is built by the "Android APK" GitHub workflow. See [android/README.md](android/README.md).
+- **TikTok posting.** Connect any number of accounts with OAuth. Posts go out as photo carousels, either straight to your TikTok drafts (`MEDIA_UPLOAD`) or published directly (`DIRECT_POST`). The direct-post daily limit is enforced, with automatic fallback to drafts.
+- **Analytics.** It polls each post's publish status and syncs views, likes, comments and shares every 10 minutes.
+- **MP4 export** for Reels and Shorts, plus a **REST API** (`/api/v1`, docs at `/docs`).
+- **Claude connector (MCP).** Add the server to Claude as a custom connector. Claude can then research your library, write slideshows, see the rendered slides, score them and queue posts, all in conversation, and the writing runs on your Claude plan. The URL is in **Settings → Connect Claude**. The phone app works too, through a free relay on your own Cloudflare account, with no server. See [docs/CLAUDE_CONNECTOR.md](docs/CLAUDE_CONNECTOR.md).
 
-## How to build an EeveeSpotify IPA using Github actions
-> [!NOTE]
-> If this your first time, complete following steps before starting:
->
-> 1. Fork this repository using the fork button on the top right
-> 2. On your forked repository, go to **Repository Settings** > **Actions**, enable **Read and Write** permissions.
+## Deploy (production)
 
-<details>
-  <summary>How to build the EeveeSpotify IPA</summary>
-  <ol>
-    <li>Click on <strong>Sync fork</strong>, and if your branch is out-of-date, click on <strong>Update branch</strong>.</li>
-    <li>Navigate to the <strong>Actions tab</strong> in your forked repository and select <strong>Create IPA Packages</strong> if you're on desktop/widescreen. Tap on <strong>All Workflows</strong> and select <strong>Create IPA Packages</strong> if you're on mobile/portrait.</li>
-    <li>Click the <strong>Run workflow</strong> button located on the right side.</li>
-    <li>Prepare a decrypted .ipa file <em>(we cannot provide this due to legal reasons)</em>, then upload it to a file provider (e.g., filebin.net, filemail.com, or Dropbox is recommended). Paste the URL of the decrypted IPA file in the provided field.</li>
-    <li><strong>NOTE:</strong> Make sure to provide a direct download link to the file, not a link to a webpage. Otherwise, the process will fail.</li>
-    <li>Go to the releases page of the EeveeSpotify repository (<strong>NOT</strong> the fork). Hold and copy the link of the .deb file, which corresponds to your phone's architecture.</li>
-    <li>Make sure all inputs are correct, then click <strong>Run workflow</strong> to start the process.</li>
-    <li>Wait for the build to finish. You can download the EeveeSpotify IPA from the releases section of your forked repo. (If you can't find the releases section, go to your forked repo and add /releases to the URL, i.e., github.com/user/EeveeSpotifyReborn/releases.)</li>
-  </ol>
-</details>
+On a fresh Ubuntu server with a domain pointed at it:
 
-## The History
+```bash
+git clone <your repo URL> slidemill && cd slidemill && sudo ./deploy/install.sh
+```
 
-In January 2024, Spotilife, the only tweak to get Spotify Premium, stopped working on new Spotify versions. I decompiled Spotilife, reverse-engineered Spotify, intercepted requests, etc., and created this tweak.
+The script sets up Docker, generates the dashboard password and the encryption key, and starts Slidemill behind Caddy with automatic HTTPS. **Follow [docs/LAUNCH_CHECKLIST.md](docs/LAUNCH_CHECKLIST.md)** for the server, the keys, the TikTok app review and your first two weeks.
 
-## Restrictions
+**Security**
 
-Please refrain from opening issues about the following features, as they are server-sided and will **NEVER** work:
+- The server refuses to start on a public URL without a strong `SLIDEMILL_API_KEY`.
+- API keys and TikTok tokens are encrypted at rest.
+- The container runs as a non-root user, and the app sends standard security headers.
+- Direct posts follow TikTok's content-sharing rules: the creator is shown, privacy has no default, toggles are off by default, commercial content is disclosed, and music-usage consent is required. Scheduled direct posts happen only after you give consent once in the automation's settings; without it they go to drafts.
 
-- Very High audio quality
-- Native playlist downloading (you can download podcast episodes though)
-- Jam (hosting a Spotify Jam and joining it remotely requires Premium; only joining in-person works)
-- AI DJ/Playlist
-- Spotify Connect (When using Spotify Connect, the device will act as a remote control and stream directly to the connected device. This is a server-sided limitation and is beyond the control of EeveeSpotify, so it will behave as if you have a Free subscription while using this feature.)
+## Run it locally
 
-It's possible to implement downloading locally, but it will never be included in EeveeSpotify (unless someone opens a pull request).
+```bash
+python3 -m venv .venv && .venv/bin/pip install -r requirements.txt
+cp .env.example .env        # fill in keys
+.venv/bin/uvicorn app.main:app --port 8000
+# open http://localhost:8000
+```
 
-## Lyrics Support
+You also need `ffmpeg` installed for video export.
 
-EeveeSpotify replaces Spotify monthly limited lyrics with one of the following four lyrics providers:
+For production, use the Docker setup in the Deploy section above.
 
-- Genius: Offers the best quality lyrics, provides the most songs, and updates lyrics the fastest. Does not and will never be time-synced.
+### Keys you need
 
-- LRCLIB: The most open service, offering time-synced lyrics. However, it lacks lyrics for many songs.
+| What | Where | Needed for |
+|---|---|---|
+| Any AI key (Anthropic, OpenAI, Gemini, OpenRouter, Groq, …), or Ollama running locally | the provider's console | Writing slideshows (required). Paste it in **Settings**. |
+| Image key (optional) | OpenAI / Gemini / Together | Clean AI backgrounds. Without one, an OpenAI/Gemini writing key is reused, or Pollinations is used (free, watermarked). |
+| `PEXELS_API_KEY` and/or `UNSPLASH_ACCESS_KEY` | pexels.com/api, unsplash.com/developers | Stock-photo backgrounds (optional) |
+| `APIFY_TOKEN` | apify.com | Library discovery by keyword/#hashtag, and reliable profile scraping (optional) |
+| `TIKTOK_CLIENT_KEY` / `TIKTOK_CLIENT_SECRET` | developers.tiktok.com | Posting and analytics |
 
-- Musixmatch: The service Spotify uses. Provides time-synced lyrics for many songs, but you'll need a user token to use this source. To obtain the token, download Musixmatch from the App Store, sign up, then go to Settings > Get help > Copy debug info, and paste it into EeveeSpotify alert. You can also extract the token using MITM.
+### TikTok app setup (the part that takes the longest)
 
-- PetitLyrics: Offers plenty of time-synced Japanese and some international lyrics.
+1. Create an app at developers.tiktok.com and add the **Login Kit** and **Content Posting API** products. Request the scopes `user.info.basic`, `video.upload`, `video.publish` and `video.list`.
+2. Set the redirect URI to `{PUBLIC_BASE_URL}/auth/tiktok/callback`.
+3. Verify your domain (or URL prefix `{PUBLIC_BASE_URL}/media/`). TikTok downloads slide images from there (`PULL_FROM_URL`), so the server has to be reachable over HTTPS on that domain.
+4. Until TikTok audits your app, direct posts are forced to private (`SELF_ONLY`) and only work for test users. `MEDIA_UPLOAD` (drafts) is the usual way to start: posts land in your TikTok inbox, you add a trending sound and publish.
 
-If the tweak is unable to find a song or process the lyrics, you'll see a "Couldn't load the lyrics for this song" message. The lyrics might be wrong for some songs when using Genius due to how the tweak searches songs. While I've made it work in most cases, kindly refrain from opening issues about it.
+### How library scraping works
 
-## How It Works
+| Input | Method | Needs |
+|---|---|---|
+| Post URL | Reads the public page's embedded JSON over plain HTTP | Nothing |
+| `@username` | Profile stats over HTTP; post list via headless Chromium reading TikTok's own API calls | `pip install playwright` and Chromium. TikTok often returns empty lists to datacenter IPs, so run it from a home connection. |
+| `@username`, keyword, `#hashtag` | Apify's TikTok scraper | `APIFY_TOKEN` (pay-per-use) |
 
-**Starting with version 4.0, EeveeSpotify intercepts Spotify requests to load user data, deserializes it, and modifies the parameters in real-time. This method is the best so far and works incredibly stable, so the below explanation is no longer valid for v4.0 and later.**
+Tracked profiles refresh daily at 04:17. Scraping TikTok breaks its Terms of Service. The scraper only collects public data and paces its requests, but the risk of IP blocks or account action is yours.
 
-Upon login, Spotify fetches user data and caches it in the `offline.bnk` file in the `/Library/Application Support/PersistentCache` directory. It uses its proprietary binary format to store data, incorporating a length byte before each value, among other conventions. Certain keys, such as `player-license`, `financial-product`, `streaming-rules`, and others, determine the user abilities.
+## Tests
 
-The tweak patches this file while initializing; Spotify loads it and assumes you have Premium. To be honest, it doesn't really patch due to challenges with dynamic length and varied bytes. The tweak extracts the username from the current `offline.bnk` file and inserts it into `premiumblank.bnk` (a file containing all premium values preset), replacing `offline.bnk`. Spotify may reload user data, and you'll be switched to the Free plan. When this happens, you'll see a popup with quick restart app and reset data actions.
+```bash
+.venv/bin/python -m pytest -q
+```
 
-![Hex](Images/hex.png)
+The tests stub out the AI, image and TikTok calls (40 tests). They cover:
 
-Tweak also sets `trackRowsEnabled` in `SPTFreeTierArtistHubRemoteURLResolver` to `true`, so Spotify loads not just track names on the artist page, and adds a liked tracks row to the artist view models, allowing you to see the liked tracks row just like with Premium.
+- key → provider detection and the OpenAI-compatible JSON path with its repair retry
+- Studio producing complete slideshows with AI backgrounds and saving them as an automation
+- library import, search, slide reading and remix
+- generate, render, edit, publish, metrics sync and the direct-post cap
+- cron automations, collections and video export
+- hardening: direct-post consent rules, encryption at rest with migration of plaintext rows, and the public-deploy password guard
+- browser poster: queue order, one post at a time, daily cap and gap, drafts waiting for support, retries, stale claims, view counts, extension download
+- country schedules: the cron round-trip, weekend rules, learning from library data, apply-timing, posting at the planned time, and DB migration
 
-To open Spotify links in sideloaded app, use [OpenSpotifySafariExtension](https://github.com/BillyCurtis/OpenSpotifySafariExtension). Remember to activate it and allow access in Settings > Safari > Extensions.
+## Layout
 
-## Support
-
-EeveeSpotify has always been free and open-source project. However, I started accepting crypto donations if you'd like to support me. I really appreciate it:
-
-USDT (TRC-20): `TK4AZZLEWrahYUkKDG8r8Pr5BmkoFjs5zU`
-
-ETH/USDC/USDT: `0x4eFf79BdfCa9d3BC01a1d145eF343871bb0a3CdF`
-
-BTC: `bc1qspsnjenfq6wgj9a7pmm2xe3up4622wqxlem0g5`
-
-TON: `UQCgt8EfLdT3QOmnC11vsndUBHryi2suTcTOVCQqBgMdmg4l`
-
-LTC: `ltc1qup3v46fm05sxd278r63957wh4qf2esehevpy76`
-
-### Donors
-
-Thanks to the following donors for supporting the project and funding the automatic release workflow:
-
-- [Randy](https://github.com/randy-420)
-- [HAMO](https://github.com/hamzaharoon1314)
+```
+app/
+  llm.py         any-provider AI layer (Anthropic + OpenAI-compatible)
+  imagegen.py    AI backgrounds (OpenAI, Gemini, Together, Pollinations)
+  library.py     TikTok scraping, niche classification, slide reading
+  store.py       dashboard-editable settings
+  generator.py   slide writer + Studio format planner
+  renderer.py    Pillow slide renderer
+  images.py      stock search, collections, least-used picking
+  pipeline.py    generate -> images -> render -> publish -> metrics
+  tiktok.py      OAuth, photo posting, status, metrics
+  timing.py      best posting times per country (baseline + learned)
+  virality.py    pre-post virality prediction (hook, hold rate, attention curve) + self-calibration
+  browser_queue.py  queue the browser extension pulls from (caps, gaps, retries)
+  scheduler.py   cron jobs per automation, in its own timezone
+  crypto.py      encryption at rest for keys and tokens
+  legal.py       /about, /privacy, /terms pages for TikTok review
+  main.py        REST API + dashboard
+deploy/          install.sh, backup.sh, update.sh, Caddyfile
+extension/       Chrome extension: posts the queue from your tiktok.com tab
+android/core/    the engine in Kotlin (port of app/): runs inside the phone app, tested on the JVM
+android/app/     Android app: built-in dashboard server, TikTok tab, background engine + poster
+static/          dashboard (vanilla JS)
+fonts/           open-licence fonts (OFL)
+```

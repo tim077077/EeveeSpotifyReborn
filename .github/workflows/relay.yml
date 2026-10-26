@@ -1,0 +1,51 @@
+# Deploys the Claude relay (relay/) to your free Cloudflare account. Run it by hand from the Actions tab.
+# Needs two repository secrets: CLOUDFLARE_API_TOKEN ("Edit Cloudflare Workers" template) and CLOUDFLARE_ACCOUNT_ID.
+name: Deploy Claude relay
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: relay
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - name: Check the Cloudflare secrets
+        env:
+          TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          ACCOUNT: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+        run: |
+          if [ -z "$TOKEN" ] || [ -z "$ACCOUNT" ]; then
+            echo "::error::Add the CLOUDFLARE_API_TOKEN and CLOUDFLARE_ACCOUNT_ID secrets (repo Settings, Secrets and variables, Actions), then run this again."
+            exit 1
+          fi
+      - run: npm ci --no-audit --no-fund
+      - name: Deploy
+        env:
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+        run: |
+          set -o pipefail
+          if ! npx wrangler deploy 2>&1 | tee deploy.log; then
+            if grep -qi "workers.dev subdomain" deploy.log; then
+              echo "::error::Open Workers & Pages in the Cloudflare dashboard once (it sets up your workers.dev address), then run this again."
+            fi
+            exit 1
+          fi
+          url=$(grep -oE 'https://[a-z0-9.-]+\.workers\.dev' deploy.log | head -1)
+          {
+            echo "## Your relay is live"
+            echo
+            echo "Relay address: \`$url\`"
+            echo
+            echo "In the Slidemill app: Settings, Connect Claude. Paste this address and tap Connect, then copy the connector URL into Claude."
+          } >> "$GITHUB_STEP_SUMMARY"

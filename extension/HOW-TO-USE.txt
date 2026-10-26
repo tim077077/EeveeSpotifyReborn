@@ -1,0 +1,35 @@
+Slidemill TikTok Poster
+Posts Slidemill's slideshows to TikTok from your logged-in tiktok.com tab, at Slidemill's scheduled
+times. It calls the same internal upload/post endpoints TikTok Studio's own web uploader uses.
+No API key, no developer app, no public server needed (Slidemill can run on your own computer).
+
+INSTALL (once)
+1. In Slidemill: Settings -> Browser poster -> Download extension. Unzip it.
+2. Chrome -> chrome://extensions -> turn on "Developer mode" (top right).
+3. "Load unpacked" -> pick the slidemill-tiktok-poster folder.
+4. Click the extension icon: enter your Slidemill address (e.g. http://localhost:8000) and the
+   Slidemill password, then Save.
+5. Open tiktok.com, logged in. Keep that tab open (a pinned tab is easiest).
+
+AUTOMATIC POSTING
+- In Slidemill, set an automation's posting mode to "Post from my browser" (Publish or Draft),
+  or use "Best times to post" with that mode.
+- At each scheduled time Slidemill queues the slideshow; within a minute the extension downloads the
+  slides, posts them from your tab and reports back. The on-page panel shows what it's doing.
+- Slidemill caps posts per day and spaces them out (Settings -> Browser poster). Don't raise them much.
+
+DRAFTS (not wired up yet)
+- "Draft" jobs wait in Slidemill's queue until drafts are supported. They are never posted publicly
+  by mistake. To finish it: TikTok Studio -> F12 -> Network -> upload a carousel -> "Save draft" ->
+  right-click the request -> Copy as fetch, and send it over (remove the cookie header first).
+
+MANUAL (unchanged)
+- "Pick slides & post" and "Pick a folder & post all" in the on-page panel still work as before.
+
+LIMITS (honest)
+- This is against TikTok's terms. Try it on a spare account first, and don't post dozens a day.
+- If TikTok shows a captcha or checkpoint, solve it yourself in the tab. The tool doesn't get around it.
+- Sound: "add a sound" uses TikTok's smaller web library. For a specific trending sound, post by hand.
+- It only posts photo carousels, not videos.
+- If TikTok changes its internal endpoints, posting fails until it's re-synced from a fresh
+  Network-tab capture.
