@@ -178,8 +178,8 @@ class EngineService : Service() {
             username = user
             if (user.isEmpty()) return finish("Not logged in to TikTok: open the TikTok tab and log in")
             val res = engine.queue.claimNext(
-                client = mapOf("version" to "android-2", "username" to user, "draft" to "0"),
-                skipDrafts = true, // on the phone, drafts are handed to the TikTok app instead
+                // The tab saves drafts to TikTok Studio itself (drafts only go to the TikTok app while it can't).
+                client = mapOf("version" to "android-3", "username" to user, "draft" to "1"),
             )
             @Suppress("UNCHECKED_CAST")
             val job = res["job"] as? Obj ?: return finish("@$user · ${res.str("reason")}")
@@ -190,7 +190,7 @@ class EngineService : Service() {
 
             val files = job.strings("rendered").map { File(engine.mediaDir, it) }
             val payload = JSONObject()
-                .put("id", postId).put("slideshow_id", job.str("slideshow_id")).put("action", "publish")
+                .put("id", postId).put("slideshow_id", job.str("slideshow_id")).put("action", job.str("action", "publish"))
                 .put("title", title).put("caption", job.str("caption")).put("sound", job.bool("sound", true))
                 .put("images", JSONArray(TikTokWeb.serve(postId, files)))
 
@@ -206,7 +206,7 @@ class EngineService : Service() {
                         Prefs.saveResult(postId, result.toString())
                         report(postId, result)
                         Prefs.removeResult(postId)
-                        finish(if (result.optBoolean("ok")) "✓ Posted: $title" else "✗ " + result.optString("error", "failed"))
+                        finish(if (result.optBoolean("ok")) "✓ ${if (job.str("action") == "draft") "Saved to drafts" else "Posted"}: $title" else "✗ " + result.optString("error", "failed"))
                     } finally {
                         TikTokWeb.unserve(postId)
                         releaseWakeLock()

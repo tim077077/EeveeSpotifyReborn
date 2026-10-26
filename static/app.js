@@ -60,8 +60,8 @@ const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
 // ---- phone app mode ------------------------------------------------------------------
 // The Android app runs this same dashboard against its built-in engine (/status.platform ==
-// "android"). There is no TikTok developer app there: posts go out from the app's TikTok tab, or
-// are handed to the TikTok app to finish.
+// "android"). There is no TikTok developer app there: posts and drafts go out from the app's TikTok
+// tab, or, while it isn't logged in, drafts are handed to the TikTok app to finish.
 let PHONE = false;
 const APP = window.SlidemillApp; // native bridge, only inside the Android app
 const PHONE_MODES = {

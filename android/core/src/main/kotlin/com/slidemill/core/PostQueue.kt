@@ -11,8 +11,9 @@ import java.time.Instant
  * never report back are released after CLAIM_TIMEOUT. Posts with `not_before` wait until then
  * (scheduled runs finish a little early and post on time).
  *
- * "draft" posts are never posted publicly by the poster. On the phone they are handed to the
- * TikTok app instead (a notification at the planned time, see [dueShares]).
+ * "draft" posts are never posted publicly by the poster: a poster that can save drafts saves them to
+ * TikTok Studio's drafts. On the phone, while the TikTok tab isn't able to (logged out, not loaded),
+ * they are handed to the TikTok app instead (a notification at the planned time, see [dueShares]).
  */
 class PostQueue(private val db: Db, private val store: Store) {
     companion object {
@@ -24,6 +25,11 @@ class PostQueue(private val db: Db, private val store: Store) {
 
     /** Last check-in from the poster (shown in Settings). */
     val lastSeen = java.util.concurrent.ConcurrentHashMap<String, String>()
+    @Volatile private var draftPosterAt: Instant? = null
+
+    /** A poster that saves drafts itself checked in recently, so drafts wait for it instead of being shared. */
+    fun webDrafts(now: Instant = Db.clock()): Boolean =
+        draftPosterAt?.let { Duration.between(it, now) < Duration.ofMinutes(10) } ?: false
 
     private fun intSetting(key: String, default: Int): Int =
         store.get(key).ifEmpty { default.toString() }.toIntOrNull()?.let { maxOf(0, it) } ?: default
@@ -86,7 +92,7 @@ class PostQueue(private val db: Db, private val store: Store) {
             obj(
                 "queued" to queued.size,
                 "waiting_for_draft_support" to if (shareMode || lastSeen["draft"] == "1") 0 else drafts,
-                "waiting_to_share" to if (shareMode) drafts else 0,
+                "waiting_to_share" to if (shareMode && !webDrafts(now)) drafts else 0,
                 "done_last_24h" to recent.count { it.str("status") != "posting" },
                 "posts_per_day" to perDay,
                 "min_gap_minutes" to gap,
@@ -108,6 +114,7 @@ class PostQueue(private val db: Db, private val store: Store) {
         lastSeen["at"] = Db.iso(now)
         lastSeen.putAll(c)
         val canDraft = c["draft"] == "1"
+        if (canDraft) draftPosterAt = now
         val (perDay, gap) = limits()
         val base = mediaBase.trimEnd('/')
 
@@ -191,7 +198,7 @@ class PostQueue(private val db: Db, private val store: Store) {
     }
 
     /** "Send to TikTok app" posts whose time has come: marked ready and returned for a notification. */
-    fun dueShares(now: Instant = Db.clock()): List<Obj> = db.tx {
+    fun dueShares(now: Instant = Db.clock()): List<Obj> = if (webDrafts(now)) emptyList() else db.tx {
         where("posts") { isBrowser(it) && it.str("status") == "queued" && action(it) == "draft" && due(it, now) }.map {
             it["status"] = "ready_to_share"
             it["claimed_at"] = now.toEpochMilli()

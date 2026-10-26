@@ -162,6 +162,24 @@ class ApiTest {
         assertEquals("sent_to_drafts", e.db.tx { get("posts", pid)!!.str("status") })
     }
 
+    @Test fun a_tiktok_tab_that_saves_drafts_takes_them_instead_of_the_tiktok_app() {
+        val canDraft = mapOf("username" to "tim", "draft" to "1")
+        val pid = queue(action = "draft")
+        val job = e.queue.claimNext(T0, client = canDraft).objAt("job")
+        assertEquals(pid, job.str("id"))
+        assertEquals("draft", job.str("action")) // saved as a draft, never published
+        e.tick(T0)
+        assertTrue(platform.notices.none { it.kind == "share" })
+        assertEquals("sent_to_drafts", e.queue.recordResult(pid, true, username = "tim")!!.str("status"))
+
+        // The tab stops checking in (logged out, phone asleep): drafts go back to the TikTok app.
+        val later = queue(action = "draft")
+        e.tick(T0.plus(Duration.ofMinutes(5)))
+        assertTrue(platform.notices.none { it.kind == "share" })
+        e.tick(T0.plus(Duration.ofMinutes(11)))
+        assertEquals(later, platform.notices.single { it.kind == "share" }.postId)
+    }
+
     @Test fun failures_retry_then_give_up_and_stale_claims_release() {
         e.store.setMany(mapOf("browser_min_gap_minutes" to "0"))
         val pid = queue()
