@@ -17,6 +17,7 @@ class Db(val dir: File) {
     val tables = listOf(
         "products", "collections", "images", "automations", "slideshows", "posts", "settings",
         "library_profiles", "library_posts", "jobs", "state",
+        "my_posts", "post_snapshots", "account_snapshots",
     )
     private val data = HashMap<String, LinkedHashMap<String, Obj>>()
     private val written = HashMap<String, String>()
@@ -122,5 +123,8 @@ class Db(val dir: File) {
         fun iso(ms: Long?): String? = ms?.let { Instant.ofEpochMilli(it).atOffset(ZoneOffset.UTC).format(ISO) }
 
         fun iso(instant: Instant): String = instant.atOffset(ZoneOffset.UTC).format(ISO)
+
+        /** Epoch seconds of an [iso] string (or any ISO 8601 time with an offset); null if it isn't one. */
+        fun epochS(iso: String): Long? = runCatching { java.time.OffsetDateTime.parse(iso).toEpochSecond() }.getOrNull()
     }
 }

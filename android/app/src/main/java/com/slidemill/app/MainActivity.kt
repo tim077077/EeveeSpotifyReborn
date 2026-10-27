@@ -34,6 +34,8 @@ import android.widget.Toast
 import com.slidemill.core.Engine
 import com.slidemill.core.copyObj
 import com.slidemill.core.long
+import com.slidemill.core.objAt
+import com.slidemill.core.objs
 import com.slidemill.core.objOrNull
 import com.slidemill.core.str
 import com.slidemill.core.strings
@@ -91,7 +93,7 @@ class MainActivity : Activity() {
         engine = Slidemill.engine(this)
         content = FrameLayout(this)
         val bar = LinearLayout(this).apply { setBackgroundColor(panel) }
-        tabs = listOf("Slidemill", "TikTok").map { name ->
+        tabs = listOf("Slidemill", "Analytics", "TikTok").map { name ->
             Button(this).apply {
                 text = name
                 isAllCaps = false
@@ -120,7 +122,7 @@ class MainActivity : Activity() {
     @Deprecated("Deprecated in Java")
     override fun onBackPressed() {
         if (!::tabs.isInitialized) return super.onBackPressed() // on the crash report
-        if (current == "preview") return show("Slidemill")
+        if (current == "preview" || current == "Analytics") return show("Slidemill")
         val web = if (current == "TikTok") TikTokWeb.get(this) else null
         if (web != null && web.canGoBack()) web.goBack() else super.onBackPressed()
     }
@@ -133,6 +135,10 @@ class MainActivity : Activity() {
         main.removeCallbacks(ticker)
         if (name == "TikTok") {
             TikTokWeb.attach(this, content)
+        } else if (name == "Analytics") {
+            content.addView(analytics())
+            // Fresh numbers when the last refresh is old; the tab redraws when they arrive.
+            if (System.currentTimeMillis() - engine.analytics.lastRefreshMs() > com.slidemill.core.Analytics.MIN_REFRESH_MS) refreshAnalytics(force = false)
         } else {
             content.addView(home())
             main.post(ticker)
@@ -286,6 +292,159 @@ class MainActivity : Activity() {
         }
     }
 
+    // ---- the Analytics tab --------------------------------------------------------------------------
+
+    private var analyticsStatus: TextView? = null
+
+    private fun refreshAnalytics(force: Boolean) {
+        analyticsStatus?.text = "Reading your posts from TikTok… (up to a minute)"
+        io.execute {
+            val err = runCatching { engine.analytics.refresh(engine.tiktok, force) }.exceptionOrNull()
+            main.post {
+                if (current != "Analytics") return@post
+                if (err != null) {
+                    analyticsStatus?.text = "✗ ${err.message}"
+                    analyticsStatus?.setTextColor(accent)
+                } else show("Analytics")
+            }
+        }
+    }
+
+    private fun analytics(): View {
+        val col = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            setPadding(dp(18), dp(18), dp(18), dp(18))
+        }
+        val r = engine.analytics.report(weeks = 8, postsLimit = 100, predicted = engine.predictedByPost())
+        col.addView(row(
+            label("Analytics", 22f, ink, bold = true),
+            button("Refresh", secondary = true) { refreshAnalytics(force = true) },
+        ))
+        analyticsStatus = label("", 13f, muted).also { col.addView(it, spaced(6)) }
+        if (r["account"] == null) {
+            analyticsStatus?.text = "No numbers yet. Tap Refresh (you need to be logged in on the TikTok tab)."
+            return ScrollView(this).apply { addView(col) }
+        }
+        val acc = r.objAt("account")
+        val updated = com.slidemill.core.Db.epochS(acc.str("last_refresh"))?.let { (System.currentTimeMillis() / 1000 - it) / 60 }
+        analyticsStatus?.text = "@${acc.str("username")} · updated ${if (updated == null) "?" else if (updated < 1) "just now" else "$updated min ago"} · refreshes itself every 3 hours"
+
+        val totals = r.objAt("totals")
+        val last7 = r.objAt("last_7_days")
+        val prev7 = r.objAt("previous_7_days")
+        fun n(v: Any?) = (v as? Number)?.toLong()
+        val gained7 = n(last7["views_gained"])
+        val followerDelta = n(acc["followers_gained_7d"])
+        col.addView(row(
+            tile("Views, last 7 days", gained7?.let { Fmt.compact(it) } ?: "—", gained7?.let { g -> n(prev7["views_gained"])?.let { p -> change(g, p) } } ?: "after a week of tracking"),
+            tile("Followers", n(acc["followers"])?.let { Fmt.compact(it) } ?: "—", followerDelta?.let { (if (it >= 0) "+" else "") + Fmt.compact(it) + " this week" } ?: ""),
+        ), spaced(14))
+        col.addView(row(
+            tile("Total views", Fmt.compact(totals.long("views")), "${totals.long("posts")} posts"),
+            tile("Avg views / post", Fmt.compact(totals.long("avg_views")), "median ${Fmt.compact(totals.long("median_views"))}"),
+        ), spaced(8))
+        col.addView(row(
+            tile("Engagement", (totals["engagement_rate_pct"] as? Number)?.let { "$it%" } ?: "—", "likes+comments+shares+saves / views"),
+            tile("Likes · comments", "${Fmt.compact(totals.long("likes"))} · ${Fmt.compact(totals.long("comments"))}", "${Fmt.compact(totals.long("shares"))} shares · ${Fmt.compact(totals.long("saves"))} saves"),
+        ), spaced(8))
+
+        // Views per week
+        val weeks = r.objs("weeks")
+        val gainedKnown = weeks.all { it["views_gained"] != null }
+        col.addView(heading(if (gainedKnown) "Views gained per week" else "Views per week (by the week posts went up)"))
+        col.addView(BarChart(this, accent, ink, muted).apply {
+            set(weeks.map { n(if (gainedKnown) it["views_gained"] else it["views_on_posts_published"]) ?: 0L },
+                weeks.map { it.str("week_of").drop(5).replace("-", "/") })
+        }, LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, dp(170)).apply { topMargin = dp(8) })
+        col.addView(label(
+            if (gainedKnown) "Each bar: views all your posts gained that week."
+            else "Each bar: the views (so far) of the posts published that week. \"Views gained per week\" appears once Slidemill has tracked a full 8 weeks; until then see the posts below.",
+            12f, muted,
+        ), spaced(4))
+        col.addView(label(
+            "Last 7 days: ${last7.long("posts_published")} posts" + (gained7?.let { ", +${Fmt.compact(it)} views" } ?: "") +
+                " · 7 days before: ${prev7.long("posts_published")} posts" + (n(prev7["views_gained"])?.let { ", +${Fmt.compact(it)} views" } ?: ""),
+            13f, ink,
+        ), spaced(8))
+
+        // Slideshows vs videos
+        val byType = r.objAt("by_type")
+        if (byType.isNotEmpty()) {
+            col.addView(heading("Slideshows vs videos"))
+            for ((type, v0) in byType) {
+                @Suppress("UNCHECKED_CAST") val v = v0 as Map<String, Any?>
+                col.addView(label("${type.replaceFirstChar { it.uppercase() }}s: ${v.long("posts")} posts · avg ${Fmt.compact(v.long("avg_views"))} views · median ${Fmt.compact(v.long("median_views"))} · ${(v["engagement_rate_pct"] as? Number) ?: "—"}% engagement", 13f, ink), spaced(4))
+            }
+        }
+
+        // What does better on this account (Claude reads the same thing before writing)
+        val ww = r.objAt("what_works")
+        col.addView(heading("What works for you"))
+        col.addView(label(ww.str("summary"), 13f, ink), spaced(4))
+        val by = ww["by"] as? Map<*, *>
+        if (by != null) {
+            for ((dim, title) in listOf("slide_count" to "Slide count", "posting_time" to "Time of day", "weekday" to "Day", "format" to "Format", "hashtag" to "Hashtags")) {
+                @Suppress("UNCHECKED_CAST") val rows = (by[dim] as? List<Map<String, Any?>>).orEmpty().filter { it["enough_data"] == true }
+                if (rows.size < 2) continue
+                col.addView(label(title, 12f, muted), spaced(8))
+                for (b in rows.take(4)) {
+                    val x = b["vs_your_median"] as? Number ?: continue
+                    col.addView(label(
+                        "${if (x.toDouble() >= 1.0) "▲" else "▼"} ${b.str("bucket")}: ${x}× your median (${b.long("posts")} posts)",
+                        13f, if (x.toDouble() >= 1.2) good else if (x.toDouble() < 0.8) accent else ink,
+                    ))
+                }
+            }
+        }
+
+        // Every post
+        col.addView(heading("Posts (newest first)"))
+        for (p in r.objs("posts")) col.addView(postCard(p), spaced(6))
+        val check = r.objAt("prediction_check")
+        col.addView(heading("Is the virality score right?"))
+        col.addView(label(check.str("verdict"), 13f, muted), spaced(4))
+        return ScrollView(this).apply { addView(col) }
+    }
+
+    private fun change(now: Long, before: Long): String = if (before <= 0) "vs 0 the week before" else {
+        val pct = Math.round((now - before) * 100.0 / before)
+        (if (pct >= 0) "▲ $pct%" else "▼ ${-pct}%") + " vs the week before"
+    }
+
+    private fun tile(title: String, value: String, sub: String) = LinearLayout(this).apply {
+        orientation = LinearLayout.VERTICAL
+        setBackgroundColor(panel)
+        setPadding(dp(12), dp(10), dp(12), dp(10))
+        addView(label(title, 12f, muted))
+        addView(label(value, 22f, ink, bold = true))
+        if (sub.isNotEmpty()) addView(label(sub, 11f, muted))
+    }
+
+    private fun postCard(p: Map<String, Any?>) = LinearLayout(this).apply {
+        orientation = LinearLayout.VERTICAL
+        setBackgroundColor(panel)
+        setPadding(dp(12), dp(10), dp(12), dp(10))
+        val first = p.str("description").lineSequence().firstOrNull().orEmpty().ifEmpty { "(no caption)" }
+        addView(label(first, 14f, ink, bold = true).apply { maxLines = 2 })
+        val date = com.slidemill.core.Db.epochS(p.str("posted_at"))?.let { whenText(it) } ?: "?"
+        val made = (p["slidemill"] as? Map<*, *>)?.let { m -> " · Slidemill" + ((m["predicted_score"] as? Number)?.let { " (scored $it)" } ?: "") } ?: ""
+        addView(label("${p.str("type")} · $date$made", 12f, muted))
+        addView(label(
+            "👁 ${Fmt.compact(p.long("views"))}   ❤ ${Fmt.compact(p.long("likes"))}   💬 ${Fmt.compact(p.long("comments"))}   ↗ ${Fmt.compact(p.long("shares"))}   🔖 ${Fmt.compact(p.long("saves"))}",
+            14f, ink,
+        ), spaced(6))
+        val last24 = (p["views_last_24h"] as? Number)?.toLong()
+        addView(label(
+            listOfNotNull(
+                (p["engagement_rate_pct"] as? Number)?.let { "$it% engagement" },
+                (p["views_per_day"] as? Number)?.let { "${Fmt.compact(it.toLong())} views/day" },
+                last24?.let { "+${Fmt.compact(it)} in 24h" },
+            ).joinToString(" · "),
+            12f, if (last24 != null && last24 > 0) good else muted,
+        ))
+        setOnClickListener { openUrl(p.str("url")) }
+    }
+
     // ---- one draft: preview and POST --------------------------------------------------------------
 
     private fun preview(id: String) {
@@ -392,7 +551,7 @@ class MainActivity : Activity() {
 
     private fun whenText(epochS: Long): String = Instant.ofEpochSecond(epochS).atZone(ZoneId.systemDefault()).format(whenFormat)
 
-    private fun whenText(iso: String): String = runCatching { whenText(Instant.parse(iso).epochSecond) }.getOrDefault(iso)
+    private fun whenText(iso: String): String = com.slidemill.core.Db.epochS(iso)?.let { whenText(it) } ?: iso
 
     /** Date, then time, in the phone's time zone; checked against TikTok's 15 minutes to 30 days window. */
     private fun pickTime(then: (Long) -> Unit) {

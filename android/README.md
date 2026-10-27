@@ -2,9 +2,17 @@
 
 The phone app is built for one way of working: **you talk to Claude, and Claude does the job**. Claude researches your niche, writes the slideshows, looks at the rendered slides and scores them. The phone renders the slides and keeps them as drafts in the app; you preview one and tap **POST** to publish it live. There is no AI key, no schedule, no queue and no notification to tap.
 
-The app has two tabs:
+The app has three tabs:
 
 - **Slidemill**: connect Claude (relay address, connector link), check you're logged in to TikTok, add an optional Pexels key for real photos, and see Claude's slideshows as **Drafts**: tap one to preview it and post it.
+- **Analytics**: your account's numbers. It shows:
+  - tiles: views in the last 7 days against the week before, followers and their weekly change, total and average views, engagement, likes, comments, shares and saves;
+  - a views-per-week chart;
+  - slideshows against videos;
+  - **What works for you**: which slide counts, posting times, days, formats and hashtags beat your median views (groups of 3+ posts that are 2+ days old, once you have 6 such posts);
+  - every post with its views, likes, comments, shares, saves, engagement, views per day and views in the last 24 hours (tap one to open it).
+  
+  The phone snapshots your posts every 3 hours (and when you tap Refresh). TikTok only shows current totals, so growth numbers (views gained per week or in 24 hours, followers gained) appear once there are snapshots to compare. Claude gets the same report from the `analytics` tool.
 - **TikTok**: tiktok.com in desktop mode. Log in here once.
 
 ## How you post one
