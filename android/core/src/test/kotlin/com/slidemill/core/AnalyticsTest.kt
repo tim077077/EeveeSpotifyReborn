@@ -23,13 +23,14 @@ class AnalyticsTest {
         Db.clock = { Instant.ofEpochSecond(s) }
     }
 
-    private fun item(id: String, postedAt: Long, views: Long, likes: Long = views / 10, slideshow: Boolean = true, followers: Long = 1000) =
+    private fun item(id: String, postedAt: Long, views: Long, likes: Long = views / 10, slideshow: Boolean = true, followers: Long = 1000, slides: Int = 3) =
         CoreTest.WEB_ITEM.copyObj().also {
             it["id"] = id
             it["createTime"] = postedAt
             it["author"] = obj("uniqueId" to "tim")
             it["authorStats"] = obj("followerCount" to followers, "heartCount" to 5000L, "videoCount" to 3L)
             it["stats"] = obj("playCount" to views, "diggCount" to likes, "commentCount" to 5L, "shareCount" to 2L, "collectCount" to 3L)
+            it["imagePost"] = obj("images" to (0 until slides).map { i -> obj("imageURL" to obj("urlList" to arr("https://cdn.example/$id-$i.jpeg"))) }.toMutableList<Any?>())
             if (!slideshow) it.remove("imagePost")
         }
 
@@ -73,6 +74,30 @@ class AnalyticsTest {
         assertEquals(8, r.objs("weeks").size)
         assertEquals(2700L, r.objs("weeks").sumOf { it.long("views_on_posts_published") })
         assertTrue(r.objAt("prediction_check").str("verdict").startsWith("Not enough"))
+    }
+
+    @Test fun what_works_finds_what_beats_the_accounts_median() {
+        at(t0)
+        // 4 long slideshows do far better than 4 short ones; videos sit in between. All settled (3+ days old).
+        val items = (1..4).map { item("long$it", t0 - (3 + it) * day, 5000L + it, slides = 8) } +
+            (1..4).map { item("short$it", t0 - (3 + it) * day, 500L + it, slides = 2) } +
+            (1..3).map { item("vid$it", t0 - (3 + it) * day, 1000L + it, slideshow = false) } +
+            listOf(item("fresh", t0 - 3600, 10)) // too new to count
+        platform.profilePosts["tim"] = items
+        assertTrue(e.analytics.refresh(tiktok))
+        val ww = e.analytics.report(predicted = mapOf("long4" to obj("hook" to "5 habits that fixed my sleep", "title" to "sleep"))).objAt("what_works")
+        assertEquals(11L, ww.long("posts_used"))
+        assertTrue("7-9 slides" in ww.str("summary"), ww.str("summary"))
+        val slides = ww.objAt("by").objs("slide_count")
+        assertEquals("7-9 slides", slides[0].str("bucket"))
+        assertTrue((slides[0]["vs_your_median"] as Double) > 1.2)
+        assertEquals("1-3 slides", slides.last().str("bucket"))
+        assertEquals("5 habits that fixed my sleep", ww.objs("best_posts")[0].str("hook"))
+        assertEquals(500L + 1, ww.objs("worst_posts")[0].long("views"))
+
+        // Too few settled posts: no patterns claimed.
+        val few = e.analytics.whatWorks(e.db.tx { all("my_posts").take(3).map { it.copyObj() } }, java.time.ZoneId.of("UTC"), emptyMap())
+        assertTrue("Not enough yet" in few.str("summary"))
     }
 
     @Test fun old_snapshots_are_thinned_to_one_per_day() {

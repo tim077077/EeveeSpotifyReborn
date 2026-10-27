@@ -21,6 +21,8 @@ class Analytics(private val db: Db, private val platform: Platform) {
         const val KEEP_ALL_SNAPSHOTS_DAYS = 14L // older snapshots are thinned to one per post per day
         private const val DAY_S = 86_400L
         private val STATS = listOf("views", "likes", "comments", "shares", "saves")
+        const val MIN_POSTS_FOR_PATTERNS = 6 // settled posts before any pattern is reported
+        const val MIN_BUCKET = 3 // posts a group needs before it counts
 
         fun engagementRate(p: Map<String, Any?>): Double? {
             val views = p.long("views")
@@ -69,6 +71,7 @@ class Analytics(private val db: Db, private val platform: Platform) {
             row["is_slideshow"] = p.bool("is_slideshow")
             row["posted_at"] = p.long("posted_at")
             row["music"] = p.str("music")
+            row["slides"] = p.list("slide_urls").size.toLong()
             for (k in STATS) row[k] = p.long(k)
             row["updated_at"] = atMs
             val snap = obj("id" to "$id@$atMs", "post_id" to id, "at" to atMs)
@@ -89,6 +92,76 @@ class Analytics(private val db: Db, private val platform: Platform) {
         val old = where("post_snapshots") { it.long("at") < cutoff }
         val keep = old.groupBy { it.str("post_id") + "/" + it.long("at") / (DAY_S * 1000) }.values.map { day -> day.maxBy { it.long("at") }.str("id") }.toSet()
         old.filter { it.str("id") !in keep }.forEach { delete("post_snapshots", it.str("id")) }
+    }
+
+    /**
+     * What does better on THIS account: posts at least 2 days old (views settled), grouped by format, slide
+     * count, posting time, weekday, caption length, hashtags and sound, each against the account's median
+     * views. A bucket needs [MIN_BUCKET] posts to count. Also the best and worst posts, with the hook when
+     * Slidemill made them, so the reader can compare topics and hooks itself.
+     */
+    fun whatWorks(posts: List<Obj>, zone: ZoneId, predicted: Map<String, Obj>, nowS: Long = Db.nowMs() / 1000): Obj {
+        val settled = posts.filter { it.long("posted_at") > 0 && nowS - it.long("posted_at") >= Virality.CHECK_AGE_S }
+        if (settled.size < MIN_POSTS_FOR_PATTERNS) return obj(
+            "posts_used" to settled.size.toLong(),
+            "summary" to "Not enough yet: ${settled.size} post(s) are 2+ days old; patterns need $MIN_POSTS_FOR_PATTERNS. " +
+                "Until then, lean on research_library (what works in the niche) and look at the posts below.",
+        )
+        val base = median(settled.map { it.long("views") }).coerceAtLeast(1)
+        fun hour(p: Obj) = Instant.ofEpochSecond(p.long("posted_at")).atZone(zone)
+        val tags = Regex("#([\\p{L}\\p{N}_]+)")
+        val dims: List<Pair<String, (Obj) -> List<String>>> = listOf(
+            "format" to { p -> listOf(if (p.bool("is_slideshow")) "slideshow" else "video") },
+            "slide_count" to { p -> if (!p.bool("is_slideshow")) emptyList() else listOf(when (p.long("slides")) { in 0L..3L -> "1-3 slides"; in 4L..6L -> "4-6 slides"; in 7L..9L -> "7-9 slides"; else -> "10+ slides" }) },
+            "posting_time" to { p -> listOf(when (hour(p).hour) { in 6..11 -> "morning (6-12)"; in 12..16 -> "afternoon (12-17)"; in 17..21 -> "evening (17-22)"; else -> "night (22-6)" }) },
+            "weekday" to { p -> listOf(hour(p).dayOfWeek.getDisplayName(java.time.format.TextStyle.FULL, java.util.Locale.ENGLISH)) },
+            "caption_length" to { p -> listOf(p.str("description").length.let { if (it < 80) "short caption (<80 chars)" else if (it <= 200) "medium caption (80-200)" else "long caption (200+)" }) },
+            "hashtag_count" to { p -> listOf(tags.findAll(p.str("description")).count().let { if (it == 0) "no hashtags" else if (it <= 3) "1-3 hashtags" else if (it <= 6) "4-6 hashtags" else "7+ hashtags" }) },
+            "sound" to { p -> listOf(p.str("music").let { if (it.isEmpty()) "no sound info" else if (it.lowercase().startsWith("original sound")) "original sound" else "a named track" }) },
+            "hashtag" to { p -> tags.findAll(p.str("description")).map { "#" + it.groupValues[1].lowercase() }.distinct().toList() },
+        )
+        val groups = obj()
+        val findings = mutableListOf<Pair<Double, String>>()
+        for ((dim, keys) in dims) {
+            val buckets = settled.flatMap { p -> keys(p).map { it to p } }.groupBy({ it.first }, { it.second })
+            val rows = buckets.map { (k, ps) ->
+                val med = median(ps.map { it.long("views") })
+                val saves = ps.sumOf { it.long("saves") }; val v = ps.sumOf { it.long("views") }
+                obj(
+                    "bucket" to k, "posts" to ps.size.toLong(), "median_views" to med,
+                    "vs_your_median" to Math.round(med * 100.0 / base) / 100.0,
+                    "engagement_rate_pct" to engagementRate(obj(*STATS.map { s -> s to ps.sumOf { it.long(s) } }.toTypedArray())),
+                    "saves_per_1k_views" to if (v > 0) Math.round(saves * 10000.0 / v) / 10.0 else null,
+                    "enough_data" to (ps.size >= MIN_BUCKET),
+                )
+            }.sortedByDescending { it["vs_your_median"] as Double }
+            if (dim == "hashtag") groups[dim] = rows.filter { it["enough_data"] == true }.take(10).toMutableList<Any?>()
+            else groups[dim] = rows.toMutableList<Any?>()
+            val solid = rows.filter { it["enough_data"] == true }
+            if (solid.size >= 2) {
+                val best = solid.first(); val worst = solid.last()
+                val lift = best["vs_your_median"] as Double
+                if (lift >= 1.2) findings += lift to "${best.str("bucket")} does ${lift}× your median views (${best.long("posts")} posts); ${worst.str("bucket")} does ${worst["vs_your_median"]}× (${worst.long("posts")} posts)."
+            }
+        }
+        fun brief(p: Obj): Obj = obj(
+            "description" to p.str("description").take(150), "type" to if (p.bool("is_slideshow")) "slideshow" else "video",
+            "slides" to p.long("slides"), "views" to p.long("views"), "saves" to p.long("saves"),
+            "vs_your_median" to Math.round(p.long("views") * 100.0 / base) / 100.0,
+            "posted" to hour(p).format(java.time.format.DateTimeFormatter.ofPattern("EEE HH:mm", java.util.Locale.ENGLISH)),
+        ).also { o -> predicted[p.str("id")]?.let { m -> m.str("hook").takeIf { it.isNotEmpty() }?.let { o["hook"] = it }; o["slidemill_title"] = m.str("title") } }
+        val ranked = settled.sortedByDescending { it.long("views") }
+        return obj(
+            "posts_used" to settled.size.toLong(),
+            "your_median_views" to base,
+            "summary" to if (findings.isEmpty()) "No clear pattern yet: nothing does 1.2× your median with $MIN_BUCKET+ posts behind it. Compare the best and worst posts below."
+                else findings.sortedByDescending { it.first }.take(6).joinToString(" ") { it.second },
+            "best_posts" to ranked.take(5).map { brief(it) }.toMutableList<Any?>(),
+            "worst_posts" to ranked.takeLast(5).reversed().map { brief(it) }.toMutableList<Any?>(),
+            "by" to groups,
+            "how_to_use" to "Do more of what's above 1× and with enough_data, less of what's below. Compare best_posts with " +
+                "worst_posts for topic and hook. With few posts these are hints, not rules: keep testing one change at a time.",
+        )
     }
 
     private class History(val postedAt: Long, val snaps: List<Pair<Long, Long>>) { // (at seconds, views)
@@ -205,6 +278,7 @@ class Analytics(private val db: Db, private val platform: Platform) {
             "top_by_views" to posts.sortedByDescending { it.long("views") }.take(3).map { postRow(it) }.toMutableList<Any?>(),
             "top_by_engagement" to posts.filter { it.long("views") >= 100 }.sortedByDescending { engagementRate(it) ?: 0.0 }.take(3).map { postRow(it) }.toMutableList<Any?>(),
             "posts" to newest.take(postsLimit.coerceIn(1, MAX_POSTS)).map { postRow(it) }.toMutableList<Any?>(),
+            "what_works" to whatWorks(posts, zone, predicted, nowS),
             "prediction_check" to Virality.predictionCheck(posts.mapNotNull { p ->
                 val score = (predicted[p.str("id")]?.get("predicted_score") as? Number)?.toDouble()
                 if (score == null || p.long("posted_at") <= 0 || nowS - p.long("posted_at") < Virality.CHECK_AGE_S) null else score to p.long("views").toDouble()

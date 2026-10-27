@@ -46,7 +46,11 @@ class Engine(val platform: Platform, val dataDir: File) {
     /** Slideshows posted from Slidemill, by TikTok post id: their slideshow id and predicted score. */
     fun predictedByPost(): Map<String, Obj> = db.tx {
         all("slideshows").filter { it.objOrNull("post")?.str("item_id").orEmpty().isNotEmpty() }.associate { s ->
-            s.objAt("post").str("item_id") to obj("slideshow_id" to s.str("id"), "title" to s.str("title"), "predicted_score" to s.objOrNull("prediction")?.get("viral_potential"))
+            val hook = s.objOrNull("spec")?.objs("slides")?.firstOrNull()?.objs("text_items")?.joinToString(" / ") { it.str("text") }.orEmpty()
+            s.objAt("post").str("item_id") to obj(
+                "slideshow_id" to s.str("id"), "title" to s.str("title"), "hook" to hook,
+                "predicted_score" to s.objOrNull("prediction")?.get("viral_potential"),
+            )
         }
     }
 

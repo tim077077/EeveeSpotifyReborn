@@ -377,6 +377,26 @@ class MainActivity : Activity() {
             }
         }
 
+        // What does better on this account (Claude reads the same thing before writing)
+        val ww = r.objAt("what_works")
+        col.addView(heading("What works for you"))
+        col.addView(label(ww.str("summary"), 13f, ink), spaced(4))
+        val by = ww["by"] as? Map<*, *>
+        if (by != null) {
+            for ((dim, title) in listOf("slide_count" to "Slide count", "posting_time" to "Time of day", "weekday" to "Day", "format" to "Format", "hashtag" to "Hashtags")) {
+                @Suppress("UNCHECKED_CAST") val rows = (by[dim] as? List<Map<String, Any?>>).orEmpty().filter { it["enough_data"] == true }
+                if (rows.size < 2) continue
+                col.addView(label(title, 12f, muted), spaced(8))
+                for (b in rows.take(4)) {
+                    val x = b["vs_your_median"] as? Number ?: continue
+                    col.addView(label(
+                        "${if (x.toDouble() >= 1.0) "▲" else "▼"} ${b.str("bucket")}: ${x}× your median (${b.long("posts")} posts)",
+                        13f, if (x.toDouble() >= 1.2) good else if (x.toDouble() < 0.8) accent else ink,
+                    ))
+                }
+            }
+        }
+
         // Every post
         col.addView(heading("Posts (newest first)"))
         for (p in r.objs("posts")) col.addView(postCard(p), spaced(6))

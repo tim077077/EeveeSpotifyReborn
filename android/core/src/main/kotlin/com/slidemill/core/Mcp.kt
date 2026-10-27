@@ -37,7 +37,7 @@ class Mcp(private val e: Engine) {
         const val INSTRUCTIONS = """Slidemill makes TikTok photo-carousel slideshows on the user's phone. You do the thinking; the phone renders them, and the user posts them from the phone.
 
 How to work with it:
-1. Call writing_guide once, and research_library to see which real slideshows in the user's niche beat their account's usual views. Write in that spirit; never copy a post. (add_to_library imports accounts; read_library_slides lets you read slide text the library doesn't have yet.)
+1. Call writing_guide once, then analytics: its what_works says what does better on THIS account (format, slide count, posting time and day, caption length, hashtags, sound) and shows the best and worst posts with their hooks. Do more of what wins and less of what loses; that beats general advice. Then research_library shows which real slideshows in the user's niche beat their account's usual views. Write in that spirit; never copy a post. (add_to_library imports accounts; read_library_slides lets you read slide text the library doesn't have yet.)
 2. Write each slideshow yourself and pass it to create_slideshow (the phone finds backgrounds and draws your text). Or, if you made finished slide images yourself, pass them to import_slides as https links or small data URIs. Look at the slides that come back and fix what reads badly.
 3. predict_virality scores a slideshow with you as the reader: call it once for the rules, the slides and real library posts to rank it against, write your read, and call it again with that read. Use the scores to choose.
 4. Posting is on autopilot: schedule_slideshow (pick the time with best_times) puts a finished slideshow on TikTok Studio's own schedule, and it goes public then without the user approving it. So check the rendered slides first, and only schedule what you'd stand behind; delete weak versions instead. Posts must be at least 2 hours apart, at most 4 in 24 hours. Every slideshow also waits in the Slidemill app, where the user can POST it now themselves. list_slideshows and view_slideshow show whether it's been posted, with the post's link.
@@ -195,7 +195,9 @@ How to work with it:
                 "(views, likes, comments, shares, saves, engagement rate, average and median views); the last 7 days against " +
                 "the 7 before; views per week (by posting week, and views gained each week); slideshows against videos; top " +
                 "posts; and every post with its views, likes, comments, shares, saves, engagement, views per day and views in " +
-                "the last 24 hours, plus the Slidemill slideshow and predicted score it came from. Growth numbers come from " +
+                "the last 24 hours, plus the Slidemill slideshow and predicted score it came from. what_works compares groups " +
+                "of posts (format, slide count, time, weekday, caption, hashtags, sound) against the account's median views " +
+                "and lists the best and worst posts: read it before writing, and do more of what wins. Growth numbers come from " +
                 "snapshots the phone takes every few hours, so they're null until it has been tracking long enough. Use it to " +
                 "learn what works on this account before writing the next slideshow.",
             input(

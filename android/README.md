@@ -9,6 +9,7 @@ The app has three tabs:
   - tiles: views in the last 7 days against the week before, followers and their weekly change, total and average views, engagement, likes, comments, shares and saves;
   - a views-per-week chart;
   - slideshows against videos;
+  - **What works for you**: which slide counts, posting times, days, formats and hashtags beat your median views (groups of 3+ posts that are 2+ days old, once you have 6 such posts);
   - every post with its views, likes, comments, shares, saves, engagement, views per day and views in the last 24 hours (tap one to open it).
   
   The phone snapshots your posts every 3 hours (and when you tap Refresh). TikTok only shows current totals, so growth numbers (views gained per week or in 24 hours, followers gained) appear once there are snapshots to compare. Claude gets the same report from the `analytics` tool.
