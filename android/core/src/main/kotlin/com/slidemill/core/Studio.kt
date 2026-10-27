@@ -253,8 +253,8 @@ class Studio(
         all("slideshows").mapNotNull { s ->
             val p = s.objOrNull("post") ?: return@mapNotNull null
             when (p.str("status")) {
-                "scheduled" -> runCatching { java.time.Instant.parse(p.str("scheduled_for")).epochSecond }.getOrNull()
-                "posted", "posting" -> runCatching { java.time.Instant.parse(p.str("at")).epochSecond }.getOrNull()
+                "scheduled" -> Db.epochS(p.str("scheduled_for"))
+                "posted", "posting" -> Db.epochS(p.str("at"))
                 else -> null
             }
         }

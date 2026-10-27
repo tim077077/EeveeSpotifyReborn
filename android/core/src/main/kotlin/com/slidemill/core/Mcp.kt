@@ -190,6 +190,22 @@ How to work with it:
             input(listOf(), "limit" to int("How many.", 20, 1, 60)),
         ) { a -> myPosts(a.int("limit", 20)) },
 
+        "analytics" to Tool(
+            "The user's TikTok analytics (the account logged in on the phone): followers and their 7-day change; totals " +
+                "(views, likes, comments, shares, saves, engagement rate, average and median views); the last 7 days against " +
+                "the 7 before; views per week (by posting week, and views gained each week); slideshows against videos; top " +
+                "posts; and every post with its views, likes, comments, shares, saves, engagement, views per day and views in " +
+                "the last 24 hours, plus the Slidemill slideshow and predicted score it came from. Growth numbers come from " +
+                "snapshots the phone takes every few hours, so they're null until it has been tracking long enough. Use it to " +
+                "learn what works on this account before writing the next slideshow.",
+            input(
+                listOf(),
+                "refresh" to bool("Read fresh numbers from TikTok first (default true; skipped if refreshed in the last 10 minutes)."),
+                "weeks" to int("How many weeks of history.", 8, 1, 26),
+                "posts" to int("How many posts to list, newest first.", 30, 1, 100),
+            ),
+        ) { a -> analyticsTool(a["refresh"] as? Boolean ?: true, a.int("weeks", 8), a.int("posts", 30)) },
+
         "best_times" to Tool(
             "When to post for an audience in a country (two-letter code), from engagement curves blended with real library posts.",
             input(listOf(), "country" to str("Two-letter country code, e.g. US."), "posts_per_day" to int("Slots per day.", 2, 1, 6)),
@@ -482,6 +498,7 @@ How to work with it:
         val posts = within { e.platform.listProfilePosts(user, limit.coerceIn(1, 60)).map { Library.normalizeWebItem(it) } }
             ?: throw ToolError("TikTok took too long to list @$user's posts; try again.")
         if (posts.isEmpty()) return "No posts found for @$user (or TikTok didn't list them)."
+        e.analytics.record(user, posts) // every listing is also an analytics snapshot
         // Posts made with Slidemill's POST button carry their slideshow's predicted score: compare it with reality.
         val made = e.db.tx {
             all("slideshows").filter { it.objOrNull("post")?.str("item_id").orEmpty().isNotEmpty() }
@@ -505,6 +522,20 @@ How to work with it:
                 }
             }
         }.toMutableList<Any?>()))
+    }
+
+    private fun analyticsTool(refresh: Boolean, weeks: Int, posts: Int): String {
+        var note = ""
+        if (refresh) {
+            val done = runCatching { within { e.analytics.refresh(e.tiktok) } }
+            note = done.fold(
+                { if (it == null) "Refreshing from TikTok is still running; these are the last numbers. Call again in a minute for fresh ones." else "" },
+                { "Couldn't refresh from TikTok (${it.message}); these are the last numbers." },
+            )
+        }
+        val report = e.analytics.report(weeks, posts, predicted = e.predictedByPost())
+        if (note.isNotEmpty()) report["refresh"] = note
+        return Json.write(report)
     }
 
     private fun status(): String {
