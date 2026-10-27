@@ -53,6 +53,13 @@ interface TikTokTab {
      * web-library sound is attached (silent if it has none). Returns the post's item id.
      */
     fun publish(title: String, caption: String, slides: List<File>, sound: Boolean, at: Long = 0): String
+
+    /**
+     * The logged-in account's own published posts with their stats, newest first, as TikTok Studio's
+     * Content page lists them: maps with id, desc, posted_at (unix s), views, likes, comments, shares,
+     * saves, is_slideshow, slides (count). null when this tab can't list them.
+     */
+    fun listMyPosts(max: Int): List<Obj>? = null
 }
 
 class DraftError(message: String) : RuntimeException(message)

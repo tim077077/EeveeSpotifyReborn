@@ -2,6 +2,8 @@ package com.slidemill.app
 
 import android.content.Context
 import com.slidemill.core.DraftError
+import com.slidemill.core.Json
+import com.slidemill.core.Obj
 import com.slidemill.core.TikTokTab
 import org.json.JSONArray
 import org.json.JSONObject
@@ -20,6 +22,7 @@ class AndroidTikTok(private val context: Context) : TikTokTab {
         private const val READY_MS = 30_000L
         private const val HELLO_MS = 4_000L
         private const val DRAFT_MS = 4 * 60_000L
+        private const val LIST_MS = 60_000L
 
         /** The last logged-in username the page reported (for the app's screen). */
         @Volatile var lastUsername = ""
@@ -60,6 +63,16 @@ class AndroidTikTok(private val context: Context) : TikTokTab {
 
     override fun publish(title: String, caption: String, slides: List<File>, sound: Boolean, at: Long): String =
         run("publish", title, caption, slides, sound, at, what = "post", idKey = "itemId", checkWhere = "your TikTok profile and TikTok Studio → Scheduled")
+
+    /** Every published post of the logged-in account, from TikTok Studio's content list (tiktok-inject.js listMine). */
+    override fun listMyPosts(max: Int): List<Obj>? {
+        if (username().isEmpty()) return null
+        val result = ask("listMine", JSONObject().put("max", max), LIST_MS) ?: return null
+        if (!result.optBoolean("ok")) throw DraftError("TikTok didn't list your posts: ${result.optString("error", "unknown error")}")
+        val posts = Json.parse(result.optJSONArray("posts")?.toString() ?: "[]") as? List<*> ?: return null
+        @Suppress("UNCHECKED_CAST")
+        return posts.filterIsInstance<Map<*, *>>().map { (it as Map<String, Any?>).toMutableMap() }
+    }
 
     /** Hand one job to tiktok-inject.js (upload the slides, then draft or publish) and wait for TikTok's answer. */
     private fun run(action: String, title: String, caption: String, slides: List<File>, sound: Boolean, at: Long, what: String, idKey: String, checkWhere: String): String {

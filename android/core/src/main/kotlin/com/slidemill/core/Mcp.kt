@@ -497,7 +497,7 @@ How to work with it:
 
     private fun myPosts(limit: Int): String {
         val user = tab().username().ifEmpty { throw ToolError("Not logged in to TikTok on the phone: open Slidemill → TikTok and log in.") }
-        val posts = within { e.platform.listProfilePosts(user, limit.coerceIn(1, 60)).map { Library.normalizeWebItem(it) } }
+        val posts = within { e.analytics.listMine(tab(), user, limit.coerceIn(1, 60)) }
             ?: throw ToolError("TikTok took too long to list @$user's posts; try again.")
         if (posts.isEmpty()) return "No posts found for @$user (or TikTok didn't list them)."
         e.analytics.record(user, posts) // every listing is also an analytics snapshot

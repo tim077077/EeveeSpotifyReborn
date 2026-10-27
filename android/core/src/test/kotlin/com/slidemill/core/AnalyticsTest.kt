@@ -15,6 +15,10 @@ class AnalyticsTest {
     private val day = 86_400L
     private val t0 = 1_793_000_000L // a Monday-ish epoch second; the exact weekday doesn't matter here
 
+    init {
+        e.analytics.profile = { null } // no network in tests
+    }
+
     @AfterTest fun reset() {
         Db.clock = { Instant.now() }
     }
@@ -109,6 +113,33 @@ class AnalyticsTest {
         at(t0 + 30 * day)
         e.analytics.record("tim", listOf(Library.normalizeWebItem(item("1", t0 - day, 500))))
         assertEquals(4, e.db.tx { all("post_snapshots").size }) // the 42 hours touch 3 UTC days: one each, + today's
+    }
+
+    @Test fun refresh_lists_every_post_from_tiktok_studio() {
+        at(t0)
+        // The public profile page lists nothing for the account itself; TikTok Studio's list has them all.
+        tiktok.myPosts = (1..55).map { i ->
+            obj("id" to "$i", "desc" to "post $i #tips", "posted_at" to t0 - i * day, "views" to 100L * i, "likes" to 10L,
+                "comments" to 1L, "shares" to 0L, "saves" to 2L, "is_slideshow" to (i % 5 != 0), "slides" to 6L)
+        }
+        e.analytics.profile = { obj("followers" to 321L, "total_likes" to 900L, "video_count" to 55L) }
+        assertTrue(e.analytics.refresh(tiktok))
+        val rows = e.db.tx { all("my_posts").map { it.copyObj() } }
+        assertEquals(55, rows.size)
+        val p7 = rows.first { it.str("id") == "7" }
+        assertEquals(listOf(700L, 6L, true, t0 - 7 * day), listOf(p7.long("views"), p7.long("slides"), p7.bool("is_slideshow"), p7.long("posted_at")))
+        assertEquals(321L, e.db.tx { all("account_snapshots").single().long("followers") })
+        val r = e.analytics.report(postsLimit = 5)
+        assertEquals(55L, r.objAt("totals").long("posts"))
+    }
+
+    @Test fun refresh_falls_back_to_the_profile_page() {
+        at(t0)
+        tiktok.myPosts = emptyList()
+        platform.profilePosts["tim"] = listOf(item("1", t0 - 3 * day, 1000))
+        assertTrue(e.analytics.refresh(tiktok))
+        assertEquals(1000L, e.db.tx { get("my_posts", "1")!!.long("views") })
+        assertEquals(1000L, e.db.tx { all("account_snapshots").single().long("followers") }) // from the item's author
     }
 
     @Test fun refresh_says_why_it_cant_read_tiktok() {
