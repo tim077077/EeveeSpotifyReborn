@@ -111,16 +111,22 @@ const bad = await failed;
 assert.equal(bad.ok, false);
 assert.match(bad.error, /save draft failed/);
 
-// A scheduled publish: TikTok Studio's Schedule is schedule_time (unix seconds) on the post request.
+// A scheduled publish: TikTok Studio's Schedule is schedule_time (unix seconds) on the post request,
+// after one schedule ack (shape from a real scheduled photo post, HAR).
 const posts = [];
+const acks = [];
+const postQueries = [];
 win.fetch = async (url, init) => {
-  if (new URL(url).pathname === "/tiktok/web/project/post/v1/") {
+  const u = new URL(url);
+  if (u.pathname === "/api/v1/post_schedule/ack/") { acks.push(u.search); return reply({ status_code: 0 }); }
+  if (u.pathname === "/tiktok/web/project/post/v1/") {
     posts.push(JSON.parse(init.body));
+    postQueries.push(u.searchParams);
     return reply({ status_code: 0, project_id: "pr1", single_post_resp_list: [{ item_id: "7500000000000000001" }] });
   }
   return fetch(url, init);
 };
-const at = Math.floor(Date.now() / 1000) + 3 * 3600;
+const at = (Math.floor(Date.now() / 1000 / 300) + 36) * 300; // 3 hours ahead, on a 5-minute boundary like Studio
 const scheduled = new Promise((resolve) => (win.postMessage = (m) => m.__vbtt === "jobResult" && resolve(m.result)));
 listeners.forEach((f) => f({ source: page, data: { __vbtt: "job", id: 4, job: { id: "p3", action: "publish", title: "t", caption: "c #x", images: [png], schedule: at } } }));
 const sch = await scheduled;
@@ -128,14 +134,20 @@ assert.equal(sch.ok, true, sch.error);
 assert.equal(sch.itemId, "7500000000000000001");
 assert.equal(sch.scheduleTime, at);
 assert.equal(posts[0].feature_common_info_list[0].schedule_time, at);
+assert.deepEqual(Object.keys(posts[0].feature_common_info_list[0]).slice(0, 3), ["aigc_info", "org_game_post_use_store_region", "schedule_time"]);
+assert.deepEqual(acks, ["?ack_type=2&aid=1988"]);
+assert.ok(postQueries[0].get("tz_name"), "the post carries the browser's time zone, like Studio");
 
 // Too soon (the upload ate the margin) is pushed out to what TikTok accepts; no schedule means now.
 const soon = new Promise((resolve) => (win.postMessage = (m) => m.__vbtt === "jobResult" && resolve(m.result)));
 listeners.forEach((f) => f({ source: page, data: { __vbtt: "job", id: 5, job: { id: "p4", action: "publish", title: "t", caption: "", images: [png], schedule: Math.floor(Date.now() / 1000) + 60 } } }));
-assert.ok((await soon).scheduleTime >= Math.floor(Date.now() / 1000) + 15 * 60);
+const soonAt = (await soon).scheduleTime;
+assert.ok(soonAt >= Math.floor(Date.now() / 1000) + 15 * 60);
+assert.equal(soonAt % 300, 0); // Studio's 5-minute steps
 const now = new Promise((resolve) => (win.postMessage = (m) => m.__vbtt === "jobResult" && resolve(m.result)));
 listeners.forEach((f) => f({ source: page, data: { __vbtt: "job", id: 6, job: { id: "p5", action: "publish", title: "t", caption: "", images: [png] } } }));
 assert.equal((await now).scheduleTime, 0);
 assert.ok(!("schedule_time" in posts[2].feature_common_info_list[0]));
+assert.equal(acks.length, 2); // posting now needs no ack
 
 console.log("tiktok-inject: draft and schedule checks passed");

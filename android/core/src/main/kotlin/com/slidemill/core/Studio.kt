@@ -33,6 +33,9 @@ class Studio(
         const val MIN_GAP_S = 2 * 3600L // autopilot: Slidemill posts at least this far apart
         const val MAX_PER_DAY = 4 // and at most this many within any 24 hours
 
+        /** TikTok Studio schedules on 5-minute steps: round up, so what's recorded is what TikTok gets. */
+        fun roundSchedule(at: Long): Long = if (at <= 0) 0 else (at + 299) / 300 * 300
+
         /** Why TikTok would refuse a schedule at [at] (unix seconds), or null if it's in the window. */
         fun scheduleProblem(at: Long, nowS: Long = Db.nowMs() / 1000): String? = when {
             at < nowS + MIN_SCHEDULE_S -> "TikTok can only schedule at least 15 minutes ahead."
@@ -210,7 +213,9 @@ class Studio(
      * Publish a rendered slideshow as a live TikTok photo post through the phone's TikTok tab. Blocks
      * until TikTok answers; returns the post record. Throws [DraftError] with the reason (also recorded).
      */
-    fun publish(id: String, tab: TikTokTab?, sound: Boolean = true, at: Long = 0): Obj {
+    fun publish(id: String, tab: TikTokTab?, sound: Boolean = true, at: Long = 0): Obj = publishAt(id, tab, sound, roundSchedule(at))
+
+    private fun publishAt(id: String, tab: TikTokTab?, sound: Boolean, at: Long): Obj {
         if (at > 0) scheduleProblem(at)?.let { throw DraftError(it) }
         val (title, caption, slides) = db.tx {
             val s = get("slideshows", id) ?: throw PipelineError("Slideshow $id not found.")

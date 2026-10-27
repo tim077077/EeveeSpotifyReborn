@@ -352,8 +352,19 @@
     return out;
   }
 
-  // TikTok Studio's "Schedule" takes a unix time 15 minutes to 30 days ahead (some accounts: 10 days).
+  // TikTok Studio's "Schedule" (verified against a real scheduled photo post, HAR): schedule_time is unix
+  // seconds on a 5-minute boundary, 15 minutes to 30 days ahead (some accounts: 10 days), sent on the same
+  // post request with tz_name; Studio first acknowledges scheduling once (post_schedule/ack, ack_type=2).
   const MIN_SCHEDULE_S = 15 * 60;
+  const SCHEDULE_STEP_S = 5 * 60;
+
+  const timeZone = () => { try { return Intl.DateTimeFormat().resolvedOptions().timeZone || ""; } catch (_) { return ""; } };
+
+  async function ackSchedule() {
+    try {
+      await fetch(ORIGIN + "/api/v1/post_schedule/ack/?" + new URLSearchParams({ ack_type: "2", aid: "1988" }), { method: "POST", credentials: "include" });
+    } catch (e) { warn("schedule ack failed (continuing):", e && e.message); }
+  }
 
   async function createPost({ title, caption, uploaded, creation_id, music, schedule }) {
     const images = uploaded.map((u, idx) => ({
@@ -408,9 +419,16 @@
     if (schedule) {
       // The upload can take a while: never send a time TikTok would refuse as too soon.
       scheduleTime = Math.max(Math.floor(Number(schedule)), Math.floor(Date.now() / 1000) + MIN_SCHEDULE_S + 60);
-      body.feature_common_info_list[0].schedule_time = scheduleTime;
+      scheduleTime = Math.ceil(scheduleTime / SCHEDULE_STEP_S) * SCHEDULE_STEP_S;
+      // Same key order as TikTok Studio's own body.
+      const f = body.feature_common_info_list[0];
+      body.feature_common_info_list[0] = { aigc_info: f.aigc_info, org_game_post_use_store_region: f.org_game_post_use_store_region, schedule_time: scheduleTime, ...f };
+      await ackSchedule();
     }
-    const q = new URLSearchParams({ app_name: "tiktok_web", channel: "tiktok_web", device_platform: "web", aid: "1988" });
+    const q = new URLSearchParams({ app_name: "tiktok_web", channel: "tiktok_web", device_platform: "web" });
+    const tz = timeZone();
+    if (tz) q.set("tz_name", tz);
+    q.set("aid", "1988");
     // NOTE: msToken / X-Bogus / X-Gnarly are appended automatically by TikTok's
     // in-page webmssdk fetch hook — do NOT add them here.
     const r = await fetch(ORIGIN + "/tiktok/web/project/post/v1/?" + q, {

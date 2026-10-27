@@ -108,7 +108,7 @@ class McpTest {
 
     @Test fun schedule_is_autopilot_by_default_and_proposes_when_turned_off() {
         val id = idOf(create())
-        val at = Db.nowMs() / 1000 + 3 * 3600
+        val at = (Db.nowMs() / 1000 / 300 + 36) * 300 // on TikTok Studio's 5-minute steps
         val iso = java.time.Instant.ofEpochSecond(at).toString()
 
         // Autopilot off: only a proposal, nothing sent to TikTok; the user approves it in the app.
@@ -123,6 +123,7 @@ class McpTest {
         val rec = e.studio.publish(id, tiktok, at = at)
         assertEquals("scheduled", rec.str("status"))
         assertEquals(at, tiktok.scheduledAt.single())
+        assertEquals(1800L, Studio.roundSchedule(1501)) // off-step times round up to Studio's 5 minutes
         assertEquals(0L, row(id).long("suggested_time"))
         assertTrue("scheduled for" in text(call("list_slideshows")))
         assertTrue("Already scheduled" in assertFailsWith<DraftError> { e.studio.publish(id, tiktok) }.message!!)
