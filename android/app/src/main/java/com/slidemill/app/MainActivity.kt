@@ -226,11 +226,11 @@ class MainActivity : Activity() {
         col.addView(CheckBox(this).apply {
             text = "Let Claude schedule posts without asking me"
             setTextColor(ink)
-            isChecked = engine.store.get("claude_schedules") == "1"
-            setOnCheckedChangeListener { _, on -> io.execute { engine.store.setMany(mapOf("claude_schedules" to if (on) "1" else "")) } }
+            isChecked = engine.store.get("claude_schedules") != "0"
+            setOnCheckedChangeListener { _, on -> io.execute { engine.store.setMany(mapOf("claude_schedules" to if (on) "1" else "0")) } }
         }, spaced(6))
         col.addView(label(
-            "Off: Claude only proposes a time, and you approve it with one tap (SCHEDULE). On: Claude puts posts on TikTok's schedule itself, so they go live without you seeing them first.",
+            "On (autopilot, the default): Claude puts posts on TikTok's schedule itself and they go live without you seeing them first, at least 2 hours apart and at most 4 a day. Off: Claude only proposes a time, and you approve it with one tap (SCHEDULE).",
             12f, muted,
         ))
 

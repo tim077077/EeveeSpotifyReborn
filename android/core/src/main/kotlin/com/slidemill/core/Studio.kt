@@ -30,6 +30,9 @@ class Studio(
         const val MIN_SCHEDULE_S = 15 * 60L // TikTok Studio's Schedule window
         const val MAX_SCHEDULE_S = 30 * 86_400L // (some accounts only get 10 days)
 
+        const val MIN_GAP_S = 2 * 3600L // autopilot: Slidemill posts at least this far apart
+        const val MAX_PER_DAY = 4 // and at most this many within any 24 hours
+
         /** Why TikTok would refuse a schedule at [at] (unix seconds), or null if it's in the window. */
         fun scheduleProblem(at: Long, nowS: Long = Db.nowMs() / 1000): String? = when {
             at < nowS + MIN_SCHEDULE_S -> "TikTok can only schedule at least 15 minutes ahead."
@@ -238,6 +241,30 @@ class Studio(
         if (record.str("status") == "failed") throw DraftError(record.str("error"))
         db.tx { get("slideshows", id)?.set("suggested_time", 0L) }
         return record
+    }
+
+    /** Unix seconds of every Slidemill post that's live, scheduled or being posted. */
+    fun postTimes(): List<Long> = db.tx {
+        all("slideshows").mapNotNull { s ->
+            val p = s.objOrNull("post") ?: return@mapNotNull null
+            when (p.str("status")) {
+                "scheduled" -> runCatching { java.time.Instant.parse(p.str("scheduled_for")).epochSecond }.getOrNull()
+                "posted", "posting" -> runCatching { java.time.Instant.parse(p.str("at")).epochSecond }.getOrNull()
+                else -> null
+            }
+        }
+    }
+
+    /** Autopilot's spam guard: why posting at [at] would crowd the account, or null if it's fine. */
+    fun crowding(at: Long): String? {
+        val times = postTimes()
+        times.firstOrNull { kotlin.math.abs(it - at) < MIN_GAP_S }?.let {
+            return "Another Slidemill post goes out within 2 hours of that time (${Db.iso(it * 1000)} UTC). Keep posts at least 2 hours apart."
+        }
+        if (times.count { kotlin.math.abs(it - at) < 12 * 3600 } >= MAX_PER_DAY) {
+            return "That would be more than $MAX_PER_DAY Slidemill posts within 24 hours. Pick another day."
+        }
+        return null
     }
 
     /** Claude's proposed posting time (unix seconds), shown in the app for the user to approve with one tap. */

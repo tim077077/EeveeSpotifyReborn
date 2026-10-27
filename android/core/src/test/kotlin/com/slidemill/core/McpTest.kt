@@ -44,7 +44,7 @@ class McpTest {
         val init = result("initialize", obj("protocolVersion" to "2025-06-18", "capabilities" to obj(), "clientInfo" to obj("name" to "t", "version" to "1")))
         assertEquals("2025-06-18", init.str("protocolVersion"))
         assertEquals("Slidemill", init.objAt("serverInfo").str("name"))
-        assertTrue("taps POST" in init.str("instructions"))
+        assertTrue("autopilot" in init.str("instructions"))
         assertEquals("2025-11-25", result("initialize", obj("protocolVersion" to "1999-01-01")).str("protocolVersion"))
         val names = result("tools/list").objs("tools").map { it.str("name") }
         assertEquals(listOf(
@@ -106,12 +106,13 @@ class McpTest {
         assertEquals("posted", e.studio.publish(other, tiktok).str("status"))
     }
 
-    @Test fun schedule_proposes_by_default_and_schedules_on_tiktok_when_allowed() {
+    @Test fun schedule_is_autopilot_by_default_and_proposes_when_turned_off() {
         val id = idOf(create())
         val at = Db.nowMs() / 1000 + 3 * 3600
         val iso = java.time.Instant.ofEpochSecond(at).toString()
 
-        // Default: only a proposal, nothing sent to TikTok; the user approves it in the app.
+        // Autopilot off: only a proposal, nothing sent to TikTok; the user approves it in the app.
+        e.store.setMany(mapOf("claude_schedules" to "0"))
         val proposed = call("schedule_slideshow", obj("slideshow_id" to id, "at" to iso))
         assertEquals(false, proposed["isError"], proposed.toString())
         assertTrue("isn't scheduled yet" in text(proposed), text(proposed))
@@ -126,10 +127,13 @@ class McpTest {
         assertTrue("scheduled for" in text(call("list_slideshows")))
         assertTrue("Already scheduled" in assertFailsWith<DraftError> { e.studio.publish(id, tiktok) }.message!!)
 
-        // With "Let Claude schedule posts" on, Claude's call schedules it directly.
-        e.store.setMany(mapOf("claude_schedules" to "1"))
+        // Autopilot (the default when the setting was never touched): Claude's call schedules it directly,
+        // but never crowding another Slidemill post.
+        e.store.setMany(mapOf("claude_schedules" to ""))
         val other = idOf(create())
-        val direct = call("schedule_slideshow", obj("slideshow_id" to other, "at" to iso))
+        assertTrue("2 hours" in text(call("schedule_slideshow", obj("slideshow_id" to other, "at" to iso))))
+        val later = java.time.Instant.ofEpochSecond(at + 3 * 3600).toString()
+        val direct = call("schedule_slideshow", obj("slideshow_id" to other, "at" to later))
         assertTrue("Scheduled on TikTok" in text(direct), text(direct))
         assertEquals("scheduled", row(other).objAt("post").str("status"))
 

@@ -40,7 +40,7 @@ How to work with it:
 1. Call writing_guide once, and research_library to see which real slideshows in the user's niche beat their account's usual views. Write in that spirit; never copy a post. (add_to_library imports accounts; read_library_slides lets you read slide text the library doesn't have yet.)
 2. Write each slideshow yourself and pass it to create_slideshow (the phone finds backgrounds and draws your text). Or, if you made finished slide images yourself, pass them to import_slides as https links or small data URIs. Look at the slides that come back and fix what reads badly.
 3. predict_virality scores a slideshow with you as the reader: call it once for the rules, the slides and real library posts to rank it against, write your read, and call it again with that read. Use the scores to choose.
-4. Every finished slideshow is a draft in the Slidemill app on the phone: the user taps it, sees the preview, and taps POST to publish it live on TikTok. You don't post; tell the user it's waiting in the Slidemill app. To time it, schedule_slideshow (pick the time with best_times) puts it on TikTok Studio's own schedule, or proposes the time for the user's one-tap approval, depending on the user's setting. list_slideshows and view_slideshow show whether it's been posted, with the post's link.
+4. Posting is on autopilot: schedule_slideshow (pick the time with best_times) puts a finished slideshow on TikTok Studio's own schedule, and it goes public then without the user approving it. So check the rendered slides first, and only schedule what you'd stand behind; delete weak versions instead. Posts must be at least 2 hours apart, at most 4 in 24 hours. Every slideshow also waits in the Slidemill app, where the user can POST it now themselves. list_slideshows and view_slideshow show whether it's been posted, with the post's link.
 5. Only if the user asks for web drafts: save_draft (or save_draft: true) also saves it to TikTok Studio's web drafts and answers with TikTok's draft id. Those drafts appear on tiktok.com/tiktokstudio (or the Slidemill app's "Web drafts" button), NOT in the TikTok app's Drafts."""
 
         private fun str(description: String = "", enum: List<String>? = null): Obj =
@@ -133,9 +133,10 @@ How to work with it:
         "schedule_slideshow" to Tool(
             "Pick when a rendered slideshow should go live, using TikTok Studio's own Schedule (TikTok publishes it at " +
                 "that time even if the phone is off). Between 15 minutes and 30 days ahead (some accounts: 10 days). " +
-                "By default this only PROPOSES the time: the user approves it with one tap (SCHEDULE) in the Slidemill app. " +
-                "If the user turned on \"Let Claude schedule posts\" in the app, it's scheduled on TikTok right away. " +
-                "Use best_times to choose the time. The answer says which happened.",
+                "Autopilot: it's scheduled on TikTok right away and goes public at that time with no approval from the " +
+                "user, so only schedule slideshows you've checked and would stand behind. Posts must be at least 2 hours " +
+                "apart, at most 4 in 24 hours. (If the user turned autopilot off in the app, it only proposes the time " +
+                "for their one-tap approval.) Use best_times to choose the time. The answer says which happened.",
             input(
                 listOf("slideshow_id", "at"),
                 "slideshow_id" to str(),
@@ -439,7 +440,8 @@ How to work with it:
         if (s.str("status") != "completed") throw ToolError("Slideshow $id isn't rendered (${s.str("status")}).")
         val at = parseAt(raw)
         Studio.scheduleProblem(at)?.let { throw ToolError(it) }
-        if (e.store.get("claude_schedules") != "1") {
+        e.studio.crowding(at)?.let { throw ToolError(it) }
+        if (e.store.get("claude_schedules") == "0") {
             e.studio.suggest(id, at)
             return "Proposed for ${localTime(at)}. It isn't scheduled yet: the user approves it with one tap (SCHEDULE) on " +
                 "this slideshow in the Slidemill app. Tell them."
@@ -515,7 +517,7 @@ How to work with it:
             else "AI only: ${e.imageGen.describe()}. A free Pexels key in the app gives real photos.",
             "library" to "$posts slideshows from $profiles accounts",
             "phone_time" to localTime(Db.nowMs() / 1000),
-            "claude_can_schedule" to if (e.store.get("claude_schedules") == "1") "yes: schedule_slideshow schedules on TikTok directly"
+            "claude_can_schedule" to if (e.store.get("claude_schedules") != "0") "yes: schedule_slideshow schedules on TikTok directly"
             else "no: schedule_slideshow proposes a time; the user approves it in the app",
         ))
     }

@@ -13,7 +13,7 @@ Tap a draft on the Slidemill tab: you see the slides (swipe), the carousel title
 
 - **Add a sound** (on by default) attaches TikTok's top suggested sound for those slides from its web library. That library is smaller than the app's, and you don't choose the sound. Untick it to post silent.
 - **Schedule:** if Claude proposed a time (`schedule_slideshow`), the big button reads **SCHEDULE for Tue 27 Oct, 18:30**; one tap puts the post on TikTok Studio's own schedule. **Schedule for another time…** lets you pick a date and time yourself. TikTok then publishes it at that time from its servers, phone on or off, and it shows in TikTok Studio → Content → Scheduled. TikTok accepts 15 minutes to 30 days ahead (some accounts only 10 days).
-- **Let Claude schedule posts without asking me** (Slidemill tab, off by default): when on, Claude's `schedule_slideshow` schedules on TikTok directly instead of proposing.
+- **Autopilot** ("Let Claude schedule posts without asking me", Slidemill tab, **on by default**): Claude's `schedule_slideshow` schedules on TikTok directly, and the post goes public at that time without you seeing it. A guard in the app keeps Slidemill posts at least 2 hours apart and at most 4 in 24 hours. Untick it and Claude only proposes times for your one-tap SCHEDULE.
 - **Edit in the TikTok app instead** opens the TikTok app's photo editor with the slides and the caption copied, if you want to pick a trending sound yourself.
 
 ## Web drafts (optional)
