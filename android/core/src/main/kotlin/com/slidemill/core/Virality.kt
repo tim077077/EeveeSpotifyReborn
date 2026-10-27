@@ -96,6 +96,31 @@ For each slide in order, give swipe_on: the percent of viewers who reach this sl
             return score.coerceIn(0, 100) to problems
         }
 
+        const val CHECK_MIN = 8 // posts needed before the check says anything about the score
+        const val CHECK_AGE_S = 48 * 3600L // views settle after about two days
+
+        /**
+         * Does the score predict this account's real views? Takes (predicted score, views) for the user's own
+         * Slidemill posts that are old enough. Honest about small samples: under [CHECK_MIN] it doesn't judge.
+         */
+        fun predictionCheck(pairs: List<Pair<Double, Double>>): Obj {
+            val n = pairs.size
+            if (n < CHECK_MIN) return obj(
+                "posts_checked" to n.toLong(),
+                "verdict" to "Not enough yet: $n scored Slidemill post(s) are 2+ days old; the check needs $CHECK_MIN. Until then the score is an untested opinion.",
+            )
+            val rho = spearman(pairs.map { it.first }, pairs.map { it.second })
+            val r = rho ?: 0.0
+            val verdict = when {
+                rho == null -> "The scores (or views) are all the same, so there's nothing to compare."
+                r >= 0.5 -> "The score tracks real views well here: use it to choose between versions."
+                r >= 0.25 -> "The score tracks real views a little: use it as a tie-breaker, not a decision."
+                r > -0.1 -> "The score doesn't predict real views on this account: don't use it to choose. Go by what got views."
+                else -> "Higher scores got FEWER views on this account: the score is misleading here. Ignore it."
+            }
+            return obj("posts_checked" to n.toLong(), "spearman" to rho?.let { Math.round(it * 100) / 100.0 }, "verdict" to verdict)
+        }
+
         /** Spearman rank correlation. */
         fun spearman(xs: List<Double>, ys: List<Double>): Double? {
             if (xs.size < 3 || xs.size != ys.size) return null

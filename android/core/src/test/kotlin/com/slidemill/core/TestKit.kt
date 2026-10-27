@@ -27,11 +27,14 @@ class FakeTikTok(var user: String = "tim") : TikTokTab {
 
     val published = CopyOnWriteArrayList<Triple<String, String, List<File>>>()
 
-    override fun publish(title: String, caption: String, slides: List<File>, sound: Boolean): String {
+    val scheduledAt = CopyOnWriteArrayList<Long>()
+
+    override fun publish(title: String, caption: String, slides: List<File>, sound: Boolean, at: Long): String {
         if (user.isEmpty()) throw DraftError("Not logged in to TikTok in the app.")
         Thread.sleep(delayMs)
         refuse?.let { throw DraftError("TikTok refused the post: $it") }
         published += Triple(title, caption, slides)
+        scheduledAt += at
         return "75" + published.size.toString().padStart(17, '0')
     }
 }

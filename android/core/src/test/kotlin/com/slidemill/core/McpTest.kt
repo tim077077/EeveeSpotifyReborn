@@ -44,12 +44,12 @@ class McpTest {
         val init = result("initialize", obj("protocolVersion" to "2025-06-18", "capabilities" to obj(), "clientInfo" to obj("name" to "t", "version" to "1")))
         assertEquals("2025-06-18", init.str("protocolVersion"))
         assertEquals("Slidemill", init.objAt("serverInfo").str("name"))
-        assertTrue("taps POST" in init.str("instructions"))
+        assertTrue("autopilot" in init.str("instructions"))
         assertEquals("2025-11-25", result("initialize", obj("protocolVersion" to "1999-01-01")).str("protocolVersion"))
         val names = result("tools/list").objs("tools").map { it.str("name") }
         assertEquals(listOf(
             "writing_guide", "research_library", "add_to_library", "read_library_slides", "save_slide_texts", "create_slideshow",
-            "import_slides", "save_draft", "view_slideshow", "list_slideshows", "delete_slideshow", "predict_virality", "my_posts", "best_times", "phone_status",
+            "import_slides", "save_draft", "schedule_slideshow", "view_slideshow", "list_slideshows", "delete_slideshow", "predict_virality", "my_posts", "best_times", "phone_status",
         ), names)
         // Notifications get no body; modern-era discovery falls back to the handshake; GET isn't served.
         assertEquals(202, e.relay.mcp.handle("POST", """{"jsonrpc":"2.0","method":"notifications/initialized"}""").status)
@@ -104,6 +104,46 @@ class McpTest {
         assertEquals("failed", row(other).objAt("post").str("status"))
         tiktok.refuse = null
         assertEquals("posted", e.studio.publish(other, tiktok).str("status"))
+    }
+
+    @Test fun schedule_is_autopilot_by_default_and_proposes_when_turned_off() {
+        val id = idOf(create())
+        val at = (Db.nowMs() / 1000 / 300 + 36) * 300 // on TikTok Studio's 5-minute steps
+        val iso = java.time.Instant.ofEpochSecond(at).toString()
+
+        // Autopilot off: only a proposal, nothing sent to TikTok; the user approves it in the app.
+        e.store.setMany(mapOf("claude_schedules" to "0"))
+        val proposed = call("schedule_slideshow", obj("slideshow_id" to id, "at" to iso))
+        assertEquals(false, proposed["isError"], proposed.toString())
+        assertTrue("isn't scheduled yet" in text(proposed), text(proposed))
+        assertEquals(at, row(id).long("suggested_time"))
+        assertTrue(tiktok.published.isEmpty())
+
+        // The app's SCHEDULE tap: TikTok gets the time, and the proposal is used up.
+        val rec = e.studio.publish(id, tiktok, at = at)
+        assertEquals("scheduled", rec.str("status"))
+        assertEquals(at, tiktok.scheduledAt.single())
+        assertEquals(1800L, Studio.roundSchedule(1501)) // off-step times round up to Studio's 5 minutes
+        assertEquals(0L, row(id).long("suggested_time"))
+        assertTrue("scheduled for" in text(call("list_slideshows")))
+        assertTrue("Already scheduled" in assertFailsWith<DraftError> { e.studio.publish(id, tiktok) }.message!!)
+
+        // Autopilot (the default when the setting was never touched): Claude's call schedules it directly,
+        // but never crowding another Slidemill post.
+        e.store.setMany(mapOf("claude_schedules" to ""))
+        val other = idOf(create())
+        assertTrue("2 hours" in text(call("schedule_slideshow", obj("slideshow_id" to other, "at" to iso))))
+        val later = java.time.Instant.ofEpochSecond(at + 3 * 3600).toString()
+        val direct = call("schedule_slideshow", obj("slideshow_id" to other, "at" to later))
+        assertTrue("Scheduled on TikTok" in text(direct), text(direct))
+        assertEquals("scheduled", row(other).objAt("post").str("status"))
+
+        // Outside TikTok's window, or unreadable: refused before anything is sent.
+        val third = idOf(create())
+        assertTrue("15 minutes" in text(call("schedule_slideshow", obj("slideshow_id" to third, "at" to java.time.Instant.now().plusSeconds(60).toString()))))
+        assertTrue("30 days" in text(call("schedule_slideshow", obj("slideshow_id" to third, "at" to java.time.Instant.now().plusSeconds(40L * 86400).toString()))))
+        assertTrue("ISO 8601" in text(call("schedule_slideshow", obj("slideshow_id" to third, "at" to "tomorrow at 6"))))
+        assertEquals(2, tiktok.published.size)
     }
 
     @Test fun slides_claude_made_are_imported_and_saved_as_a_draft() {
@@ -269,6 +309,26 @@ class McpTest {
         assertEquals("https://www.tiktok.com/@tim/photo/7400000000000000001", mine.objs("posts")[0].str("url"))
         tiktok.user = ""
         assertTrue("Not logged in" in text(call("my_posts")))
+    }
+
+    @Test fun my_posts_checks_the_score_against_real_views() {
+        // Too few: no verdict about the score.
+        assertTrue("Not enough yet" in Virality.predictionCheck(listOf(80.0 to 1000.0)).str("verdict"))
+        val tracks = (1..10).map { it * 10.0 to it * 1000.0 }
+        assertTrue("tracks real views well" in Virality.predictionCheck(tracks).str("verdict"))
+        assertTrue("FEWER views" in Virality.predictionCheck(tracks.map { it.first to -it.second }).str("verdict"))
+
+        // A post made with the POST button is matched to its slideshow and score.
+        val id = idOf(create())
+        e.db.tx { get("slideshows", id)!!["prediction"] = obj("viral_potential" to 72L) }
+        val item = e.studio.publish(id, tiktok).str("item_id")
+        platform.profilePosts["tim"] = listOf(CoreTest.WEB_ITEM.copyObj().also {
+            it["author"] = obj("uniqueId" to "tim"); it["id"] = item; it["createTime"] = Db.nowMs() / 1000 - 3 * 86400
+        })
+        val mine = Json.parseObj(text(call("my_posts")))
+        assertEquals(id, mine.objs("posts")[0].objAt("slidemill").str("slideshow_id"))
+        assertEquals(72L, mine.objs("posts")[0].objAt("slidemill").long("predicted_score"))
+        assertEquals(1L, mine.objAt("prediction_check").long("posts_checked"))
     }
 
     @Test fun claude_scores_a_slideshow_itself() {

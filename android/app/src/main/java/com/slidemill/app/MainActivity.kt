@@ -2,6 +2,8 @@ package com.slidemill.app
 
 import android.Manifest
 import android.app.Activity
+import android.app.DatePickerDialog
+import android.app.TimePickerDialog
 import android.content.ClipData
 import android.content.ClipboardManager
 import android.content.Intent
@@ -36,6 +38,11 @@ import com.slidemill.core.objOrNull
 import com.slidemill.core.str
 import com.slidemill.core.strings
 import java.io.File
+import java.time.Instant
+import java.time.LocalDate
+import java.time.LocalTime
+import java.time.ZoneId
+import java.time.format.DateTimeFormatter
 import java.util.concurrent.Executors
 
 /**
@@ -214,6 +221,19 @@ class MainActivity : Activity() {
             runCatching { startActivity(Intent(Settings.ACTION_IGNORE_BATTERY_OPTIMIZATION_SETTINGS)) }
         }, spaced(6))
 
+        // 5. Scheduling
+        col.addView(heading("5. Scheduling"))
+        col.addView(CheckBox(this).apply {
+            text = "Let Claude schedule posts without asking me"
+            setTextColor(ink)
+            isChecked = engine.store.get("claude_schedules") != "0"
+            setOnCheckedChangeListener { _, on -> io.execute { engine.store.setMany(mapOf("claude_schedules" to if (on) "1" else "0")) } }
+        }, spaced(6))
+        col.addView(label(
+            "On (autopilot, the default): Claude puts posts on TikTok's schedule itself and they go live without you seeing them first, at least 2 hours apart and at most 4 a day. Off: Claude only proposes a time, and you approve it with one tap (SCHEDULE).",
+            12f, muted,
+        ))
+
         // What Claude made
         col.addView(heading("Drafts"))
         showsList = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL }.also { col.addView(it, spaced(6)) }
@@ -258,8 +278,10 @@ class MainActivity : Activity() {
             r.str("status") == "failed" -> "failed to render: ${r.str("error")}"
             r.str("status") != "completed" -> "${r.str("status")}…"
             p?.str("status") == "posted" -> "✓ Live on TikTok"
+            p?.str("status") == "scheduled" -> "✓ Scheduled for ${whenText(p.str("scheduled_for"))}"
             p?.str("status") == "posting" -> "posting…"
             p?.str("status") == "failed" -> "✗ not posted: ${p.str("error")} (tap to retry)"
+            r.long("suggested_time") > 0 -> "Claude suggests ${whenText(r.long("suggested_time"))}: tap to approve"
             else -> "Draft: tap to preview and post"
         }
     }
@@ -307,12 +329,20 @@ class MainActivity : Activity() {
         col.addView(label(r.str("description").ifEmpty { "(none)" }, 14f, ink).apply { setTextIsSelectable(true) })
 
         val status = label("", 14f, ink)
-        val posted = r.objOrNull("post")?.takeIf { it.str("status") == "posted" }
+        val posted = r.objOrNull("post")?.takeIf { it.str("status") == "posted" || it.str("status") == "scheduled" }
         if (posted != null) {
-            status.text = "✓ Live on TikTok"
+            val scheduled = posted.str("status") == "scheduled"
+            status.text = if (scheduled) "✓ Scheduled on TikTok for ${whenText(posted.str("scheduled_for"))}. TikTok publishes it then, phone on or off." else "✓ Live on TikTok"
             status.setTextColor(good)
             col.addView(status, spaced(18))
-            col.addView(button("Open the post") { openUrl(posted.str("url")) }, spaced(8))
+            if (scheduled) {
+                col.addView(button("See it in TikTok Studio") {
+                    show("TikTok")
+                    TikTokWeb.get(this).loadUrl("https://www.tiktok.com/tiktokstudio/content")
+                }, spaced(8))
+            } else {
+                col.addView(button("Open the post") { openUrl(posted.str("url")) }, spaced(8))
+            }
         } else {
             val sound = CheckBox(this).apply {
                 text = "Add a sound (TikTok's top suggestion for these slides)"
@@ -321,30 +351,59 @@ class MainActivity : Activity() {
             }
             col.addView(sound, spaced(16))
             col.addView(status, spaced(8))
-            lateinit var postButton: Button
-            postButton = button("POST") {
-                postButton.isEnabled = false
+            val buttons = mutableListOf<Button>()
+            fun go(at: Long) {
+                buttons.forEach { it.isEnabled = false }
                 status.setTextColor(ink)
-                status.text = "Posting… uploading ${r.strings("rendered").size} slides to TikTok (up to a minute or two)."
+                status.text = (if (at > 0) "Scheduling for ${whenText(at)}…" else "Posting…") +
+                    " uploading ${r.strings("rendered").size} slides to TikTok (up to a minute or two)."
                 io.execute {
-                    val out = runCatching { engine.studio.publish(id, engine.tiktok, sound.isChecked) }
+                    val out = runCatching { engine.studio.publish(id, engine.tiktok, sound.isChecked, at) }
                     main.post {
                         if (current != "preview") return@post
                         out.onSuccess { preview(id) }.onFailure {
                             status.text = "✗ ${it.message}"
                             status.setTextColor(accent)
-                            postButton.isEnabled = true
+                            buttons.forEach { b -> b.isEnabled = true }
                         }
                     }
                 }
-            }.apply { textSize = 18f }
-            col.addView(postButton, LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, dp(56)).apply { topMargin = dp(8) })
+            }
+            val suggested = r.long("suggested_time")
+            if (suggested > 0) {
+                col.addView(label("Claude suggests posting ${whenText(suggested)}.", 13f, muted), spaced(8))
+                buttons += button("SCHEDULE for ${whenText(suggested)}") { go(suggested) }.apply { textSize = 17f }
+                    .also { col.addView(it, LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, dp(56)).apply { topMargin = dp(8) }) }
+                buttons += button("POST now instead", secondary = true) { go(0) }.also { col.addView(it, spaced(8)) }
+            } else {
+                buttons += button("POST") { go(0) }.apply { textSize = 18f }
+                    .also { col.addView(it, LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, dp(56)).apply { topMargin = dp(8) }) }
+            }
+            buttons += button("Schedule for another time…", secondary = true) { pickTime { at -> go(at) } }.also { col.addView(it, spaced(8)) }
             col.addView(button("Edit in the TikTok app instead (pick any sound)", secondary = true) { post(r) }, spaced(10))
         }
         col.addView(button("Delete this draft", secondary = true) {
             io.execute { engine.studio.delete(id); main.post { toast("Deleted"); show("Slidemill") } }
         }, spaced(10))
         content.addView(ScrollView(this).apply { addView(col) })
+    }
+
+    private val whenFormat = DateTimeFormatter.ofPattern("EEE d MMM, HH:mm")
+
+    private fun whenText(epochS: Long): String = Instant.ofEpochSecond(epochS).atZone(ZoneId.systemDefault()).format(whenFormat)
+
+    private fun whenText(iso: String): String = runCatching { whenText(Instant.parse(iso).epochSecond) }.getOrDefault(iso)
+
+    /** Date, then time, in the phone's time zone; checked against TikTok's 15 minutes to 30 days window. */
+    private fun pickTime(then: (Long) -> Unit) {
+        val start = java.time.LocalDateTime.now().plusHours(1)
+        DatePickerDialog(this, { _, y, m, d ->
+            TimePickerDialog(this, { _, h, min ->
+                val at = LocalDate.of(y, m + 1, d).atTime(LocalTime.of(h, min)).atZone(ZoneId.systemDefault()).toEpochSecond()
+                val problem = com.slidemill.core.Studio.scheduleProblem(at)
+                if (problem != null) toast(problem) else then(at)
+            }, start.hour, 0, true).show()
+        }, start.year, start.monthValue - 1, start.dayOfMonth).show()
     }
 
     private fun openUrl(url: String) {

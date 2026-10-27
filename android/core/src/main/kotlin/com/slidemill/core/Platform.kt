@@ -48,10 +48,11 @@ interface TikTokTab {
     fun saveDraft(title: String, caption: String, slides: List<File>): String
 
     /**
-     * Upload the slides and publish them as a live photo post. With [sound], TikTok's top suggested
+     * Upload the slides and publish them as a live photo post, or with [at] (unix seconds, 0 = now) hand
+     * them to TikTok Studio's Schedule, so TikTok publishes them then. With [sound], TikTok's top suggested
      * web-library sound is attached (silent if it has none). Returns the post's item id.
      */
-    fun publish(title: String, caption: String, slides: List<File>, sound: Boolean): String
+    fun publish(title: String, caption: String, slides: List<File>, sound: Boolean, at: Long = 0): String
 }
 
 class DraftError(message: String) : RuntimeException(message)

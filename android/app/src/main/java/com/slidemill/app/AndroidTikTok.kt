@@ -56,18 +56,18 @@ class AndroidTikTok(private val context: Context) : TikTokTab {
     override fun username(): String = hello().optString("username").also { lastUsername = it }
 
     override fun saveDraft(title: String, caption: String, slides: List<File>): String =
-        run("draft", title, caption, slides, sound = false, what = "draft", idKey = "draftId", checkWhere = "TikTok Studio drafts")
+        run("draft", title, caption, slides, sound = false, at = 0, what = "draft", idKey = "draftId", checkWhere = "TikTok Studio drafts")
 
-    override fun publish(title: String, caption: String, slides: List<File>, sound: Boolean): String =
-        run("publish", title, caption, slides, sound, what = "post", idKey = "itemId", checkWhere = "your TikTok profile")
+    override fun publish(title: String, caption: String, slides: List<File>, sound: Boolean, at: Long): String =
+        run("publish", title, caption, slides, sound, at, what = "post", idKey = "itemId", checkWhere = "your TikTok profile and TikTok Studio → Scheduled")
 
     /** Hand one job to tiktok-inject.js (upload the slides, then draft or publish) and wait for TikTok's answer. */
-    private fun run(action: String, title: String, caption: String, slides: List<File>, sound: Boolean, what: String, idKey: String, checkWhere: String): String {
+    private fun run(action: String, title: String, caption: String, slides: List<File>, sound: Boolean, at: Long, what: String, idKey: String, checkWhere: String): String {
         if (username().isEmpty()) throw DraftError("Not logged in to TikTok in the app: open Slidemill → TikTok and log in (username/email + password).")
         val key = "d" + UUID.randomUUID().toString().replace("-", "").take(12)
         val job = JSONObject()
             .put("id", key).put("action", action)
-            .put("title", title).put("caption", caption).put("sound", sound)
+            .put("title", title).put("caption", caption).put("sound", sound).put("schedule", at)
             .put("images", JSONArray(TikTokWeb.serve(key, slides)))
         try {
             val result = ask("job", JSONObject().put("job", job), DRAFT_MS)
