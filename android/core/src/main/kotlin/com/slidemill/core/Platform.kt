@@ -26,10 +26,13 @@ interface Platform {
      * Raw TikTok web `itemStruct`s for a public profile's latest posts, read by a logged-in TikTok page
      * on the device. Empty when the platform can't (the HTTP profile fetch still fills the stats).
      */
-    fun listProfilePosts(username: String, max: Int): List<Obj> = emptyList()
+    fun listProfilePosts(username: String, max: Int, via: String = ""): List<Obj> = emptyList()
 
-    /** Raw TikTok web `itemStruct`s from TikTok's search for [query], read the same way. Empty when it can't. */
-    fun searchPosts(query: String, max: Int): List<Obj> = emptyList()
+    /**
+     * Raw TikTok web `itemStruct`s from TikTok's search for [query], read the same way. Empty when it can't.
+     * [via] is the account slot ([TikTokTab.id]) whose logged-in session reads TikTok ("" = the main one).
+     */
+    fun searchPosts(query: String, max: Int, via: String = ""): List<Obj> = emptyList()
 
     /** Keep the device awake while `block` runs (Claude asked for something through the relay). */
     fun <T> awake(block: () -> T): T = block()
@@ -44,6 +47,13 @@ interface Platform {
  * throw [DraftError] with a reason the user can act on.
  */
 interface TikTokTab {
+    /** Which logged-in session this is: "main", or another account's slot. */
+    val id: String get() = MAIN
+
+    companion object {
+        const val MAIN = "main"
+    }
+
     /** The logged-in TikTok username; "" when nobody is logged in. */
     fun username(): String
 

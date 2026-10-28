@@ -45,6 +45,7 @@ class Mcp(private val e: Engine) {
 3. Optional: predict_virality (two calls; pass seen_slides=true if you've already looked at the slides).
 4. Posting is on autopilot: schedule_slideshow (time from best_times) publishes without the user approving, so only schedule what you'd stand behind. Min 2 h apart, max 4 per 24 h.
 5. save_draft only if the user asks for TikTok Studio web drafts.
+6. Several TikTok accounts can be logged in (phone_status lists them). Pass account (the username) to create_slideshow, analytics and list_slideshows; each account has its own numbers and its own posting limits. Write for each account's own niche: never post the same slideshow to two accounts.
 
 Save tokens: don't repeat calls whose answer you already have in this conversation; analytics and list calls are cheap, slide images are not (view_slideshow slide=N shows one slide)."""
 
@@ -82,7 +83,7 @@ Save tokens: don't repeat calls whose answer you already have in this conversati
         ) { a -> addToLibrary(a.strings("accounts"), a.int("max_posts", 30)) },
 
         "discover_slideshows" to Tool(
-            "Search TikTok for niche terms, keep the carousels, and import the accounts behind the ones that reached furthest beyond their followers. Takes minutes; then call carousel_formats.",
+            "Search TikTok for niche terms (on the research account), keep the carousels, and import the accounts behind the ones that reached furthest beyond their followers. Takes minutes; then call carousel_formats.",
             input(
                 listOf("queries"),
                 "queries" to strs("1-5 TikTok search terms for the niche."),
@@ -117,6 +118,7 @@ Save tokens: don't repeat calls whose answer you already have in this conversati
                 "image_source" to str("Backgrounds: stock (needs a Pexels key), ai, or auto.", e.studio.sources),
                 "aspect_ratio" to str("", listOf("4:5", "9:16", "1:1")),
                 "save_draft" to bool("Only if asked: also save to TikTok Studio web drafts."),
+                "account" to str("TikTok username to use (blank = the default account; phone_status lists them)."),
             ),
         ) { a -> create(a) },
 
@@ -129,6 +131,7 @@ Save tokens: don't repeat calls whose answer you already have in this conversati
                 "description" to str("The TikTok caption: one or two sentences plus 3-5 hashtags."),
                 "title" to str("A short internal name (defaults to the caption)."),
                 "save_draft" to bool("Save to TikTok Studio drafts right away."),
+                "account" to str("TikTok username to use (blank = the default account; phone_status lists them)."),
             ),
         ) { a -> importSlides(a) },
 
@@ -144,8 +147,9 @@ Save tokens: don't repeat calls whose answer you already have in this conversati
                 "slideshow_id" to str(),
                 "at" to str("When, as ISO 8601: 2026-10-27T18:30:00+01:00, or without an offset for the phone's own time zone."),
                 "sound" to bool("Attach TikTok's top suggested sound (default true)."),
+                "account" to str("Post it to this TikTok username instead of the one it was made for."),
             ),
-        ) { a -> schedule(id(a), a.str("at"), a["sound"] as? Boolean ?: true) },
+        ) { a -> schedule(id(a), a.str("at"), a["sound"] as? Boolean ?: true, a.str("account")) },
 
         "view_slideshow" to Tool(
             "A slideshow's details, post status and rendered slides (tiled on one image); slide=N shows one slide full size.",
@@ -154,12 +158,16 @@ Save tokens: don't repeat calls whose answer you already have in this conversati
 
         "list_slideshows" to Tool(
             "Recent slideshows, newest first: status, post/schedule, score.",
-            input(listOf(), "limit" to int("How many.", 20, 1, 100)),
+            input(listOf(), "limit" to int("How many.", 20, 1, 100), "account" to str("Only this TikTok username's (blank = all).")),
         ) { a ->
-            val rows = e.db.tx { all("slideshows").sortedByDescending { it.long("created_at") }.take(a.int("limit", 20).coerceIn(1, 100)).map { it.copyObj() } }
+            val only = a.str("account").trim().removePrefix("@")
+            val rows = e.db.tx {
+                where("slideshows") { only.isEmpty() || it.str("account").equals(only, ignoreCase = true) }
+                    .sortedByDescending { it.long("created_at") }.take(a.int("limit", 20).coerceIn(1, 100)).map { it.copyObj() }
+            }
             lean(rows.map { s ->
                 obj(
-                    "id" to s.str("id"), "title" to s.str("title"), "status" to s.str("status"),
+                    "id" to s.str("id"), "account" to s.str("account"), "title" to s.str("title"), "status" to s.str("status"),
                     "draft" to s.objOrNull("draft")?.let { d -> if (d.str("status") == "saved") "saved (${d.str("draft_id")})" else d.str("status") },
                     "score" to s.objOrNull("prediction")?.get("viral_potential"),
                     "posted" to s.objOrNull("post")?.let { p ->
@@ -191,8 +199,9 @@ Save tokens: don't repeat calls whose answer you already have in this conversati
                 "refresh" to bool("Fresh numbers from TikTok first (default true; skipped within 10 min)."),
                 "weeks" to int("How many weeks of history.", 8, 1, 26),
                 "posts" to int("Recent posts to list.", 10, 1, 100),
+                "account" to str("TikTok username to use (blank = the default account; phone_status lists them)."),
             ),
-        ) { a -> analyticsTool(a["refresh"] as? Boolean ?: true, a.int("weeks", 8), a.int("posts", 10)) },
+        ) { a -> analyticsTool(a["refresh"] as? Boolean ?: true, a.int("weeks", 8), a.int("posts", 10), a.str("account")) },
 
         "best_times" to Tool(
             "Best posting times for an audience's country (two-letter code).",
@@ -317,7 +326,8 @@ Save tokens: don't repeat calls whose answer you already have in this conversati
 
     private fun discover(queries: List<String>, accounts: Int, perAccount: Int): String {
         if (queries.none { it.isNotBlank() }) throw ToolError("queries is empty")
-        val user = tab().username().ifEmpty { throw ToolError("Not logged in to TikTok on the phone: TikTok's search needs it. Open Slidemill → TikTok and log in.") }
+        val research = e.store.get("research_account")
+        val user = tab(research).username().ifEmpty { throw ToolError("Not logged in to TikTok on the phone: TikTok's search needs it. Open Slidemill → TikTok and log in.") }
         val res = within {
             e.library.discover(queries.take(5), accounts, perAccount).also { r ->
                 e.db.tx { (get("state", "discover") ?: insert("state", obj("id" to "discover")))["last"] = r.copyObj().also { it["at"] = Db.iso(Db.nowMs()) } }
@@ -396,12 +406,12 @@ Save tokens: don't repeat calls whose answer you already have in this conversati
         val aspect = a.str("aspect_ratio", "4:5").ifEmpty { "4:5" }
         if (aspect !in Shapes.ASPECT_RATIOS) throw ToolError("aspect_ratio must be one of ${Shapes.ASPECT_RATIOS}")
         val draft = a.bool("save_draft")
-        val id = e.studio.create(plan, aspect)
+        val id = e.studio.create(plan, aspect, accountFor(a.str("account")))
         // One job renders and then saves the draft, so a slow render can't lose the save.
         val done = within {
             e.studio.build(id, source)
             if (!draft || show(id).str("status") != "completed") null
-            else runCatching { e.studio.saveDraft(id, e.tiktok) }.exceptionOrNull()?.message ?: ""
+            else runCatching { e.studio.saveDraft(id, tabOf(show(id))) }.exceptionOrNull()?.message ?: ""
         }
         if (done == null && show(id).str("status") == "rendering") {
             return arr(text(
@@ -451,13 +461,14 @@ Save tokens: don't repeat calls whose answer you already have in this conversati
         val caption = a.str("caption").trim()
         if (caption.length > 89) throw ToolError("caption is ${caption.length} characters; TikTok allows 89.")
         val draft = a.bool("save_draft")
+        val account = accountFor(a.str("account"))
         // Downloading, storing and saving run as one job, so a slow upload still finishes and is recorded.
         val holder = arrayOfNulls<String>(1)
         val done = within {
             val bytes = refs.mapIndexed { i, r -> slideBytes(i + 1, r) }
-            val id = e.studio.importSlides(a.str("title").trim(), caption, a.str("description").trim(), bytes)
+            val id = e.studio.importSlides(a.str("title").trim(), caption, a.str("description").trim(), bytes, account)
             holder[0] = id
-            if (!draft) null else runCatching { e.studio.saveDraft(id, e.tiktok) }.exceptionOrNull()?.message ?: ""
+            if (!draft) null else runCatching { e.studio.saveDraft(id, tabOf(show(id))) }.exceptionOrNull()?.message ?: ""
         }
         val id = holder[0] ?: return arr(text(
             "Still downloading the slides on the phone. Call list_slideshows in a minute" + (if (draft) "; it's saved to TikTok drafts once they're in." else "."),
@@ -482,25 +493,30 @@ Save tokens: don't repeat calls whose answer you already have in this conversati
     private fun localTime(at: Long): String = java.time.Instant.ofEpochSecond(at).atZone(java.time.ZoneId.of(e.platform.defaultTimezone()))
         .format(java.time.format.DateTimeFormatter.ofPattern("EEE d MMM, HH:mm", java.util.Locale.ENGLISH)) + " (phone time, ${e.platform.defaultTimezone()})"
 
-    private fun schedule(id: String, raw: String, sound: Boolean): String {
+    private fun schedule(id: String, raw: String, sound: Boolean, account: String): String {
+        if (account.isNotBlank()) {
+            val user = accountFor(account)
+            e.db.tx { get("slideshows", id)?.takeIf { it.objOrNull("post") == null }?.set("account", user) }
+        }
         val s = show(id)
         if (s.str("status") != "completed") throw ToolError("Slideshow $id isn't rendered (${s.str("status")}).")
         val at = parseAt(raw)
         Studio.scheduleProblem(at)?.let { throw ToolError(it) }
-        e.studio.crowding(at)?.let { throw ToolError(it) }
+        val user = s.str("account").ifEmpty { defaultUser() }
+        e.studio.crowding(at, user.ifEmpty { null }, unassigned = user.isEmpty() || user.equals(defaultUser(), ignoreCase = true))?.let { throw ToolError(it) }
         if (e.store.get("claude_schedules") == "0") {
             e.studio.suggest(id, at)
             return "Proposed for ${localTime(at)}. It isn't scheduled yet: the user approves it with one tap (SCHEDULE) on " +
                 "this slideshow in the Slidemill app. Tell them."
         }
-        val record = within { e.studio.publish(id, e.tiktok, sound, at) }
+        val record = within { e.studio.publish(id, tabOf(s), sound, at) }
             ?: return "TikTok is still uploading the slides. Call view_slideshow in a minute: it shows the scheduled time, or why it failed."
-        return "Scheduled on TikTok for ${localTime(at)} (post id ${record.str("item_id")}). It's in TikTok Studio → Scheduled; TikTok publishes it then, phone on or off."
+        return "Scheduled on @${record.str("url").substringAfter("/@").substringBefore("/")} for ${localTime(at)} (post id ${record.str("item_id")}). It's in TikTok Studio → Scheduled; TikTok publishes it then, phone on or off."
     }
 
     private fun saveDraft(id: String, again: Boolean): String {
-        show(id) // a clear "not found" first
-        val record = within { e.studio.saveDraft(id, e.tiktok, again) }
+        val s = show(id) // a clear "not found" first
+        val record = within { e.studio.saveDraft(id, tabOf(s), again) }
             ?: return "TikTok is still uploading the slides. Call view_slideshow in a minute: it shows the draft id, or why it failed."
         return "Saved to TikTok Studio web drafts (draft id ${record.str("draft_id")}): tiktok.com/tiktokstudio → Drafts, not the TikTok app's Drafts. To post it, the user opens it in the Slidemill app and taps POST."
     }
@@ -530,28 +546,49 @@ Save tokens: don't repeat calls whose answer you already have in this conversati
         return out
     }
 
-    private fun tab(): TikTokTab = e.tiktok ?: throw ToolError("The phone's TikTok tab isn't running: open the Slidemill app on the phone.")
+    private fun tab(account: String = ""): TikTokTab = try {
+        e.accounts.tab(account)
+    } catch (x: DraftError) {
+        throw ToolError(x.message ?: "")
+    }
 
-    private fun analyticsTool(refresh: Boolean, weeks: Int, posts: Int): String {
+    /** The tab a slideshow posts from: its account's, or the default one's. */
+    private fun tabOf(show: Obj): TikTokTab = tab(show.str("account"))
+
+    /** The username Claude's [account] means, to store on a slideshow ("" when no tab answers). */
+    private fun accountFor(account: String): String =
+        if (account.isBlank()) defaultUser() else tab(account).let { e.accounts.usernameOf(it).ifEmpty { account.trim().removePrefix("@") } }
+
+    private fun defaultUser(): String = e.accounts.default()?.let { t -> e.accounts.cached(t.id).ifEmpty { e.accounts.usernameOf(t) } }.orEmpty()
+
+    private fun analyticsTool(refresh: Boolean, weeks: Int, posts: Int, account: String): String {
+        val t = tab(account)
         var note = ""
         if (refresh) {
-            val done = runCatching { within { e.analytics.refresh(e.tiktok) } }
+            val done = runCatching { within { e.analytics.refresh(t) } }
             note = done.fold(
                 { if (it == null) "Refreshing from TikTok is still running; these are the last numbers. Call again in a minute for fresh ones." else "" },
                 { "Couldn't refresh from TikTok (${it.message}); these are the last numbers." },
             )
         }
-        val report = e.analytics.report(weeks, posts, predicted = e.predictedByPost())
+        val user = e.accounts.cached(t.id).ifEmpty { account.trim().removePrefix("@") }
+        val report = e.analytics.report(weeks, posts, predicted = e.predictedByPost(), username = user)
         if (note.isNotEmpty()) report["refresh"] = note
         return lean(report)
     }
 
     private fun status(): String {
-        val user = e.tiktok?.let { t -> runCatching { t.username().ifEmpty { "not logged in" } }.getOrElse { "not answering (${it.message})" } }
-            ?: "no TikTok tab (open the Slidemill app)"
+        val tabs = e.accounts.list(fresh = true)
+        val default = e.accounts.default()?.id
+        val research = e.store.get("research_account").takeIf { it.isNotEmpty() }?.let { runCatching { e.accounts.tab(it).id }.getOrNull() } ?: default
+        val accounts = tabs.map { a ->
+            val name = a.str("username").let { if (it.isEmpty()) "${a.str("slot")}: not logged in" else "@$it" }
+            name + listOfNotNull(if (a.str("slot") == default) "default" else null, if (a.str("slot") == research) "research" else null)
+                .takeIf { it.isNotEmpty() }?.joinToString(prefix = " (", postfix = ")").orEmpty()
+        }
         val (profiles, posts) = e.db.tx { all("library_profiles").size to where("library_posts") { it.bool("is_slideshow") }.size }
         return lean(obj(
-            "tiktok" to user,
+            "tiktok_accounts" to (accounts.ifEmpty { listOf("no TikTok tab (open the Slidemill app)") }).toMutableList<Any?>(),
             "backgrounds" to if (e.images.providers().isNotEmpty()) "stock photos (${e.images.providers().joinToString()}), AI as fallback"
             else "AI only: ${e.imageGen.describe()}. A free Pexels key in the app gives real photos.",
             "library" to "$posts slideshows from $profiles accounts",

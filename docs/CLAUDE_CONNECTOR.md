@@ -62,7 +62,19 @@ On the phone:
 | `predict_virality` | Score a slideshow with Claude as the reader. The first call returns the scoring rules, the slides and real library posts to rank it against blind; Claude sends its read back and Slidemill turns it into the score, attention curve and rank |
 | `analytics` | The account's analytics (and whether `predict_virality`'s score tracks real views), the same report as the app's Analytics tab: followers and their weekly change, totals, the last 7 days against the 7 before, views per week, slideshows against videos, top posts, and every post's views, likes, comments, shares, saves, engagement, views per day and views in the last 24 hours, plus the Slidemill slideshow and score it came from |
 | `best_times` | When to post for an audience in a country |
-| `phone_status` | Whether the phone is logged in to TikTok, where backgrounds come from, the library size |
+| `phone_status` | Which TikTok accounts are logged in (default and research marked), where backgrounds come from, the library size |
+
+### Several TikTok accounts
+
+The phone can hold several TikTok logins at once. In the app's **TikTok** tab, tap **+ Add account** and log in: each account gets its own WebView profile, so its cookies and storage never mix with the others'. (This needs a recent Android System WebView; the app says so if the phone's is too old.)
+
+- `create_slideshow`, `import_slides`, `schedule_slideshow`, `analytics` and `list_slideshows` take an `account` (a TikTok username). Without one, they use the default account, set in the app's **Slidemill** tab.
+- The posting limits (2 hours apart, 4 a day) count per account. `schedule_slideshow` with another `account` moves a slideshow that isn't posted yet.
+- `analytics` reports one account at a time.
+- `phone_status` lists the logged-in accounts and which is the default and which does research.
+- **Research account:** `discover_slideshows` and `add_to_library` search TikTok and open other people's profiles, which is the bot-like part. Pick a spare account for it in the app (**Research with it**), so the accounts you post from never do it.
+
+Every account still runs from one phone and one IP address, which TikTok can link. Use separate accounts for separate niches, never post the same slideshow to two of them, and keep anything you can't afford to lose off this setup.
 
 ### Token cost
 

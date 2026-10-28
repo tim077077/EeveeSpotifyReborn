@@ -87,6 +87,9 @@ class Library(
         val resp = Net.get(url, mapOf("User-Agent" to Net.BROWSER_UA, "Referer" to "https://www.tiktok.com/"), timeoutSec = 30)
         if (resp.status == 200) resp.body else null
     }
+    /** The account slot whose TikTok session does research reads ("" = the main one); set by the engine. */
+    @Volatile var via: () -> String = { "" }
+
     @Volatile var pause: () -> Unit = { Thread.sleep(Random.nextLong(1000, 2500)) } // be gentle with TikTok
 
     private fun pageScope(url: String): Obj = parseScope(fetchHtml(url))
@@ -249,7 +252,7 @@ class Library(
     fun importProfile(username: String, maxPosts: Int): Set<String> {
         val info = fetchProfile(username)
         val pid = upsertProfile(info)
-        val posts = platform.listProfilePosts(info.str("username"), maxPosts).map { normalizeWebItem(it) }
+        val posts = platform.listProfilePosts(info.str("username"), maxPosts, via()).map { normalizeWebItem(it) }
         savePosts(posts)
         return setOf(pid)
     }
@@ -263,9 +266,10 @@ class Library(
     fun discover(queries: List<String>, accounts: Int, postsPerAccount: Int): Obj {
         val searched = arr()
         val found = mutableListOf<Obj>()
+        val slot = via()
         for (q in queries.map { it.trim() }.filter { it.isNotEmpty() }.distinct()) {
             val posts = try {
-                platform.searchPosts(q, 60).map { normalizeWebItem(it) }
+                platform.searchPosts(q, 60, slot).map { normalizeWebItem(it) }
             } catch (e: Exception) {
                 searched += obj("query" to q, "error" to (e.message ?: e.toString()))
                 continue

@@ -38,7 +38,27 @@ class Analytics(private val db: Db, private val platform: Platform) {
 
     private val refreshing = AtomicBoolean(false)
 
-    fun lastRefreshMs(): Long = db.tx { get("state", "analytics")?.long("last_refresh") ?: 0L }
+    /** When [user]'s numbers were last read ("" = any account's latest). */
+    fun lastRefreshMs(user: String = ""): Long = db.tx {
+        if (user.isEmpty()) all("state").filter { it.str("id").startsWith("analytics") }.maxOfOrNull { it.long("last_refresh") } ?: 0L
+        else state(user)?.long("last_refresh") ?: 0L
+    }
+
+    /** [user]'s tracking state; the single pre-accounts row moves to its account the first time it's read. */
+    private fun Db.Tx.state(user: String, create: Long? = null): Obj? {
+        val id = "analytics@${user.lowercase()}"
+        get("state", id)?.let { return it }
+        get("state", "analytics")?.takeIf { it.str("username").equals(user, ignoreCase = true) }?.let { old ->
+            delete("state", "analytics")
+            return insert("state", old.copyObj().also { it["id"] = id })
+        }
+        return create?.let { insert("state", obj("id" to id, "since" to it, "username" to user)) }
+    }
+
+    /** The accounts with analytics, latest refreshed first. */
+    fun usernames(): List<String> = db.tx {
+        all("state").filter { it.str("id").startsWith("analytics") }.sortedByDescending { it.long("last_refresh") }.map { it.str("username") }.filter { it.isNotEmpty() }
+    }
 
     /**
      * List the logged-in account's posts on the phone and record them. Skipped (returns false) when the
@@ -46,11 +66,11 @@ class Analytics(private val db: Db, private val platform: Platform) {
      * be read (not logged in, page not answering).
      */
     fun refresh(tab: TikTokTab?, force: Boolean = false): Boolean {
-        if (!force && Db.nowMs() - lastRefreshMs() < MIN_REFRESH_MS) return false
+        val t = tab ?: throw DraftError("The phone's TikTok tab isn't running: open the Slidemill app.")
+        val user = t.username().ifEmpty { throw DraftError("Not logged in to TikTok on the phone: open Slidemill → TikTok and log in.") }
+        if (!force && Db.nowMs() - lastRefreshMs(user) < MIN_REFRESH_MS) return false
         if (!refreshing.compareAndSet(false, true)) return false // one at a time; the running one will record
         try {
-            val t = tab ?: throw DraftError("The phone's TikTok tab isn't running: open the Slidemill app.")
-            val user = t.username().ifEmpty { throw DraftError("Not logged in to TikTok on the phone: open Slidemill → TikTok and log in.") }
             val items = listMine(t, user, MAX_POSTS)
             if (items.isEmpty()) throw DraftError("TikTok didn't list any posts for @$user (no posts yet, or the page didn't load).")
             record(user, items, account = runCatching { profile(user) }.getOrNull())
@@ -71,7 +91,7 @@ class Analytics(private val db: Db, private val platform: Platform) {
     fun listMine(tab: TikTokTab, user: String, max: Int): List<Obj> {
         val studio = runCatching { tab.listMyPosts(max) }.getOrNull()
         if (!studio.isNullOrEmpty()) return studio.map { fromStudio(it) }
-        return platform.listProfilePosts(user, max).map { Library.normalizeWebItem(it) }
+        return platform.listProfilePosts(user, max, via = tab.id).map { Library.normalizeWebItem(it) }
     }
 
     /** One TikTok Studio content-list post (see [TikTokTab.listMyPosts]) in the shape [record] takes. */
@@ -115,7 +135,7 @@ class Analytics(private val db: Db, private val platform: Platform) {
                 "followers" to a.long("followers"), "total_likes" to a.long("total_likes"), "video_count" to a.long("video_count"),
             ))
         }
-        val state = get("state", "analytics") ?: insert("state", obj("id" to "analytics", "since" to atMs))
+        val state = state(username, create = atMs)!!
         state["last_refresh"] = atMs
         state["username"] = username
         // Thin old snapshots to the last one per post per day, so the history stays small.
@@ -213,13 +233,18 @@ class Analytics(private val db: Db, private val platform: Platform) {
      * posting week, and gained in each week once tracked), and per-post numbers newest first.
      * [predicted] maps a TikTok post id to the Slidemill slideshow and score it came from.
      */
-    fun report(weeks: Int = 8, postsLimit: Int = 30, zone: ZoneId = ZoneId.of(platform.defaultTimezone()), predicted: Map<String, Obj> = emptyMap()): Obj {
-        val posts = db.tx { all("my_posts").map { it.copyObj() } }
-        val snaps = db.tx { all("post_snapshots").map { it.copyObj() } }
-        val accounts = db.tx { all("account_snapshots").map { it.copyObj() } }
-        val state = db.tx { get("state", "analytics")?.copyObj() }
+    fun report(
+        weeks: Int = 8, postsLimit: Int = 30, zone: ZoneId = ZoneId.of(platform.defaultTimezone()), predicted: Map<String, Obj> = emptyMap(),
+        username: String = "",
+    ): Obj {
+        val user = username.removePrefix("@").ifEmpty { usernames().firstOrNull().orEmpty() }
+        val posts = db.tx { where("my_posts") { it.str("username").equals(user, ignoreCase = true) }.map { it.copyObj() } }
+        val ids = posts.map { it.str("id") }.toSet()
+        val snaps = db.tx { where("post_snapshots") { it.str("post_id") in ids }.map { it.copyObj() } }
+        val accounts = db.tx { where("account_snapshots") { it.str("username").equals(user, ignoreCase = true) }.map { it.copyObj() } }
+        val state = db.tx { state(user)?.copyObj() }
         if (state == null || posts.isEmpty()) {
-            return obj("status" to "No analytics yet: refresh once (the app's Analytics tab, or analytics with refresh=true). The phone must be logged in to TikTok.")
+            return obj("status" to "No analytics yet${if (user.isEmpty()) "" else " for @$user"}: refresh once (the app's Analytics tab, or analytics with refresh=true). The phone must be logged in to TikTok.")
         }
         val nowS = Db.nowMs() / 1000
         val sinceS = state.long("since") / 1000

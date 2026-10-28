@@ -9,7 +9,7 @@ import java.util.concurrent.CopyOnWriteArrayList
 import javax.imageio.ImageIO
 
 /** The phone's TikTok tab, faked: records what it was asked to save, answers like tiktok-inject.js. */
-class FakeTikTok(var user: String = "tim") : TikTokTab {
+class FakeTikTok(var user: String = "tim", override val id: String = TikTokTab.MAIN) : TikTokTab {
     val saved = CopyOnWriteArrayList<Triple<String, String, List<File>>>()
     /** When set, saving fails with this (as TikTok refusing would). */
     @Volatile var refuse: String? = null

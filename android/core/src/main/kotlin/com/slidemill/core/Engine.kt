@@ -17,14 +17,23 @@ class Engine(val platform: Platform, val dataDir: File) {
     val images = Images(db, store, platform, mediaDir)
     val renderer = Renderer(platform.imaging, mediaDir)
     val studio = Studio(db, platform, mediaDir, imageGen, images, renderer)
-    val library = Library(db, images, platform)
+    val library = Library(db, images, platform).also { l -> l.via = { accounts.researchSlot() } }
     val timing = Timing(db)
     val virality = Virality(db)
     val analytics = Analytics(db, platform).also { a -> a.profile = { user -> library.fetchProfile(user) } }
     val relay = Relay(this)
 
-    /** The phone's TikTok tab; null where there is none (tests set a fake). */
-    @Volatile var tiktok: TikTokTab? = null
+    /** The phone's logged-in TikTok sessions, one per account, by [TikTokTab.id]. */
+    val tabs = java.util.concurrent.ConcurrentHashMap<String, TikTokTab>()
+
+    /** The main TikTok tab (the first account); null where there is none (tests set a fake). */
+    var tiktok: TikTokTab?
+        get() = tabs[TikTokTab.MAIN] ?: tabs.values.firstOrNull()
+        set(v) {
+            if (v == null) tabs.remove(TikTokTab.MAIN) else tabs[v.id] = v
+        }
+
+    val accounts = Accounts(this)
 
     /** Background work that outlives a tool call (slow renders, library imports). */
     val work = Executors.newCachedThreadPool { r -> Thread(r, "slidemill").apply { isDaemon = true } }
@@ -39,7 +48,9 @@ class Engine(val platform: Platform, val dataDir: File) {
     fun start() {
         relay.start()
         ticker.scheduleWithFixedDelay({
-            runCatching { platform.awake { analytics.refresh(tiktok) } }.onFailure { platform.log("analytics refresh skipped: ${it.message}") }
+            for (tab in tabs.values.toList()) {
+                runCatching { platform.awake { analytics.refresh(tab) } }.onFailure { platform.log("analytics refresh of ${tab.id} skipped: ${it.message}") }
+            }
         }, 2, 180, TimeUnit.MINUTES)
     }
 

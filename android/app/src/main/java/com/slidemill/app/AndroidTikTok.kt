@@ -14,25 +14,24 @@ import java.util.concurrent.TimeUnit
 import java.util.concurrent.atomic.AtomicReference
 
 /**
- * The engine's view of the TikTok tab: asks the logged-in tiktok.com page (tiktok-inject.js) and
+ * The engine's view of one TikTok account's tab: asks the logged-in tiktok.com page (tiktok-inject.js) and
  * waits for its answer. Called from Claude's tool calls on background threads, never the main one.
  */
-class AndroidTikTok(private val context: Context) : TikTokTab {
+class AndroidTikTok(private val context: Context, override val id: String = TikTokTab.MAIN) : TikTokTab {
+    private val web get() = TikTokWeb.of(id)
+
     companion object {
         private const val READY_MS = 30_000L
         private const val HELLO_MS = 4_000L
         private const val DRAFT_MS = 4 * 60_000L
         private const val LIST_MS = 60_000L
 
-        /** The last logged-in username the page reported (for the app's screen). */
-        @Volatile var lastUsername = ""
-            private set
     }
 
     private fun ask(kind: String, payload: JSONObject, timeoutMs: Long): JSONObject? {
         val latch = CountDownLatch(1)
         val out = AtomicReference<JSONObject?>()
-        TikTokWeb.ask(kind, payload, timeoutMs) { out.set(it); latch.countDown() }
+        web.ask(kind, payload, timeoutMs) { out.set(it); latch.countDown() }
         latch.await(timeoutMs + 2_000, TimeUnit.MILLISECONDS)
         return out.get()
     }
@@ -44,8 +43,8 @@ class AndroidTikTok(private val context: Context) : TikTokTab {
     private fun hello(): JSONObject {
         val until = System.currentTimeMillis() + READY_MS
         while (System.currentTimeMillis() < until) {
-            TikTokWeb.wake(context)
-            if (TikTokWeb.pageReady) {
+            web.wake(context)
+            if (web.pageReady) {
                 val hello = ask("hello", JSONObject(), HELLO_MS)
                 if (hello != null && hello.optBoolean("ready")) return hello
             }
@@ -56,7 +55,7 @@ class AndroidTikTok(private val context: Context) : TikTokTab {
         )
     }
 
-    override fun username(): String = hello().optString("username").also { lastUsername = it }
+    override fun username(): String = hello().optString("username")
 
     override fun saveDraft(title: String, caption: String, slides: List<File>): String =
         run("draft", title, caption, slides, sound = false, at = 0, what = "draft", idKey = "draftId", checkWhere = "TikTok Studio drafts")

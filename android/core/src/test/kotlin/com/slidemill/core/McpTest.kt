@@ -135,7 +135,7 @@ class McpTest {
         assertTrue("2 hours" in text(call("schedule_slideshow", obj("slideshow_id" to other, "at" to iso))))
         val later = java.time.Instant.ofEpochSecond(at + 3 * 3600).toString()
         val direct = call("schedule_slideshow", obj("slideshow_id" to other, "at" to later))
-        assertTrue("Scheduled on TikTok" in text(direct), text(direct))
+        assertTrue("Scheduled on @tim" in text(direct), text(direct))
         assertEquals("scheduled", row(other).objAt("post").str("status"))
 
         // Outside TikTok's window, or unreadable: refused before anything is sent.
@@ -259,7 +259,7 @@ class McpTest {
         assertEquals("Deleted.", text(call("delete_slideshow", obj("slideshow_id" to id))))
         assertEquals(true, call("delete_slideshow", obj("slideshow_id" to id))["isError"])
         val status = Json.parseObj(text(call("phone_status")))
-        assertEquals("tim", status.str("tiktok"))
+        assertEquals(listOf("@tim (default, research)"), status.strings("tiktok_accounts"))
         assertTrue("AI only" in status.str("backgrounds"))
     }
 

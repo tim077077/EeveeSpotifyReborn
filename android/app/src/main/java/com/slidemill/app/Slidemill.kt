@@ -24,8 +24,8 @@ class AndroidPlatform(private val context: Context) : Platform {
     override fun encryptSecret(plain: String) = Secrets.encrypt(plain)
     override fun decryptSecret(stored: String) = Secrets.decrypt(stored)
 
-    override fun listProfilePosts(username: String, max: Int): List<Obj> = LibraryScraper.profilePosts(context, username, max)
-    override fun searchPosts(query: String, max: Int): List<Obj> = LibraryScraper.searchPosts(context, query, max)
+    override fun listProfilePosts(username: String, max: Int, via: String): List<Obj> = LibraryScraper.profilePosts(context, username, max, via)
+    override fun searchPosts(query: String, max: Int, via: String): List<Obj> = LibraryScraper.searchPosts(context, query, max, via)
 
     override fun <T> awake(block: () -> T): T {
         val lock = context.getSystemService(PowerManager::class.java)
@@ -53,7 +53,7 @@ object Slidemill {
         engine ?: run {
             val app = context.applicationContext
             val e = Engine(AndroidPlatform(app), File(app.filesDir, "slidemill"))
-            e.tiktok = AndroidTikTok(app)
+            TikTokWeb.slots(app).forEach { e.tabs[it] = AndroidTikTok(app, it) }
             e.start() // Claude's way in
             engine = e
             e

@@ -4,7 +4,6 @@ import android.annotation.SuppressLint
 import android.content.Context
 import android.os.Handler
 import android.os.Looper
-import android.webkit.CookieManager
 import android.webkit.WebResourceRequest
 import android.webkit.WebResourceResponse
 import android.webkit.WebView
@@ -29,18 +28,19 @@ object LibraryScraper {
     private val main = Handler(Looper.getMainLooper())
 
     /** Blocking; call off the main thread. Returns raw itemStructs. */
-    fun profilePosts(context: Context, username: String, max: Int, timeoutMs: Long = 90_000): List<Obj> =
-        scrape(context, "https://www.tiktok.com/@$username", "/api/post/item_list", max, timeoutMs)
+    fun profilePosts(context: Context, username: String, max: Int, via: String = "", timeoutMs: Long = 90_000): List<Obj> =
+        scrape(context, "https://www.tiktok.com/@$username", "/api/post/item_list", max, via, timeoutMs)
 
     /** TikTok's search results for [query] (logged-in search page, scrolled), as raw itemStructs. Blocking. */
-    fun searchPosts(context: Context, query: String, max: Int, timeoutMs: Long = 90_000): List<Obj> =
-        scrape(context, "https://www.tiktok.com/search?q=" + URLEncoder.encode(query, "UTF-8"), "/api/search/", max, timeoutMs)
+    fun searchPosts(context: Context, query: String, max: Int, via: String = "", timeoutMs: Long = 90_000): List<Obj> =
+        scrape(context, "https://www.tiktok.com/search?q=" + URLEncoder.encode(query, "UTF-8"), "/api/search/", max, via, timeoutMs)
 
-    private fun scrape(context: Context, url: String, apiPath: String, max: Int, timeoutMs: Long): List<Obj> {
+    /** [via] is the account slot whose login (WebView profile and cookies) the page uses; "" is the main one. */
+    private fun scrape(context: Context, url: String, apiPath: String, max: Int, via: String, timeoutMs: Long): List<Obj> {
         val items = ConcurrentHashMap<String, Obj>()
         val done = CountDownLatch(1)
         var web: WebView? = null
-        main.post { web = start(context.applicationContext, url, apiPath, max, items, done) }
+        main.post { web = start(context.applicationContext, url, apiPath, max, via, items, done) }
         done.await(timeoutMs, TimeUnit.MILLISECONDS)
         main.post { web?.apply { stopLoading(); destroy() } }
         return items.values.take(max)
@@ -64,8 +64,10 @@ object LibraryScraper {
     }
 
     @SuppressLint("SetJavaScriptEnabled")
-    private fun start(context: Context, pageUrl: String, apiPath: String, max: Int, items: ConcurrentHashMap<String, Obj>, done: CountDownLatch): WebView {
+    private fun start(context: Context, pageUrl: String, apiPath: String, max: Int, via: String, items: ConcurrentHashMap<String, Obj>, done: CountDownLatch): WebView {
         val view = WebView(context)
+        TikTokWeb.useProfile(view, via)
+        val cookies = TikTokWeb.cookies(via)
         view.settings.javaScriptEnabled = true
         view.settings.domStorageEnabled = true
         view.settings.userAgentString = TikTokWeb.DESKTOP_UA
@@ -75,7 +77,7 @@ object LibraryScraper {
                 val url = request.url.toString()
                 if (request.method != "GET" || apiPath !in url) return null
                 return try {
-                    val body = passThrough(url, request.requestHeaders)
+                    val body = passThrough(url, request.requestHeaders, cookies.getCookie(url))
                     runCatching { collect(Json.parse(String(body)), items) }
                     WebResourceResponse("application/json", "utf-8", 200, "OK", mapOf("Access-Control-Allow-Origin" to "https://www.tiktok.com", "Access-Control-Allow-Credentials" to "true"), ByteArrayInputStream(body))
                 } catch (e: Exception) {
@@ -103,7 +105,7 @@ object LibraryScraper {
         return view
     }
 
-    private fun passThrough(url: String, headers: Map<String, String>): ByteArray {
+    private fun passThrough(url: String, headers: Map<String, String>, cookie: String?): ByteArray {
         val conn = URL(url).openConnection() as HttpURLConnection
         try {
             conn.connectTimeout = 15_000
@@ -111,7 +113,7 @@ object LibraryScraper {
             headers.forEach { (k, v) -> conn.setRequestProperty(k, v) }
             conn.setRequestProperty("User-Agent", TikTokWeb.DESKTOP_UA)
             conn.setRequestProperty("Referer", "https://www.tiktok.com/")
-            CookieManager.getInstance().getCookie(url)?.let { conn.setRequestProperty("Cookie", it) }
+            cookie?.let { conn.setRequestProperty("Cookie", it) }
             return conn.inputStream.use { it.readBytes() }
         } finally {
             conn.disconnect()
