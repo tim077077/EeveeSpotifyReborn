@@ -49,13 +49,14 @@ On the phone:
 | `writing_guide` | What holds attention in a TikTok slideshow |
 | `research_library` | Real library slideshows, best first by views vs their account's usual views |
 | `add_to_library` | Import TikTok accounts or posts into the research library |
-| `discover_slideshows` | Search TikTok for a niche, keep the photo carousels, and import the accounts behind the ones that reached furthest beyond their followers |
+| `discover_slideshows` | Search TikTok's Photos results, keep the carousels, list the top 10 (saved to the library so their slides can be read) and import the accounts behind them. `rank_by: views` puts the biggest hits from any niche first (for example carousels that promote an app); the default `reach` ranks by views per follower. It refuses to search on the posting account unless the user agrees (`use_posting_account`) |
 | `carousel_formats` | Which formats (slide count, words per slide, hook style, closing call to action, sound) beat their account's usual views, with the best examples' slides as images: copy the format, not the words |
 | `read_library_slides` / `save_slide_texts` | Claude reads slide text the library doesn't have yet, off the slide images |
 | `create_slideshow` | Render a slideshow Claude wrote and return the slides as images; with `save_draft: true`, also save it to TikTok drafts |
 | `import_slides` | Use finished slide images Claude made itself (https links, or small `data:image` URIs): stored as they are, in order; with `save_draft: true`, saved to TikTok drafts in the same call. The relay takes about 1 MB per call, so inline images must be small; links have no such limit |
 | `save_draft` | Save a slideshow to TikTok Studio drafts now; answers with TikTok's draft id or why it failed |
 | `schedule_slideshow` | Pick when a slideshow goes live on TikTok Studio's own schedule (15 minutes to 30 days ahead). Autopilot by default: it schedules directly, and the post goes public with no approval (at least 2 hours apart, at most 4 in 24 hours). With autopilot turned off in the app, it only proposes the time for the user's one-tap approval |
+| `view_post` | One of your own posted TikToks (post id from `analytics`): its numbers and, for a carousel, its real slides as posted, tiled on one image (downloaded once, then kept) |
 | `view_slideshow` | Details, draft status and rendered slides of one slideshow |
 | `list_slideshows` | Recent slideshows with their draft status and scores |
 | `delete_slideshow` | Remove a weaker version (doesn't touch TikTok drafts) |
@@ -70,6 +71,7 @@ The phone can hold several TikTok logins at once. In the app's **TikTok** tab, t
 
 - `create_slideshow`, `import_slides`, `schedule_slideshow`, `analytics` and `list_slideshows` take an `account` (a TikTok username). Without one, they use the default account, set in the app's **Slidemill** tab.
 - The posting limits (2 hours apart, 4 a day) count per account. `schedule_slideshow` with another `account` moves a slideshow that isn't posted yet.
+- With more than one account, `schedule_slideshow` never picks one by itself: it refuses until Claude names the `account`, and Claude is told to ask you which one before every post.
 - `analytics` reports one account at a time.
 - `phone_status` lists the logged-in accounts and which is the default and which does research.
 - **Research account:** `discover_slideshows` and `add_to_library` search TikTok and open other people's profiles, which is the bot-like part. Pick a spare account for it in the app (**Research with it**), so the accounts you post from never do it.

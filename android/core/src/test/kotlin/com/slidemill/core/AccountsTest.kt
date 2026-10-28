@@ -42,13 +42,18 @@ class AccountsTest {
         assertEquals("thriftfinds", e.db.tx { get("slideshows", b)!!.str("account") })
 
         val at = Instant.ofEpochSecond(Db.nowMs() / 1000 + 6 * 3600).toString()
-        assertTrue("Scheduled on @vintedbot.org" in text(call("schedule_slideshow", obj("slideshow_id" to a, "at" to at))))
+        // With two accounts, scheduling never picks one by itself: Claude has to name it (after asking the user).
+        val unnamed = call("schedule_slideshow", obj("slideshow_id" to a, "at" to at))
+        assertEquals(true, unnamed["isError"])
+        assertTrue("Ask the user which one" in text(unnamed) && "@thriftfinds" in text(unnamed), text(unnamed))
+        assertEquals(0, main.published.size)
+        assertTrue("Scheduled on @vintedbot.org" in text(call("schedule_slideshow", obj("slideshow_id" to a, "at" to at, "account" to "vintedbot.org"))))
         // The same time on the other account is fine: the 2-hour guard is per account.
-        assertTrue("Scheduled on @thriftfinds" in text(call("schedule_slideshow", obj("slideshow_id" to b, "at" to at))))
+        assertTrue("Scheduled on @thriftfinds" in text(call("schedule_slideshow", obj("slideshow_id" to b, "at" to at, "account" to "thriftfinds"))))
         assertEquals(1, main.published.size)
         assertEquals(1, second.published.size)
         val c = create("thriftfinds")
-        assertTrue("2 hours" in text(call("schedule_slideshow", obj("slideshow_id" to c, "at" to at))))
+        assertTrue("2 hours" in text(call("schedule_slideshow", obj("slideshow_id" to c, "at" to at, "account" to "thriftfinds"))))
         // ...and it can move to the other account before it's posted.
         val later = Instant.ofEpochSecond(Db.nowMs() / 1000 + 9 * 3600).toString()
         assertTrue("Scheduled on @vintedbot.org" in text(call("schedule_slideshow", obj("slideshow_id" to c, "at" to later, "account" to "vintedbot.org"))))

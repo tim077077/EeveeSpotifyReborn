@@ -33,8 +33,12 @@ object LibraryScraper {
         scrape(context, "https://www.tiktok.com/@$username", "/api/post/item_list", max, via, timeoutMs, known)
 
     /** TikTok's search results for [query] (logged-in search page, scrolled), as raw itemStructs. Blocking. */
-    fun searchPosts(context: Context, query: String, max: Int, via: String = "", timeoutMs: Long = 90_000): List<Obj> =
-        scrape(context, "https://www.tiktok.com/search?q=" + URLEncoder.encode(query, "UTF-8"), "/api/search/", max, via, timeoutMs)
+    fun searchPosts(context: Context, query: String, max: Int, via: String = "", timeoutMs: Long = 90_000): List<Obj> {
+        val q = URLEncoder.encode(query, "UTF-8")
+        // The Photos tab first (carousels only); the Top tab, which is mostly videos, if it shows nothing.
+        val photos = scrape(context, "https://www.tiktok.com/search/photo?q=$q", "/api/search/", max, via, timeoutMs)
+        return photos.ifEmpty { scrape(context, "https://www.tiktok.com/search?q=$q", "/api/search/", max, via, timeoutMs) }
+    }
 
     /** [via] is the account slot whose login (WebView profile and cookies) the page uses; "" is the main one. */
     private fun scrape(context: Context, url: String, apiPath: String, max: Int, via: String, timeoutMs: Long, known: Set<String> = emptySet()): List<Obj> {
