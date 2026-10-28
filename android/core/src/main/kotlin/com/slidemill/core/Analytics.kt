@@ -51,17 +51,48 @@ class Analytics(private val db: Db, private val platform: Platform) {
         try {
             val t = tab ?: throw DraftError("The phone's TikTok tab isn't running: open the Slidemill app.")
             val user = t.username().ifEmpty { throw DraftError("Not logged in to TikTok on the phone: open Slidemill → TikTok and log in.") }
-            val items = platform.listProfilePosts(user, MAX_POSTS).map { Library.normalizeWebItem(it) }
+            val items = listMine(t, user, MAX_POSTS)
             if (items.isEmpty()) throw DraftError("TikTok didn't list any posts for @$user (no posts yet, or the page didn't load).")
-            record(user, items)
+            record(user, items, account = runCatching { profile(user) }.getOrNull())
             return true
         } finally {
             refreshing.set(false)
         }
     }
 
-    /** Store one listing (normalized web items): each post's latest totals plus a snapshot. */
-    fun record(username: String, items: List<Obj>, atMs: Long = Db.nowMs()) = db.tx {
+    /** The account's profile stats (followers, total_likes, video_count) for [record]; set by the engine. */
+    @Volatile var profile: (String) -> Obj? = { null }
+
+    /**
+     * The logged-in account's posts, newest first, in [Library.normalizeWebItem]'s shape. TikTok Studio's
+     * own content list comes first: it has every post. The public profile page is the fallback; it often
+     * lists nothing for the account looking at itself.
+     */
+    fun listMine(tab: TikTokTab, user: String, max: Int): List<Obj> {
+        val studio = runCatching { tab.listMyPosts(max) }.getOrNull()
+        if (!studio.isNullOrEmpty()) return studio.map { fromStudio(it) }
+        return platform.listProfilePosts(user, max).map { Library.normalizeWebItem(it) }
+    }
+
+    /** One TikTok Studio content-list post (see [TikTokTab.listMyPosts]) in the shape [record] takes. */
+    fun fromStudio(p: Map<String, Any?>): Obj = obj(
+        "id" to p.str("id"),
+        "description" to p.str("desc"),
+        "is_slideshow" to p.bool("is_slideshow"),
+        "slides" to p.long("slides"),
+        "views" to p.long("views"),
+        "likes" to p.long("likes"),
+        "comments" to p.long("comments"),
+        "shares" to p.long("shares"),
+        "saves" to p.long("saves"),
+        "posted_at" to p.long("posted_at"),
+    )
+
+    /**
+     * Store one listing (normalized web items): each post's latest totals plus a snapshot. Followers come
+     * from [account] when given, else from the newest item's author.
+     */
+    fun record(username: String, items: List<Obj>, atMs: Long = Db.nowMs(), account: Obj? = null) = db.tx {
         for (p in items) {
             val id = p.str("id")
             if (id.isEmpty()) continue
@@ -70,15 +101,15 @@ class Analytics(private val db: Db, private val platform: Platform) {
             row["description"] = p.str("description")
             row["is_slideshow"] = p.bool("is_slideshow")
             row["posted_at"] = p.long("posted_at")
-            row["music"] = p.str("music")
-            row["slides"] = p.list("slide_urls").size.toLong()
+            if (p.containsKey("music")) row["music"] = p.str("music") // TikTok Studio's list has no sound info
+            row["slides"] = if (p.containsKey("slides")) p.long("slides") else p.list("slide_urls").size.toLong()
             for (k in STATS) row[k] = p.long(k)
             row["updated_at"] = atMs
             val snap = obj("id" to "$id@$atMs", "post_id" to id, "at" to atMs)
             for (k in STATS) snap[k] = p.long(k)
             insert("post_snapshots", snap)
         }
-        items.maxByOrNull { it.long("posted_at") }?.objAt("author")?.takeIf { it["followers"] != null }?.let { a ->
+        (account ?: items.maxByOrNull { it.long("posted_at") }?.objAt("author"))?.takeIf { it["followers"] != null }?.let { a ->
             insert("account_snapshots", obj(
                 "id" to "$atMs", "at" to atMs, "username" to username,
                 "followers" to a.long("followers"), "total_likes" to a.long("total_likes"), "video_count" to a.long("video_count"),

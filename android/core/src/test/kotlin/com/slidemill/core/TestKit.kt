@@ -37,6 +37,11 @@ class FakeTikTok(var user: String = "tim") : TikTokTab {
         scheduledAt += at
         return "75" + published.size.toString().padStart(17, '0')
     }
+
+    /** TikTok Studio's content list; null = this tab can't list (falls back to the profile page). */
+    @Volatile var myPosts: List<Obj>? = null
+
+    override fun listMyPosts(max: Int): List<Obj>? = myPosts?.take(max)
 }
 
 object TestKit {

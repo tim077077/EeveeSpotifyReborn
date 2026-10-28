@@ -443,6 +443,70 @@
     return { projectId: j.project_id, itemId: item && item.item_id, scheduleTime };
   }
 
+  // ---- the logged-in user's own posts (TikTok Studio's content list) ---------
+
+  // TikTok Studio sends a CSRF token with its creator-center POSTs; fetch one the same way (best effort).
+  async function csrfToken() {
+    try {
+      const r = await fetch(ORIGIN + "/tiktok/creator/manage/item_list/v1/", {
+        method: "HEAD", credentials: "include", headers: { "x-secsdk-csrf-request": "1", "x-secsdk-csrf-version": "1.2.22" },
+      });
+      const h = r.headers.get("x-ware-csrf-token") || "";
+      const parts = h.split(",");
+      return parts.length > 1 ? parts[1] : "";
+    } catch (_) { return ""; }
+  }
+
+  const num = (v) => { const n = Number(v); return Number.isFinite(n) ? n : 0; };
+
+  // Every published post of the logged-in account with its stats, newest first, as TikTok Studio's
+  // Content page lists them (POST /tiktok/creator/manage/item_list/v1/, paged by cursor).
+  async function listMine({ max } = {}) {
+    const limit = Math.max(1, Math.min(Number(max) || 100, 500));
+    const q = new URLSearchParams({ aid: "1988", app_name: "tiktok_creator_center", channel: "tiktok_web", device_platform: "web_pc" });
+    const tz = timeZone();
+    if (tz) q.set("tz_name", tz);
+    const headers = { "content-type": "application/json" };
+    const csrf = await csrfToken();
+    if (csrf) headers["tt-csrf-token"] = csrf;
+    const posts = [];
+    let cursor = 0;
+    for (let page = 0; page < 20 && posts.length < limit; page++) {
+      const r = await fetch(ORIGIN + "/tiktok/creator/manage/item_list/v1/?" + q, {
+        method: "POST",
+        credentials: "include",
+        headers,
+        body: JSON.stringify({ cursor, size: 50, query: { sort_orders: [{ field_name: "post_time", order: 2 }], conditions: [], is_recent_posts: false } }),
+      });
+      const j = await r.json();
+      if (j.status_code !== 0) throw new Error("listing your posts failed: " + JSON.stringify(j).slice(0, 300));
+      for (const it of j.item_list || []) {
+        if (num(it.status) !== 102) continue; // 102 = published; skips scheduled, in review, deleted
+        const photos = it.photo_list || [];
+        posts.push({
+          id: String(it.item_id || ""),
+          desc: it.desc || "",
+          posted_at: num(it.post_time) || num(it.create_time),
+          views: num(it.play_count),
+          likes: num(it.like_count),
+          comments: num(it.comment_count),
+          shares: num(it.share_count),
+          saves: num(it.favorite_count),
+          is_slideshow: num(it.item_type) === 2,
+          slides: photos.length,
+          cover: it.cover_url || photos[0] || "",
+          duration_s: Math.round(num(it.duration) / 1000),
+          private: num(it.visibility) !== 1,
+          pinned: !!it.is_pinned,
+        });
+        if (posts.length >= limit) break;
+      }
+      if (!j.has_more) break;
+      cursor = num(j.cursor);
+    }
+    return posts;
+  }
+
   // Steps 0-3: upload every slide to TikTok's image store (used by posts and drafts alike).
   async function uploadImages(images) {
     log("fetching upload credentials…");
@@ -595,6 +659,16 @@
       window.postMessage({ __vbtt: "helloResult", id: d.id, result: { ready: true, username: currentUsername(), draft: DRAFT_SUPPORTED } }, "*");
       return;
     }
+    if (d.__vbtt === "listMine") {
+      let result;
+      try {
+        result = { ok: true, posts: await listMine({ max: d.max }), username: currentUsername() };
+      } catch (e) {
+        result = { ok: false, error: String((e && e.message) || e), username: currentUsername() };
+      }
+      window.postMessage({ __vbtt: "listMineResult", id: d.id, result }, "*");
+      return;
+    }
     if (d.__vbtt !== "job") return;
     const job = d.job || {};
     let result;
@@ -616,6 +690,6 @@
     window.postMessage({ __vbtt: "jobResult", id: d.id, result }, "*");
   });
 
-  window.VBTikTok = { post, saveDraft, postFromPicker, recommendMusic, _internals: { getCreds, applyImageUpload, commitImageUpload, sigv4, hashtagExtra, crc32Hex } };
+  window.VBTikTok = { post, saveDraft, listMine, postFromPicker, recommendMusic, _internals: { getCreds, applyImageUpload, commitImageUpload, sigv4, hashtagExtra, crc32Hex } };
   log("ready. Call: await VBTikTok.postFromPicker({ title, caption })");
 })();

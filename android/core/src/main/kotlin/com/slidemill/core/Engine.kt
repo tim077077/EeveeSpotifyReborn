@@ -20,7 +20,7 @@ class Engine(val platform: Platform, val dataDir: File) {
     val library = Library(db, images, platform)
     val timing = Timing(db)
     val virality = Virality(db)
-    val analytics = Analytics(db, platform)
+    val analytics = Analytics(db, platform).also { a -> a.profile = { user -> library.fetchProfile(user) } }
     val relay = Relay(this)
 
     /** The phone's TikTok tab; null where there is none (tests set a fake). */

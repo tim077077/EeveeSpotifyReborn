@@ -12,7 +12,7 @@ The app has three tabs:
   - **What works for you**: which slide counts, posting times, days, formats and hashtags beat your median views (groups of 3+ posts that are 2+ days old, once you have 6 such posts);
   - every post with its views, likes, comments, shares, saves, engagement, views per day and views in the last 24 hours (tap one to open it).
   
-  The phone snapshots your posts every 3 hours (and when you tap Refresh). TikTok only shows current totals, so growth numbers (views gained per week or in 24 hours, followers gained) appear once there are snapshots to compare. Claude gets the same report from the `analytics` tool.
+  The phone snapshots your posts every 3 hours (and when you tap Refresh). It reads them from TikTok Studio's content list, the same list as tiktok.com/tiktokstudio/content, so every published post is counted (up to 100); scheduled posts are left out until they go live. That list has no sound info, so `what_works` can't group by sound. TikTok only shows current totals, so growth numbers (views gained per week or in 24 hours, followers gained) appear once there are snapshots to compare. Claude gets the same report from the `analytics` tool.
 - **TikTok**: tiktok.com in desktop mode. Log in here once.
 
 ## How you post one
