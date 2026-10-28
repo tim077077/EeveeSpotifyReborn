@@ -251,7 +251,8 @@ class Library(
                     val pid = where("library_profiles") { it.str("username") == value }.firstOrNull()?.str("id")
                     where("library_posts") { it.str("profile_id") == pid && it.bool("is_slideshow") }.size
                 }
-                "@$value: $n slideshow posts in the library"
+                val how = db.tx { where("library_profiles") { it.str("username") == value }.firstOrNull()?.str("read_via") }.orEmpty()
+                "@$value: $n slideshow posts in the library" + if (how.isEmpty()) "" else " (read by $how)"
             }
         } catch (e: Exception) {
             "$raw: failed (${e.message})"
@@ -278,7 +279,8 @@ class Library(
         }?.takeIf { it.isNotEmpty() }
         val raw = direct ?: platform.listProfilePosts(info.str("username"), maxPosts, via(), known)
         savePosts(raw.map { normalizeWebItem(it) })
-        db.tx { get("library_profiles", pid)?.set("posts_read_at", Db.nowMs()) }
+        // How the posts were read, shown in results so a real run says whether the direct list works.
+        db.tx { get("library_profiles", pid)?.also { it["posts_read_at"] = Db.nowMs(); it["read_via"] = if (direct != null) "direct" else "scroll" } }
         return setOf(pid)
     }
 
@@ -330,6 +332,7 @@ class Library(
                     where("library_profiles") { it.str("username") == user }.firstOrNull()?.let { p ->
                         if (p.str("niche").isEmpty()) p["niche"] = ps.first().str("query")
                         line["slideshows_in_library"] = where("library_posts") { it.str("profile_id") == p.str("id") && it.bool("is_slideshow") }.size.toLong()
+                        line["read_via"] = p.str("read_via")
                     }
                 }
             } catch (e: Exception) {
