@@ -42,6 +42,16 @@ class FakeTikTok(var user: String = "tim", override val id: String = TikTokTab.M
     @Volatile var myPosts: List<Obj>? = null
 
     override fun listMyPosts(max: Int): List<Obj>? = myPosts?.take(max)
+
+    /** Other accounts' posts this tab's page can list directly, by secUid; null = it can't. */
+    @Volatile var userPosts: Map<String, List<Obj>>? = null
+    /** The known post ids each direct listing was given. */
+    val knownGiven = CopyOnWriteArrayList<Set<String>>()
+
+    override fun listUserPosts(secUid: String, max: Int, known: Set<String>): List<Obj>? {
+        knownGiven += known
+        return userPosts?.get(secUid)?.take(max)
+    }
 }
 
 object TestKit {

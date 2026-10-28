@@ -300,6 +300,8 @@ Save tokens: don't repeat calls whose answer you already have in this conversati
     private fun id(a: Obj): String = a.str("slideshow_id").ifEmpty { throw ToolError("slideshow_id is required") }
 
     /** Run slow work in the background; null if it's still running after [waitMs]. Its exceptions surface. */
+    private val exploring = java.util.concurrent.atomic.AtomicBoolean(false)
+
     private fun <T> within(block: () -> T): T? {
         val job = e.work.submit<T> { e.platform.awake(block) }
         return try {
@@ -329,9 +331,16 @@ Save tokens: don't repeat calls whose answer you already have in this conversati
         val research = e.store.get("research_account")
         val user = if (e.accounts.researchWithoutLogin()) "no login"
         else "@" + tab(research).username().ifEmpty { throw ToolError("Not logged in to TikTok on the phone: TikTok's search needs it. Open Slidemill → TikTok and log in.") }
+        // One run at a time: a second call while it runs reports progress instead of searching again.
+        if (!exploring.compareAndSet(false, true)) return "Already exploring on the phone: ${e.library.progress.ifEmpty { "starting" }}. Don't start another; call carousel_formats in a few minutes."
         val res = within {
-            e.library.discover(queries.take(5), accounts, perAccount).also { r ->
-                e.db.tx { (get("state", "discover") ?: insert("state", obj("id" to "discover")))["last"] = r.copyObj().also { it["at"] = Db.iso(Db.nowMs()) } }
+            try {
+                e.library.discover(queries.take(5), accounts, perAccount).also { r ->
+                    e.db.tx { (get("state", "discover") ?: insert("state", obj("id" to "discover")))["last"] = r.copyObj().also { it["at"] = Db.iso(Db.nowMs()) } }
+                }
+            } finally {
+                e.library.progress = ""
+                exploring.set(false)
             }
         } ?: return "Still exploring on the phone as $user (searching TikTok, then reading each account's posts). " +
             "Call carousel_formats in a few minutes; discover_slideshows' summary is in the state then too."
@@ -358,6 +367,7 @@ Save tokens: don't repeat calls whose answer you already have in this conversati
             order.append("row ${order.lines().size}: ${ex.str("post_id")} (@${ex.str("username")}, ${ex["lift"]}× lift), slides ${pick.distinct().joinToString { "${it + 1}" }} of ${paths.size}\n")
         }
         val out = arr(text(lean(res)))
+        if (exploring.get()) out.add(0, text("discover_slideshows is still running (${e.library.progress}): these formats don't include its accounts yet. Call again when it's done."))
         if (cells.isNotEmpty()) out += text("The image below has one row per example:\n$order")
         sheet(cells, cell = 260, cols = 3)?.let { out += it }
         return out

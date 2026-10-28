@@ -25,6 +25,7 @@ class AndroidTikTok(private val context: Context, override val id: String = TikT
         private const val HELLO_MS = 4_000L
         private const val DRAFT_MS = 4 * 60_000L
         private const val LIST_MS = 60_000L
+        private const val USER_LIST_MS = 90_000L
 
     }
 
@@ -71,6 +72,17 @@ class AndroidTikTok(private val context: Context, override val id: String = TikT
         val posts = Json.parse(result.optJSONArray("posts")?.toString() ?: "[]") as? List<*> ?: return null
         @Suppress("UNCHECKED_CAST")
         return posts.filterIsInstance<Map<*, *>>().map { (it as Map<String, Any?>).toMutableMap() }
+    }
+
+    /** Another account's posts, listed by this tab's page itself (tiktok-inject.js listUser); null if it couldn't. */
+    override fun listUserPosts(secUid: String, max: Int, known: Set<String>): List<Obj>? {
+        hello()
+        val payload = JSONObject().put("secUid", secUid).put("max", max).put("known", JSONArray(known.toList()))
+        val result = ask("listUser", payload, USER_LIST_MS) ?: return null
+        if (!result.optBoolean("ok")) throw DraftError("TikTok didn't list the posts: ${result.optString("error", "unknown error")}")
+        val items = Json.parse(result.optJSONArray("items")?.toString() ?: "[]") as? List<*> ?: return null
+        @Suppress("UNCHECKED_CAST")
+        return items.filterIsInstance<Map<*, *>>().map { (it as Map<String, Any?>).toMutableMap() }
     }
 
     /** Hand one job to tiktok-inject.js (upload the slides, then draft or publish) and wait for TikTok's answer. */

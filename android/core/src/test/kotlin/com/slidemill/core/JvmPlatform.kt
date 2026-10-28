@@ -38,15 +38,18 @@ class JvmPlatform(
     /** Which account slot each TikTok read went through. */
     val via = java.util.concurrent.CopyOnWriteArrayList<String>()
 
-    override fun listProfilePosts(username: String, max: Int, via: String): List<Obj> {
+    override fun listProfilePosts(username: String, max: Int, via: String, known: Set<String>): List<Obj> {
         this.via += via
         return profilePosts[username].orEmpty().take(max)
     }
 
     /** What "TikTok search" returns per query (tests fill it). */
     val searchResults = mutableMapOf<String, List<Obj>>()
+    @Volatile var searchDelayMs = 0L
+
     override fun searchPosts(query: String, max: Int, via: String): List<Obj> {
         this.via += via
+        Thread.sleep(searchDelayMs)
         return searchResults[query].orEmpty().take(max)
     }
     override fun defaultTimezone(): String = "Europe/Bucharest"

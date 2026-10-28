@@ -17,7 +17,10 @@ class Engine(val platform: Platform, val dataDir: File) {
     val images = Images(db, store, platform, mediaDir)
     val renderer = Renderer(platform.imaging, mediaDir)
     val studio = Studio(db, platform, mediaDir, imageGen, images, renderer)
-    val library = Library(db, images, platform).also { l -> l.via = { accounts.researchSlot() } }
+    val library = Library(db, images, platform).also { l ->
+        l.via = { accounts.researchSlot() }
+        l.researchTab = { accounts.researchSlot().let { s -> if (s == Accounts.NO_LOGIN) null else tabs[s.ifEmpty { TikTokTab.MAIN }] } }
+    }
     val timing = Timing(db)
     val virality = Virality(db)
     val analytics = Analytics(db, platform).also { a -> a.profile = { user -> library.fetchProfile(user) } }

@@ -26,7 +26,7 @@ interface Platform {
      * Raw TikTok web `itemStruct`s for a public profile's latest posts, read by a logged-in TikTok page
      * on the device. Empty when the platform can't (the HTTP profile fetch still fills the stats).
      */
-    fun listProfilePosts(username: String, max: Int, via: String = ""): List<Obj> = emptyList()
+    fun listProfilePosts(username: String, max: Int, via: String = "", known: Set<String> = emptySet()): List<Obj> = emptyList()
 
     /**
      * Raw TikTok web `itemStruct`s from TikTok's search for [query], read the same way. Empty when it can't.
@@ -73,6 +73,13 @@ interface TikTokTab {
      * saves, is_slideshow, slides (count). null when this tab can't list them.
      */
     fun listMyPosts(max: Int): List<Obj>? = null
+
+    /**
+     * Another account's newest public posts (raw itemStructs), asked by this tab's page with its own
+     * fetch, stopping after the page that reaches a post in [known]. null when the page can't, so the
+     * caller falls back to scrolling the profile.
+     */
+    fun listUserPosts(secUid: String, max: Int, known: Set<String>): List<Obj>? = null
 }
 
 class DraftError(message: String) : RuntimeException(message)

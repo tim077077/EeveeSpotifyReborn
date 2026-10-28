@@ -16,6 +16,8 @@ class Library(
     private val platform: Platform,
 ) {
     companion object {
+        /** A profile read this recently isn't read again (the daily refresh still gets through). */
+        const val FRESH_MS = 20 * 3_600_000L
         val REHYDRATION_RE = Regex("<script id=\"__UNIVERSAL_DATA_FOR_REHYDRATION__\"[^>]*>(.*?)</script>", RegexOption.DOT_MATCHES_ALL)
         val POST_URL_RE = Regex("tiktok\\.com/@([\\w.\\-]+)/(?:video|photo)/(\\d+)")
         val PROFILE_URL_RE = Regex("tiktok\\.com/@([\\w.\\-]+)/?(?:\\?|$)")
@@ -90,6 +92,12 @@ class Library(
     /** The account slot whose TikTok session does research reads ("" = the main one); set by the engine. */
     @Volatile var via: () -> String = { "" }
 
+    /** The research account's tab, which can ask TikTok for a profile's posts directly (null = no login). */
+    @Volatile var researchTab: () -> TikTokTab? = { null }
+
+    /** What [discover] is doing right now ("" when idle). */
+    @Volatile var progress = ""
+
     @Volatile var pause: () -> Unit = { Thread.sleep(Random.nextLong(1000, 2500)) } // be gentle with TikTok
 
     private fun pageScope(url: String): Obj = parseScope(fetchHtml(url))
@@ -101,6 +109,7 @@ class Library(
         val stats = info.objAt("stats")
         return obj(
             "tiktok_user_id" to user.str("id"),
+            "sec_uid" to user.str("secUid"),
             "username" to user.str("uniqueId").ifEmpty { username },
             "nickname" to user.str("nickname"),
             "avatar" to user.str("avatarLarger").ifEmpty { user.str("avatarMedium") },
@@ -146,9 +155,9 @@ class Library(
                 ?: insert("library_profiles", obj(
                     "username" to username, "tiktok_user_id" to "", "nickname" to "", "avatar_path" to "", "bio" to "", "bio_link" to "",
                     "followers" to 0L, "following" to 0L, "total_likes" to 0L, "video_count" to 0L, "region" to "", "verified" to false,
-                    "niche" to "", "product_medium" to "", "scraped_at" to null,
+                    "niche" to "", "product_medium" to "", "scraped_at" to null, "sec_uid" to "",
                 ))
-            for (f in listOf("tiktok_user_id", "nickname", "bio", "bio_link", "region", "followers", "following", "total_likes", "video_count")) {
+            for (f in listOf("tiktok_user_id", "sec_uid", "nickname", "bio", "bio_link", "region", "followers", "following", "total_likes", "video_count")) {
                 val v = data[f]
                 if (v != null && v != "") p[f] = v
             }
@@ -249,11 +258,27 @@ class Library(
         }.also { pause() }
     }
 
-    fun importProfile(username: String, maxPosts: Int): Set<String> {
+    /**
+     * Read [username]'s profile and newest posts into the library. Skipped when its posts were read in
+     * the last [FRESH_MS] (unless [force]), and paging stops at posts the library already has, so a
+     * re-import costs a request or two instead of a full scroll.
+     */
+    fun importProfile(username: String, maxPosts: Int, force: Boolean = false): Set<String> {
+        val had = db.tx { where("library_profiles") { it.str("username").equals(username, ignoreCase = true) }.firstOrNull()?.copyObj() }
+        if (!force && had != null && Db.nowMs() - had.long("posts_read_at") < FRESH_MS) return setOf(had.str("id"))
         val info = fetchProfile(username)
         val pid = upsertProfile(info)
-        val posts = platform.listProfilePosts(info.str("username"), maxPosts, via()).map { normalizeWebItem(it) }
-        savePosts(posts)
+        val known = db.tx { where("library_posts") { it.str("profile_id") == pid }.map { it.str("id") }.toSet() }
+        // The research tab's page asks for the post list itself; scrolling the profile is the fallback.
+        val direct = info.str("sec_uid").takeIf { it.isNotEmpty() }?.let { sec ->
+            researchTab()?.let { tab ->
+                runCatching { tab.listUserPosts(sec, maxPosts, known) }
+                    .onFailure { platform.log("direct post list of @$username failed, scrolling instead: ${it.message}") }.getOrNull()
+            }
+        }?.takeIf { it.isNotEmpty() }
+        val raw = direct ?: platform.listProfilePosts(info.str("username"), maxPosts, via(), known)
+        savePosts(raw.map { normalizeWebItem(it) })
+        db.tx { get("library_profiles", pid)?.set("posts_read_at", Db.nowMs()) }
         return setOf(pid)
     }
 
@@ -267,7 +292,9 @@ class Library(
         val searched = arr()
         val found = mutableListOf<Obj>()
         val slot = via()
-        for (q in queries.map { it.trim() }.filter { it.isNotEmpty() }.distinct()) {
+        val qs = queries.map { it.trim() }.filter { it.isNotEmpty() }.distinct()
+        for ((i, q) in qs.withIndex()) {
+            progress = "searching \"$q\" (${i + 1} of ${qs.size})"
             val posts = try {
                 platform.searchPosts(q, 60, slot).map { normalizeWebItem(it) }
             } catch (e: Exception) {
@@ -287,7 +314,10 @@ class Library(
         val ranked = found.groupBy { it.str("username") }.map { (user, ps) -> Triple(user, ps, ps.maxOf { reach(it) }) }
             .sortedByDescending { it.third }
         val imported = arr()
-        for ((user, ps, r) in ranked.filter { it.first !in known }.take(accounts.coerceIn(0, 10))) {
+        val picks = ranked.filter { it.first !in known }.take(accounts.coerceIn(0, 10))
+        for ((n, pick) in picks.withIndex()) {
+            val (user, ps, r) = pick
+            progress = "reading @$user's posts (${n + 1} of ${picks.size})"
             val best = ps.maxBy { reach(it) }
             val line = obj(
                 "username" to user, "found_by" to ps.map { it.str("query") }.distinct().toMutableList<Any?>(),
