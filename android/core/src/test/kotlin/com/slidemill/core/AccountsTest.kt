@@ -88,4 +88,14 @@ class AccountsTest {
         assertEquals(listOf("acct2"), platform.via.toList())
         assertTrue("@thriftfinds (research)" in Json.parseObj(text(call("phone_status"))).strings("tiktok_accounts"))
     }
+
+    @Test fun research_can_run_with_no_login() {
+        e.store.setMany(mapOf("research_account" to Accounts.NO_LOGIN))
+        main.user = "" // works even with every account logged out
+        platform.searchResults["q"] = emptyList()
+        val out = text(call("discover_slideshows", obj("queries" to arr("q"))))
+        assertEquals(listOf(Accounts.NO_LOGIN), platform.via.toList())
+        assertTrue("Nothing found with no login" in out, out)
+        assertTrue("research: no login (only public pages)" in Json.parseObj(text(call("phone_status"))).strings("tiktok_accounts"))
+    }
 }

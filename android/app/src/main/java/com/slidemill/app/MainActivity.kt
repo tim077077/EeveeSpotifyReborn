@@ -259,7 +259,7 @@ class MainActivity : Activity() {
             show("TikTok")
             web().get(this).loadUrl("https://www.tiktok.com/tiktokstudio/content?tab=draft")
         }, spaced(6))
-        if (engine.tabs.size > 1) col.addView(accountSettings(), spaced(10))
+        col.addView(accountSettings(), spaced(10))
         col.addView(label("Use username/email + password: Google login doesn't work inside apps.", 12f, muted), spaced(6))
 
         // 3. Backgrounds
@@ -328,8 +328,13 @@ class MainActivity : Activity() {
                 button("Research with it", secondary = slot != research) { setAccount("research_account", slot) },
             ), spaced(4))
         }
+        box.addView(label("No login" + if (research == com.slidemill.core.Accounts.NO_LOGIN) " (research)" else "", 14f, ink, bold = true), spaced(8))
+        box.addView(button("Research with no login", secondary = research != com.slidemill.core.Accounts.NO_LOGIN) {
+            setAccount("research_account", com.slidemill.core.Accounts.NO_LOGIN)
+        }, spaced(4))
         box.addView(label(
-            "Research searches TikTok and opens other accounts' profiles, which is the bot-like part. Give it a spare account you don't post from, so a flag lands there instead.",
+            "Research searches TikTok and opens other accounts' profiles, which is the bot-like part. Give it a spare account you don't post from, so a flag lands there instead. " +
+                "No login risks no account, but TikTok shows logged-out visitors no search results and few photo posts, so it often finds nothing.",
             12f, muted,
         ), spaced(6))
         return box
