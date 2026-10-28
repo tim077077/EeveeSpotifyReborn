@@ -28,6 +28,9 @@ interface Platform {
      */
     fun listProfilePosts(username: String, max: Int): List<Obj> = emptyList()
 
+    /** Raw TikTok web `itemStruct`s from TikTok's search for [query], read the same way. Empty when it can't. */
+    fun searchPosts(query: String, max: Int): List<Obj> = emptyList()
+
     /** Keep the device awake while `block` runs (Claude asked for something through the relay). */
     fun <T> awake(block: () -> T): T = block()
 

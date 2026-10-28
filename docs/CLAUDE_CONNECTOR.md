@@ -49,6 +49,8 @@ On the phone:
 | `writing_guide` | What holds attention in a TikTok slideshow |
 | `research_library` | Real library slideshows, best first by views vs their account's usual views |
 | `add_to_library` | Import TikTok accounts or posts into the research library |
+| `discover_slideshows` | Search TikTok for a niche, keep the photo carousels, and import the accounts behind the ones that reached furthest beyond their followers |
+| `carousel_formats` | Which formats (slide count, words per slide, hook style, closing call to action, sound) beat their account's usual views, with the best examples' slides as images: copy the format, not the words |
 | `read_library_slides` / `save_slide_texts` | Claude reads slide text the library doesn't have yet, off the slide images |
 | `create_slideshow` | Render a slideshow Claude wrote and return the slides as images; with `save_draft: true`, also save it to TikTok drafts |
 | `import_slides` | Use finished slide images Claude made itself (https links, or small `data:image` URIs): stored as they are, in order; with `save_draft: true`, saved to TikTok drafts in the same call. The relay takes about 1 MB per call, so inline images must be small; links have no such limit |

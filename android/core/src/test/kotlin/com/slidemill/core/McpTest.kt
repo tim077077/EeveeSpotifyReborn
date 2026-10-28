@@ -48,7 +48,7 @@ class McpTest {
         assertEquals("2025-11-25", result("initialize", obj("protocolVersion" to "1999-01-01")).str("protocolVersion"))
         val names = result("tools/list").objs("tools").map { it.str("name") }
         assertEquals(listOf(
-            "writing_guide", "research_library", "add_to_library", "read_library_slides", "save_slide_texts", "create_slideshow",
+            "writing_guide", "research_library", "add_to_library", "discover_slideshows", "carousel_formats", "read_library_slides", "save_slide_texts", "create_slideshow",
             "import_slides", "save_draft", "schedule_slideshow", "view_slideshow", "list_slideshows", "delete_slideshow", "predict_virality", "my_posts", "analytics", "best_times", "phone_status",
         ), names)
         // Notifications get no body; modern-era discovery falls back to the handshake; GET isn't served.
@@ -299,6 +299,46 @@ class McpTest {
         assertEquals(listOf("things that changed my skin", "1. double cleanse", "2. spf"), top.strings("slides"))
         assertEquals(true, top["slide_text_read"])
         assertTrue("library is empty" in text(call("research_library", obj("niche" to "cooking"))))
+    }
+
+    @Test fun discover_imports_the_accounts_behind_the_best_slideshows_and_formats_compare_them() {
+        fun web(user: String, id: String, views: Long, followers: Long, slides: Int = 3, slideshow: Boolean = true) = CoreTest.WEB_ITEM.copyObj().also {
+            it["id"] = id
+            it["author"] = obj("uniqueId" to user)
+            it["authorStats"] = obj("followerCount" to followers)
+            it["stats"] = obj("playCount" to views)
+            it["imagePost"] = obj("images" to (0 until slides).map { i -> obj("imageURL" to obj("urlList" to arr("https://cdn.example/$id-$i.jpeg"))) }.toMutableList<Any?>())
+            if (!slideshow) it.remove("imagePost")
+        }
+        e.library.fetchHtml = { url ->
+            val user = url.substringAfter("@")
+            val scope = obj("webapp.user-detail" to obj("userInfo" to obj("user" to obj("uniqueId" to user), "stats" to obj("followerCount" to 1000L))))
+            "<script id=\"__UNIVERSAL_DATA_FOR_REHYDRATION__\">" + Json.write(obj("__DEFAULT_SCOPE__" to scope)) + "</script>"
+        }
+        e.library.downloadImage = { TestKit.jpeg(60, 75) }
+        // "small" got 50k views on 2k followers (far beyond its audience); "big" 60k on 2M; "vid" only posts videos.
+        platform.searchResults["vinted tips"] = listOf(web("big", "1", 60_000, 2_000_000), web("small", "2", 50_000, 2_000), web("vid", "3", 90_000, 500, slideshow = false))
+        platform.searchResults["depop"] = listOf(web("mid", "4", 8_000, 1_000))
+        platform.profilePosts["small"] = (1..6).map { n -> web("small", "s$n", if (n % 2 == 0) 9000L else 900L, 2_000, slides = if (n % 2 == 0) 7 else 3) }
+        platform.profilePosts["mid"] = (1..4).map { n -> web("mid", "m$n", if (n == 1) 4000L else 1000L, 1_000, slides = if (n == 1) 7 else 3) }
+        val res = Json.parseObj(text(call("discover_slideshows", obj("queries" to arr("vinted tips", "depop"), "accounts" to 2))).substringBefore("\n\nNext"))
+        assertEquals(3L, res.long("slideshows_found")) // the video is dropped
+        assertEquals(listOf("small", "mid"), res.objs("imported").map { it.str("username") }) // ranked by views per follower; "big" is cut
+        assertEquals(6L, res.objs("imported")[0].long("slideshows_in_library"))
+        assertEquals("vinted tips", e.db.tx { where("library_profiles") { it.str("username") == "small" }.single().str("niche") })
+
+        val out = call("carousel_formats", obj("niche" to "vinted", "examples" to 2)).objs("content")
+        val f = Json.parseObj(out[0].str("text").substringBefore("\n\nImages below"))
+        assertEquals(6L, f.long("posts_used")) // only @small matches the niche
+        assertTrue("Not enough yet" in f.str("summary"), f.str("summary")) // 6 < 8 posts
+
+        val all = Json.parseObj(call("carousel_formats", obj("examples" to 2)).objs("content")[0].str("text").substringBefore("\n\nImages below"))
+        assertEquals(10L, all.long("posts_used"))
+        assertTrue("slide_count: 7-9 slides" in all.str("summary"), all.str("summary"))
+        assertEquals("7-9 slides", all.objAt("by").objs("slide_count")[0].str("bucket"))
+        assertEquals(2, all.objs("examples").size)
+        assertTrue(call("carousel_formats", obj("examples" to 2)).objs("content").count { it.str("type") == "image" } >= 4)
+        assertTrue("Not logged in" in text(FakeTikTok("").let { e.tiktok = it; call("discover_slideshows", obj("queries" to arr("x"))) }))
     }
 
     @Test fun my_posts_reads_the_logged_in_account() {
