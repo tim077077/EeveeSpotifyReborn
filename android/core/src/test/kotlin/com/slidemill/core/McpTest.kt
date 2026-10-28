@@ -317,11 +317,11 @@ class McpTest {
         }
         e.library.downloadImage = { TestKit.jpeg(60, 75) }
         // "small" got 50k views on 2k followers (far beyond its audience); "big" 60k on 2M; "vid" only posts videos.
-        platform.searchResults["vinted tips"] = listOf(web("big", "1", 60_000, 2_000_000), web("small", "2", 50_000, 2_000), web("vid", "3", 90_000, 500, slideshow = false))
-        platform.searchResults["depop"] = listOf(web("mid", "4", 8_000, 1_000))
+        platform.searchResults["vinted tips"] = listOf(web("big", "1", 60_000, 2_000_000), web("small", "s2", 50_000, 2_000, slides = 7), web("vid", "3", 90_000, 500, slideshow = false))
+        platform.searchResults["depop"] = listOf(web("mid", "m1", 8_000, 1_000, slides = 7)) // search hits are posts on the accounts' own profiles
         platform.profilePosts["small"] = (1..6).map { n -> web("small", "s$n", if (n % 2 == 0) 9000L else 900L, 2_000, slides = if (n % 2 == 0) 7 else 3) }
         platform.profilePosts["mid"] = (1..4).map { n -> web("mid", "m$n", if (n == 1) 4000L else 1000L, 1_000, slides = if (n == 1) 7 else 3) }
-        val res = Json.parseObj(text(call("discover_slideshows", obj("queries" to arr("vinted tips", "depop"), "accounts" to 2))).substringBefore("\n\nNext"))
+        val res = Json.parseObj(text(call("discover_slideshows", obj("queries" to arr("vinted tips", "depop"), "accounts" to 2, "use_posting_account" to true))).substringBefore("\n\nNext"))
         assertEquals(3L, res.long("slideshows_found")) // the video is dropped
         assertEquals(listOf("small", "mid"), res.objs("imported").map { it.str("username") }) // ranked by views per follower; "big" is cut
         assertEquals(6L, res.objs("imported")[0].long("slideshows_in_library"))
@@ -338,7 +338,7 @@ class McpTest {
         assertEquals("7-9 slides", all.objAt("by").objs("slide_count")[0].str("bucket"))
         assertEquals(2, all.objs("examples").size)
         assertTrue(call("carousel_formats", obj("examples" to 2)).objs("content").count { it.str("type") == "image" } == 1)
-        assertTrue("Not logged in" in text(FakeTikTok("").let { e.tiktok = it; call("discover_slideshows", obj("queries" to arr("x"))) }))
+        assertTrue("Not logged in" in text(FakeTikTok("").let { e.tiktok = it; call("discover_slideshows", obj("queries" to arr("x"), "use_posting_account" to true)) }))
     }
 
     /** A [Lean] table ({"cols", "rows"}) or plain list, as records. */

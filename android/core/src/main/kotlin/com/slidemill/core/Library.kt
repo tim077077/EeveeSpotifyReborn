@@ -290,7 +290,10 @@ class Library(
      * [postsPerAccount] posts each. A whole account is needed: lift compares a post with its own
      * account's usual views. Accounts already in the library are skipped.
      */
-    fun discover(queries: List<String>, accounts: Int, postsPerAccount: Int): Obj {
+    fun discover(queries: List<String>, accounts: Int, postsPerAccount: Int, rankBy: String = "reach"): Obj {
+        // "views": the biggest hits, whoever posted them (to borrow a proven structure from any niche);
+        // "reach": views per follower, the posts that went furthest beyond their own audience.
+        val score: (Obj) -> Double = if (rankBy == "views") { p -> p.long("views").toDouble() } else ::reach
         val searched = arr()
         val found = mutableListOf<Obj>()
         val slot = via()
@@ -313,18 +316,25 @@ class Library(
             where("library_posts") { it.bool("is_slideshow") }.groupBy { it.str("profile_id") }.filter { it.value.size >= 3 }
                 .keys.mapNotNull { get("library_profiles", it)?.str("username") }.toSet()
         }
-        val ranked = found.groupBy { it.str("username") }.map { (user, ps) -> Triple(user, ps, ps.maxOf { reach(it) }) }
+        // The carousels themselves go in the library too, so their slides can be read even if their account isn't imported.
+        val unique = found.distinctBy { it.str("id") }
+        runCatching { savePosts(unique) }.onFailure { platform.log("saving search hits failed: ${it.message}") }
+        val top = unique.sortedByDescending(score).take(10).map { p ->
+            obj("post_id" to p.str("id"), "username" to p.str("username"), "views" to p.long("views"), "followers" to p.objAt("author").long("followers"),
+                "likes" to p.long("likes"), "saves" to p.long("saves"), "slides" to p.strings("slide_urls").size.toLong(), "caption" to p.str("description").take(120))
+        }
+        val ranked = found.groupBy { it.str("username") }.map { (user, ps) -> Triple(user, ps, ps.maxOf(score)) }
             .sortedByDescending { it.third }
         val imported = arr()
         val picks = ranked.filter { it.first !in known }.take(accounts.coerceIn(0, 10))
         for ((n, pick) in picks.withIndex()) {
             val (user, ps, r) = pick
             progress = "reading @$user's posts (${n + 1} of ${picks.size})"
-            val best = ps.maxBy { reach(it) }
+            val best = ps.maxBy(score)
             val line = obj(
                 "username" to user, "found_by" to ps.map { it.str("query") }.distinct().toMutableList<Any?>(),
                 "best_hit_views" to best.long("views"), "followers" to best.objAt("author").long("followers"),
-                "views_per_follower" to Methods.round2(r),
+                "views_per_follower" to Methods.round2(reach(best)),
             )
             try {
                 importProfile(user, postsPerAccount)
@@ -346,7 +356,9 @@ class Library(
         return obj(
             "note" to note,
             "searched" to searched,
-            "slideshows_found" to found.size.toLong(),
+            "slideshows_found" to unique.size.toLong(),
+            "ranked_by" to rankBy,
+            "top_slideshows" to top.toMutableList<Any?>(),
             "accounts_found" to ranked.size.toLong(),
             "already_in_library" to ranked.count { it.first in known }.toLong(),
             "imported" to imported,

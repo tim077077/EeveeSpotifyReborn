@@ -49,7 +49,7 @@ On the phone:
 | `writing_guide` | What holds attention in a TikTok slideshow |
 | `research_library` | Real library slideshows, best first by views vs their account's usual views |
 | `add_to_library` | Import TikTok accounts or posts into the research library |
-| `discover_slideshows` | Search TikTok for a niche, keep the photo carousels, and import the accounts behind the ones that reached furthest beyond their followers |
+| `discover_slideshows` | Search TikTok's Photos results, keep the carousels, list the top 10 (saved to the library so their slides can be read) and import the accounts behind them. `rank_by: views` puts the biggest hits from any niche first (for example carousels that promote an app); the default `reach` ranks by views per follower. It refuses to search on the posting account unless the user agrees (`use_posting_account`) |
 | `carousel_formats` | Which formats (slide count, words per slide, hook style, closing call to action, sound) beat their account's usual views, with the best examples' slides as images: copy the format, not the words |
 | `read_library_slides` / `save_slide_texts` | Claude reads slide text the library doesn't have yet, off the slide images |
 | `create_slideshow` | Render a slideshow Claude wrote and return the slides as images; with `save_draft: true`, also save it to TikTok drafts |
