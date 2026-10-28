@@ -9,7 +9,8 @@ sealed class Schema(val description: String) {
     class Bool(description: String = "") : Schema(description)
     class Integer(description: String = "") : Schema(description)
     class Array(val item: Schema, description: String = "") : Schema(description)
-    class Object(val title: String, val props: LinkedHashMap<String, Schema>, description: String = "") : Schema(description)
+    /** [optional] properties may be left out (the caller fills defaults); the rest are required. */
+    class Object(val title: String, val props: LinkedHashMap<String, Schema>, description: String = "", val optional: Set<String> = emptySet()) : Schema(description)
 
     /** JSON Schema with every property required and no extra properties (structured-output friendly). */
     fun toJson(): Obj {
@@ -21,7 +22,7 @@ sealed class Schema(val description: String) {
             is Object -> obj(
                 "type" to "object",
                 "properties" to LinkedHashMap<String, Any?>().also { m -> props.forEach { (k, v) -> m[k] = v.toJson() } },
-                "required" to props.keys.toMutableList(),
+                "required" to props.keys.filter { it !in optional }.toMutableList<Any?>(),
                 "additionalProperties" to false,
             )
         }
@@ -64,7 +65,7 @@ sealed class Schema(val description: String) {
                 val out = obj()
                 for ((k, s) in props) {
                     val sub = if (path.isEmpty()) k else "$path.$k"
-                    if (!value.containsKey(k)) { errors += "$sub: Field required"; continue }
+                    if (!value.containsKey(k)) { if (k !in optional) errors += "$sub: Field required"; continue }
                     out[k] = s.check(value[k], sub, errors)
                 }
                 out
@@ -74,6 +75,7 @@ sealed class Schema(val description: String) {
 
     companion object {
         fun obj(title: String, vararg props: Pair<String, Schema>) = Object(title, linkedMapOf(*props))
+        fun obj(title: String, optional: Set<String>, vararg props: Pair<String, Schema>) = Object(title, linkedMapOf(*props), optional = optional)
     }
 }
 
@@ -91,8 +93,8 @@ object Shapes {
     val ROLES = listOf("hook", "body", "cta")
 
     val PLAN_TEXT_ITEM = Schema.obj(
-        "PlanTextItem",
-        "text" to Schema.Str("Exact on-slide text. Short lines; no hashtags; no emojis unless the style asks."),
+        "PlanTextItem", setOf("font", "font_size", "text_style", "text_color"),
+        "text" to Schema.Str("Exact on-slide text, short lines, no hashtags. Style fields optional (default tiktok/medium/outline/white)."),
         "font" to Schema.Str(enum = FONTS),
         "font_size" to Schema.Str(enum = FONT_SIZES),
         "text_style" to Schema.Str(enum = TEXT_STYLES),
@@ -100,21 +102,18 @@ object Shapes {
     )
 
     val PLAN_SLIDE = Schema.obj(
-        "PlanSlide",
+        "PlanSlide", setOf("role"),
         "role" to Schema.Str(enum = ROLES),
         "text_items" to Schema.Array(PLAN_TEXT_ITEM),
-        "image_query" to Schema.Str("3-6 word stock-photo search phrase for this slide's background, aesthetic and specific."),
-        "image_prompt" to Schema.Str(
-            "One-sentence description of this slide's background photo for an AI image generator: subject, setting, " +
-                "lighting, framing. Never include text, captions, letters or logos in the image."
-        ),
+        "image_query" to Schema.Str("3-6 word stock-photo search for the background."),
+        "image_prompt" to Schema.Str("One sentence for an AI background photo: subject, setting, light. No text or logos in it."),
     )
 
     val SLIDESHOW_PLAN = Schema.obj(
-        "SlideshowPlan",
-        "title" to Schema.Str("Internal title for the dashboard, under 60 characters."),
-        "caption" to Schema.Str("TikTok post title, at most 89 characters."),
-        "description" to Schema.Str("TikTok post description: one or two sentences plus 3-5 relevant hashtags."),
+        "SlideshowPlan", setOf("text_position"),
+        "title" to Schema.Str("Internal name, under 60 chars."),
+        "caption" to Schema.Str("TikTok post title, max 89 chars."),
+        "description" to Schema.Str("Post caption: 1-2 sentences + 3-5 hashtags."),
         "text_position" to Schema.Str(enum = TEXT_POSITIONS),
         "slides" to Schema.Array(PLAN_SLIDE),
     )

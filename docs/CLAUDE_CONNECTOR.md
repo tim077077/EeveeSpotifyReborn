@@ -60,10 +60,18 @@ On the phone:
 | `list_slideshows` | Recent slideshows with their draft status and scores |
 | `delete_slideshow` | Remove a weaker version (doesn't touch TikTok drafts) |
 | `predict_virality` | Score a slideshow with Claude as the reader. The first call returns the scoring rules, the slides and real library posts to rank it against blind; Claude sends its read back and Slidemill turns it into the score, attention curve and rank |
-| `analytics` | The account's full analytics, the same report as the app's Analytics tab: followers and their weekly change, totals, the last 7 days against the 7 before, views per week, slideshows against videos, top posts, and every post's views, likes, comments, shares, saves, engagement, views per day and views in the last 24 hours, plus the Slidemill slideshow and score it came from |
-| `my_posts` | Views, likes, comments, shares and saves of the logged-in account's recent posts. Posts made with Slidemill show their predicted score, and `prediction_check` says whether the score has tracked this account's real views (8+ scored posts, 2+ days old) |
+| `analytics` | The account's analytics (and whether `predict_virality`'s score tracks real views), the same report as the app's Analytics tab: followers and their weekly change, totals, the last 7 days against the 7 before, views per week, slideshows against videos, top posts, and every post's views, likes, comments, shares, saves, engagement, views per day and views in the last 24 hours, plus the Slidemill slideshow and score it came from |
 | `best_times` | When to post for an audience in a country |
 | `phone_status` | Whether the phone is logged in to TikTok, where backgrounds come from, the library size |
+
+### Token cost
+
+Every tool answer goes into Claude's context, so the phone keeps them small:
+- JSON answers drop empty fields, list similar records as one table (`cols` + `rows`), show TikTok links as post ids and times as short phone-local times.
+- Slides come back tiled on one image (an image costs about width × height / 750 tokens, so 7 slides tiled are about a third of 7 separate ones); `view_slideshow` with `slide=N` shows one slide full size.
+- `predict_virality` with `seen_slides: true` doesn't resend slides Claude has already looked at.
+- `analytics` lists 10 recent posts unless asked for more; it also has `prediction_check` (the old `my_posts` tool is folded into it).
+- `McpCostTest` measures a typical session and fails if a tool goes over its budget (about 10k tokens for the same calls that cost about 21k before).
 
 The server version (`app/mcp_server.py`) keeps its own set: `queue_post` queues a post through the dashboard's checks, `analytics` reads posted slideshows, and `predict_virality` uses the AI key. A public post through TikTok's official API needs the user's own privacy choice and their confirmation of TikTok's Music Usage Confirmation, so Claude has to ask you first. Claude's apps also ask before running a tool unless you've allowed it.
 
