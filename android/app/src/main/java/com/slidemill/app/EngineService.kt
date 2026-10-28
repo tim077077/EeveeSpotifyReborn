@@ -39,7 +39,7 @@ class EngineService : Service() {
         if (Build.VERSION.SDK_INT >= 34) startForeground(NOTIFICATION_ID, n, ServiceInfo.FOREGROUND_SERVICE_TYPE_SPECIAL_USE)
         else startForeground(NOTIFICATION_ID, n)
         Slidemill.engine(this)
-        TikTokWeb.get(this) // load tiktok.com in the background
+        TikTokWeb.slots(this).forEach { TikTokWeb.of(it).get(this) } // load every account's tiktok.com in the background
     }
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int = START_STICKY

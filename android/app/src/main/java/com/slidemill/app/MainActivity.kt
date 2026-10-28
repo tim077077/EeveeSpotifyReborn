@@ -32,6 +32,7 @@ import android.widget.ScrollView
 import android.widget.TextView
 import android.widget.Toast
 import com.slidemill.core.Engine
+import com.slidemill.core.TikTokTab
 import com.slidemill.core.copyObj
 import com.slidemill.core.long
 import com.slidemill.core.objAt
@@ -48,8 +49,8 @@ import java.time.format.DateTimeFormatter
 import java.util.concurrent.Executors
 
 /**
- * Two tabs: Slidemill (connect Claude; Claude's slideshows wait here as drafts: tap one, preview it, POST it live) and
- * TikTok (log in once). Claude does the work through the connector; this screen only sets it up.
+ * Three tabs: Slidemill (connect Claude; Claude's slideshows wait here as drafts: tap one, preview it, POST it live),
+ * Analytics, and TikTok (log in once per account). Claude does the work through the connector; this screen only sets it up.
  */
 class MainActivity : Activity() {
 
@@ -71,6 +72,14 @@ class MainActivity : Activity() {
     private var claudeUrl: TextView? = null
     private var tiktokState: TextView? = null
     private var showsList: LinearLayout? = null
+
+    /** The account the TikTok tab shows, and the one the Analytics tab reports on ("" = the default). */
+    private var webSlot = TikTokTab.MAIN
+    private var statsUser = ""
+
+    private fun web() = TikTokWeb.of(webSlot)
+
+    private fun detachAll() = TikTokWeb.slots(this).forEach { TikTokWeb.of(it).detach() }
 
     private val ticker = object : Runnable {
         override fun run() {
@@ -114,7 +123,7 @@ class MainActivity : Activity() {
     }
 
     override fun onDestroy() {
-        TikTokWeb.detach()
+        if (::tabs.isInitialized) detachAll()
         main.removeCallbacks(ticker)
         super.onDestroy()
     }
@@ -123,27 +132,80 @@ class MainActivity : Activity() {
     override fun onBackPressed() {
         if (!::tabs.isInitialized) return super.onBackPressed() // on the crash report
         if (current == "preview" || current == "Analytics") return show("Slidemill")
-        val web = if (current == "TikTok") TikTokWeb.get(this) else null
+        val web = if (current == "TikTok") web().get(this) else null
         if (web != null && web.canGoBack()) web.goBack() else super.onBackPressed()
     }
 
     private fun show(name: String) {
         current = name
         tabs.forEach { it.setTextColor(if (it.text == name) accent else muted) }
-        TikTokWeb.detach()
+        detachAll()
         content.removeAllViews()
         main.removeCallbacks(ticker)
         if (name == "TikTok") {
-            TikTokWeb.attach(this, content)
+            content.addView(tiktokTab())
         } else if (name == "Analytics") {
             content.addView(analytics())
             // Fresh numbers when the last refresh is old; the tab redraws when they arrive.
-            if (System.currentTimeMillis() - engine.analytics.lastRefreshMs() > com.slidemill.core.Analytics.MIN_REFRESH_MS) refreshAnalytics(force = false)
+            if (System.currentTimeMillis() - engine.analytics.lastRefreshMs(statsUser) > com.slidemill.core.Analytics.MIN_REFRESH_MS) refreshAnalytics(force = false)
         } else {
             content.addView(home())
             main.post(ticker)
             checkTikTok()
         }
+    }
+
+    // ---- the TikTok tab: one logged-in page per account ---------------------------------------------
+
+    private fun accountName(slot: String): String =
+        engine.accounts.cached(slot).let { if (it.isNotEmpty()) "@$it" else if (slot == TikTokTab.MAIN) "Main account" else "New account" }
+
+    private fun tiktokTab(): View {
+        if (webSlot !in TikTokWeb.slots(this)) webSlot = TikTokTab.MAIN
+        val chips = LinearLayout(this).apply { setPadding(dp(8), dp(6), dp(8), dp(6)) }
+        for (slot in TikTokWeb.slots(this)) {
+            chips.addView(button(accountName(slot), secondary = slot != webSlot) { webSlot = slot; show("TikTok") },
+                LinearLayout.LayoutParams(ViewGroup.LayoutParams.WRAP_CONTENT, dp(40)).apply { rightMargin = dp(6) })
+        }
+        chips.addView(button("+ Add account", secondary = true) { addAccount() },
+            LinearLayout.LayoutParams(ViewGroup.LayoutParams.WRAP_CONTENT, dp(40)).apply { rightMargin = dp(6) })
+        if (webSlot != TikTokTab.MAIN) {
+            chips.addView(button("Remove", secondary = true) { removeAccount(webSlot) }, LinearLayout.LayoutParams(ViewGroup.LayoutParams.WRAP_CONTENT, dp(40)))
+        }
+        val page = FrameLayout(this)
+        web().attach(this, page)
+        return LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            addView(HorizontalScrollView(this@MainActivity).apply { setBackgroundColor(panel); addView(chips) })
+            addView(page, LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, 0, 1f))
+        }
+    }
+
+    /** A new account: its own WebView profile (cookies apart from the others), opened for logging in. */
+    private fun addAccount() {
+        val slot = runCatching { TikTokWeb.add(this) }.getOrElse { return toast(it.message ?: "Couldn't add an account") }
+        engine.tabs[slot] = AndroidTikTok(applicationContext, slot)
+        webSlot = slot
+        show("TikTok")
+        toast("Log in to the other TikTok account here. Each account stays logged in separately.")
+    }
+
+    private fun removeAccount(slot: String) {
+        android.app.AlertDialog.Builder(this)
+            .setMessage("Remove ${accountName(slot)} from Slidemill? It's logged out on this phone; posts already on TikTok stay.")
+            .setPositiveButton("Remove") { _, _ ->
+                engine.tabs.remove(slot)
+                TikTokWeb.remove(this, slot)
+                io.execute {
+                    // Settings that named this account fall back to the main one.
+                    val clear = listOf("default_account", "research_account").filter { engine.store.get(it) == slot }.associateWith { "" }
+                    if (clear.isNotEmpty()) engine.store.setMany(clear)
+                }
+                webSlot = TikTokTab.MAIN
+                show("TikTok")
+            }
+            .setNegativeButton("Cancel", null)
+            .show()
     }
 
     // ---- the Slidemill tab ------------------------------------------------------------------------
@@ -187,6 +249,7 @@ class MainActivity : Activity() {
 
         // 2. TikTok
         col.addView(heading("2. Log in to TikTok"))
+        col.addView(label("One account, or several: add each one in the TikTok tab (+ Add account). Claude posts to the default unless you tell it which.", 13f, muted))
         tiktokState = label("Checking…", 14f, ink).also { col.addView(it, spaced(6)) }
         col.addView(row(
             button("Open the TikTok tab") { show("TikTok") },
@@ -194,8 +257,9 @@ class MainActivity : Activity() {
         ), spaced(6))
         col.addView(button("Web drafts (TikTok Studio)", secondary = true) {
             show("TikTok")
-            TikTokWeb.get(this).loadUrl("https://www.tiktok.com/tiktokstudio/content?tab=draft")
+            web().get(this).loadUrl("https://www.tiktok.com/tiktokstudio/content?tab=draft")
         }, spaced(6))
+        if (engine.tabs.size > 1) col.addView(accountSettings(), spaced(10))
         col.addView(label("Use username/email + password: Google login doesn't work inside apps.", 12f, muted), spaced(6))
 
         // 3. Backgrounds
@@ -251,6 +315,31 @@ class MainActivity : Activity() {
         return ScrollView(this).apply { addView(col) }
     }
 
+    /** Which account Claude posts to by default, and which one does the research (search, other accounts' posts). */
+    private fun accountSettings(): View {
+        val box = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL }
+        val default = engine.store.get("default_account").ifEmpty { TikTokTab.MAIN }
+        val research = engine.store.get("research_account").ifEmpty { TikTokTab.MAIN }
+        for (slot in TikTokWeb.slots(this)) {
+            val tags = listOfNotNull("default".takeIf { slot == default }, "research".takeIf { slot == research }).joinToString(", ")
+            box.addView(label(accountName(slot) + if (tags.isEmpty()) "" else " ($tags)", 14f, ink, bold = true), spaced(8))
+            box.addView(row(
+                button("Post here by default", secondary = slot != default) { setAccount("default_account", slot) },
+                button("Research with it", secondary = slot != research) { setAccount("research_account", slot) },
+            ), spaced(4))
+        }
+        box.addView(label(
+            "Research searches TikTok and opens other accounts' profiles, which is the bot-like part. Give it a spare account you don't post from, so a flag lands there instead.",
+            12f, muted,
+        ), spaced(6))
+        return box
+    }
+
+    private fun setAccount(key: String, slot: String) = io.execute {
+        engine.store.setMany(mapOf(key to if (slot == TikTokTab.MAIN) "" else slot))
+        main.post { show("Slidemill") }
+    }
+
     private fun refresh() {
         val s = engine.relay.status()
         relayState?.text = when (s.str("state")) {
@@ -273,6 +362,7 @@ class MainActivity : Activity() {
                 setPadding(dp(12), dp(10), dp(12), dp(10))
                 addView(label(r.str("title").ifEmpty { "Untitled" }, 14f, ink, bold = true))
                 addView(label(state, 13f, if (state.startsWith("✓")) good else muted))
+                if (engine.tabs.size > 1 && r.str("account").isNotEmpty()) addView(label("@${r.str("account")}", 12f, muted))
                 if (r.str("status") == "completed") setOnClickListener { preview(r.str("id")) }
             }, spaced(6))
         }
@@ -299,7 +389,7 @@ class MainActivity : Activity() {
     private fun refreshAnalytics(force: Boolean) {
         analyticsStatus?.text = "Reading your posts from TikTok… (up to a minute)"
         io.execute {
-            val err = runCatching { engine.analytics.refresh(engine.tiktok, force) }.exceptionOrNull()
+            val err = runCatching { engine.analytics.refresh(engine.accounts.tab(statsUser), force) }.exceptionOrNull()
             main.post {
                 if (current != "Analytics") return@post
                 if (err != null) {
@@ -315,11 +405,20 @@ class MainActivity : Activity() {
             orientation = LinearLayout.VERTICAL
             setPadding(dp(18), dp(18), dp(18), dp(18))
         }
-        val r = engine.analytics.report(weeks = 8, postsLimit = 100, predicted = engine.predictedByPost())
+        val r = engine.analytics.report(weeks = 8, postsLimit = 100, predicted = engine.predictedByPost(), username = statsUser)
         col.addView(row(
             label("Analytics", 22f, ink, bold = true),
             button("Refresh", secondary = true) { refreshAnalytics(force = true) },
         ))
+        // One report per account; the default account's until another is picked.
+        val users = engine.analytics.usernames()
+        if (users.size > 1) {
+            val shown = (r["account"] as? Map<*, *>)?.get("username")?.toString().orEmpty()
+            val chips = LinearLayout(this)
+            for (u in users) chips.addView(button("@$u", secondary = !u.equals(shown, ignoreCase = true)) { statsUser = u; show("Analytics") },
+                LinearLayout.LayoutParams(ViewGroup.LayoutParams.WRAP_CONTENT, dp(40)).apply { rightMargin = dp(6) })
+            col.addView(HorizontalScrollView(this).apply { addView(chips) }, spaced(8))
+        }
         analyticsStatus = label("", 13f, muted).also { col.addView(it, spaced(6)) }
         if (r["account"] == null) {
             analyticsStatus?.text = "No numbers yet. Tap Refresh (you need to be logged in on the TikTok tab)."
@@ -451,7 +550,7 @@ class MainActivity : Activity() {
         val r = engine.db.tx { get("slideshows", id)?.copyObj() } ?: return show("Slidemill")
         current = "preview"
         tabs.forEach { it.setTextColor(muted) }
-        TikTokWeb.detach()
+        detachAll()
         main.removeCallbacks(ticker)
         content.removeAllViews()
 
@@ -496,8 +595,9 @@ class MainActivity : Activity() {
             col.addView(status, spaced(18))
             if (scheduled) {
                 col.addView(button("See it in TikTok Studio") {
+                    r.str("account").let { a -> engine.tabs.values.firstOrNull { engine.accounts.cached(it.id).equals(a, ignoreCase = true) }?.let { webSlot = it.id } }
                     show("TikTok")
-                    TikTokWeb.get(this).loadUrl("https://www.tiktok.com/tiktokstudio/content")
+                    web().get(this).loadUrl("https://www.tiktok.com/tiktokstudio/content")
                 }, spaced(8))
             } else {
                 col.addView(button("Open the post") { openUrl(posted.str("url")) }, spaced(8))
@@ -509,6 +609,22 @@ class MainActivity : Activity() {
                 isChecked = true
             }
             col.addView(sound, spaced(16))
+            // Which account it goes to: Claude's pick (or the default), changeable here.
+            var target = r.str("account")
+            if (engine.tabs.size > 1) {
+                // Cached names only: asking a page waits on the main thread, which this is.
+                val names = TikTokWeb.slots(this).map { engine.accounts.cached(it) }.filter { it.isNotEmpty() }
+                val defaultSlot = engine.store.get("default_account").takeIf { engine.tabs.containsKey(it) } ?: TikTokTab.MAIN
+                if (target.isEmpty()) target = engine.accounts.cached(defaultSlot)
+                val chips = LinearLayout(this)
+                val chipButtons = mutableListOf<Button>()
+                for (u in names) chipButtons += button("@$u", secondary = !u.equals(target, ignoreCase = true)) {
+                    target = u
+                    chipButtons.forEach { b -> b.setBackgroundColor(if (b.text == "@$u") accent else panel) }
+                }.also { chips.addView(it, LinearLayout.LayoutParams(ViewGroup.LayoutParams.WRAP_CONTENT, dp(40)).apply { rightMargin = dp(6) }) }
+                col.addView(label("Post to", 12f, muted), spaced(12))
+                col.addView(HorizontalScrollView(this).apply { addView(chips) }, spaced(4))
+            }
             col.addView(status, spaced(8))
             val buttons = mutableListOf<Button>()
             fun go(at: Long) {
@@ -517,7 +633,7 @@ class MainActivity : Activity() {
                 status.text = (if (at > 0) "Scheduling for ${whenText(at)}…" else "Posting…") +
                     " uploading ${r.strings("rendered").size} slides to TikTok (up to a minute or two)."
                 io.execute {
-                    val out = runCatching { engine.studio.publish(id, engine.tiktok, sound.isChecked, at) }
+                    val out = runCatching { engine.studio.publish(id, engine.accounts.tab(target), sound.isChecked, at) }
                     main.post {
                         if (current != "preview") return@post
                         out.onSuccess { preview(id) }.onFailure {
@@ -581,9 +697,13 @@ class MainActivity : Activity() {
     private fun checkTikTok() {
         tiktokState?.text = "Checking…"
         io.execute {
-            val text = runCatching {
-                engine.tiktok!!.username().let { if (it.isEmpty()) "✗ Not logged in: open the TikTok tab and log in." else "✓ Logged in as @$it" }
-            }.getOrElse { "✗ ${it.message}" }
+            val tabs = engine.tabs.values.sortedBy { if (it.id == TikTokTab.MAIN) "" else it.id }
+            val lines = tabs.map { t ->
+                runCatching {
+                    engine.accounts.usernameOf(t).let { if (it.isEmpty()) "✗ ${accountName(t.id)}: not logged in. Open the TikTok tab and log in." else "✓ Logged in as @$it" }
+                }.getOrElse { "✗ ${it.message}" }
+            }
+            val text = lines.joinToString("\n").ifEmpty { "✗ The TikTok tab isn't running." }
             main.post { tiktokState?.text = text; tiktokState?.setTextColor(if (text.startsWith("✓")) good else ink) }
         }
     }

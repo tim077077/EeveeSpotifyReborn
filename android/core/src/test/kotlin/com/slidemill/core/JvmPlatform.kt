@@ -35,11 +35,20 @@ class JvmPlatform(
     override fun decryptSecret(stored: String): String = String(Base64.getDecoder().decode(stored.removePrefix("b64:")))
     override val imaging: Imaging = Java2DImaging(File(repoRoot, "fonts"))
 
-    override fun listProfilePosts(username: String, max: Int): List<Obj> = profilePosts[username].orEmpty().take(max)
+    /** Which account slot each TikTok read went through. */
+    val via = java.util.concurrent.CopyOnWriteArrayList<String>()
+
+    override fun listProfilePosts(username: String, max: Int, via: String): List<Obj> {
+        this.via += via
+        return profilePosts[username].orEmpty().take(max)
+    }
 
     /** What "TikTok search" returns per query (tests fill it). */
     val searchResults = mutableMapOf<String, List<Obj>>()
-    override fun searchPosts(query: String, max: Int): List<Obj> = searchResults[query].orEmpty().take(max)
+    override fun searchPosts(query: String, max: Int, via: String): List<Obj> {
+        this.via += via
+        return searchResults[query].orEmpty().take(max)
+    }
     override fun defaultTimezone(): String = "Europe/Bucharest"
     override fun log(message: String) {}
 

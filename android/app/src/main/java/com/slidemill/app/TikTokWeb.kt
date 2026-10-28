@@ -16,6 +16,10 @@ import android.webkit.WebResourceRequest
 import android.webkit.WebResourceResponse
 import android.webkit.WebView
 import android.webkit.WebViewClient
+import androidx.webkit.ProfileStore
+import androidx.webkit.WebViewCompat
+import androidx.webkit.WebViewFeature
+import com.slidemill.core.TikTokTab
 import org.json.JSONObject
 import java.io.File
 import java.util.UUID
@@ -23,24 +27,87 @@ import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.Executors
 
 /**
- * One long-lived tiktok.com WebView shared by the TikTok tab (where you log in) and Claude's
- * draft saves ([AndroidTikTok], in the background). It runs the same tiktok-inject.js as the browser
+ * One long-lived tiktok.com WebView per TikTok account, shared by the TikTok tab (where you log in) and
+ * Claude's posts ([AndroidTikTok], in the background). It runs the same tiktok-inject.js as the browser
  * extension; android-bridge.js plays the extension bridge's role, and native code does what the
  * extension's background worker did (CDN uploads with TikTok's Origin/Referer).
+ *
+ * The main account uses the WebView's default profile (so an existing login carries over); every other
+ * account gets its own WebView profile, with its own cookies and storage, so the logins never mix.
  */
-object TikTokWeb {
-    const val HOME = "https://www.tiktok.com/"
-    private const val SERVE_PREFIX = "https://www.tiktok.com/__slidemill/"
-    // Desktop Chrome: TikTok's web uploader (and the endpoints the poster uses) is the desktop site.
-    const val DESKTOP_UA =
-        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/130.0.0.0 Safari/537.36"
-    private val TIKTOK_HOSTS = listOf("tiktok.com", "tiktokv.com", "tiktokcdn.com", "tiktokcdn-eu.com", "byteimg.com", "ttwstatic.com")
+class TikTokWeb private constructor(val slot: String) {
+    companion object {
+        const val HOME = "https://www.tiktok.com/"
+        private const val SERVE_PREFIX = "https://www.tiktok.com/__slidemill/"
+        // Desktop Chrome: TikTok's web uploader (and the endpoints the poster uses) is the desktop site.
+        const val DESKTOP_UA =
+            "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/130.0.0.0 Safari/537.36"
+        private val TIKTOK_HOSTS = listOf("tiktok.com", "tiktokv.com", "tiktokcdn.com", "tiktokcdn-eu.com", "byteimg.com", "ttwstatic.com")
+        private const val PREFS = "tiktok_accounts"
 
-    private val main = Handler(Looper.getMainLooper())
-    private val io = Executors.newCachedThreadPool()
+        private val main = Handler(Looper.getMainLooper())
+        private val io = Executors.newCachedThreadPool()
+        private val served = ConcurrentHashMap<String, File>()
+        private val all = ConcurrentHashMap<String, TikTokWeb>()
+
+        /** The account in [slot]'s WebView (created on first use). */
+        fun of(slot: String): TikTokWeb = all.getOrPut(slot) { TikTokWeb(slot) }
+
+        /** Whether this phone's WebView can keep separate logins (Android System WebView 110+ or so). */
+        fun multiSupported(): Boolean = runCatching { WebViewFeature.isFeatureSupported(WebViewFeature.MULTI_PROFILE) }.getOrDefault(false)
+
+        /** Every account slot, main first. */
+        fun slots(context: Context): List<String> =
+            listOf(TikTokTab.MAIN) + prefs(context).getString("slots", "").orEmpty().split(",").filter { it.isNotBlank() && it != TikTokTab.MAIN }
+
+        /** A new empty slot for one more account. */
+        fun add(context: Context): String {
+            if (!multiSupported()) throw IllegalStateException("This phone's WebView can't keep two TikTok logins apart. Update \"Android System WebView\" in the Play Store, then try again.")
+            val slot = "acct-" + UUID.randomUUID().toString().take(6)
+            prefs(context).edit().putString("slots", (slots(context).drop(1) + slot).joinToString(",")).apply()
+            return slot
+        }
+
+        /** Log out and forget an extra account (its cookies are deleted with its profile). Main thread. */
+        fun remove(context: Context, slot: String) {
+            require(slot != TikTokTab.MAIN) { "The main account can't be removed: log out in its TikTok tab instead." }
+            prefs(context).edit().putString("slots", slots(context).drop(1).filter { it != slot }.joinToString(",")).apply()
+            all.remove(slot)?.destroy()
+            runCatching { ProfileStore.getInstance().deleteProfile(profileName(slot)) }
+        }
+
+        private fun prefs(context: Context) = context.applicationContext.getSharedPreferences(PREFS, Context.MODE_PRIVATE)
+
+        private fun profileName(slot: String) = "slidemill-$slot"
+
+        /** The cookie jar of [slot]'s account (for native requests made on its behalf). Main thread. */
+        fun cookies(slot: String): CookieManager =
+            if (slot.isEmpty() || slot == TikTokTab.MAIN || !multiSupported()) CookieManager.getInstance()
+            else ProfileStore.getInstance().getOrCreateProfile(profileName(slot)).cookieManager
+
+        /** Put a WebView on [slot]'s profile; must happen before it loads anything. Main thread. */
+        fun useProfile(view: WebView, slot: String) {
+            if (slot.isEmpty() || slot == TikTokTab.MAIN || !multiSupported()) return
+            ProfileStore.getInstance().getOrCreateProfile(profileName(slot))
+            WebViewCompat.setProfile(view, profileName(slot))
+        }
+
+        private fun isTikTok(uri: Uri?): Boolean {
+            val host = uri?.host ?: return false
+            return TIKTOK_HOSTS.any { host == it || host.endsWith(".$it") }
+        }
+
+        /** Make local slide files fetchable by the page; returns their in-page URLs. */
+        fun serve(postId: String, files: List<File>): List<String> = files.mapIndexed { i, f ->
+            val url = "$SERVE_PREFIX$postId/${i + 1}.jpg"
+            served[url] = f
+            url
+        }
+
+        fun unserve(postId: String) = served.keys.removeIf { it.startsWith("$SERVE_PREFIX$postId/") }
+    }
+
     private val pending = ConcurrentHashMap<String, (JSONObject?) -> Unit>()
-    private val served = ConcurrentHashMap<String, File>()
-
     private var web: WebView? = null
     private lateinit var wrapper: MutableContextWrapper
     private lateinit var appContext: Context
@@ -48,13 +115,14 @@ object TikTokWeb {
     @Volatile var pageReady = false
         private set
 
-    /** Get (creating if needed) the shared WebView. Main thread only. */
+    /** Get (creating if needed) this account's WebView. Main thread only. */
     @SuppressLint("SetJavaScriptEnabled")
     fun get(context: Context): WebView {
         web?.let { return it }
         appContext = context.applicationContext
         wrapper = MutableContextWrapper(appContext)
         val view = WebView(wrapper)
+        useProfile(view, slot)
         view.settings.apply {
             javaScriptEnabled = true
             domStorageEnabled = true
@@ -65,11 +133,11 @@ object TikTokWeb {
             displayZoomControls = false
             mediaPlaybackRequiresUserGesture = true
         }
-        CookieManager.getInstance().setAcceptCookie(true)
-        CookieManager.getInstance().setAcceptThirdPartyCookies(view, true)
+        cookies(slot).setAcceptCookie(true)
+        cookies(slot).setAcceptThirdPartyCookies(view, true)
         view.webChromeClient = WebChromeClient()
-        view.webViewClient = Client
-        view.addJavascriptInterface(Native, "SlidemillNative")
+        view.webViewClient = client
+        view.addJavascriptInterface(Native(), "SlidemillNative")
         view.loadUrl(HOME)
         web = view
         return view
@@ -89,7 +157,11 @@ object TikTokWeb {
         wrapper.baseContext = appContext
     }
 
-    fun reload() = main.post { web?.loadUrl(HOME) }
+    private fun destroy() = main.post {
+        detach()
+        web?.destroy()
+        web = null
+    }
 
     /** Run the bridge and tiktok-inject.js in the current page (both skip themselves if already there). */
     private fun inject(view: WebView, url: String?) {
@@ -110,12 +182,7 @@ object TikTokWeb {
         inject(view, view.url)
     }
 
-    private fun isTikTok(uri: Uri?): Boolean {
-        val host = uri?.host ?: return false
-        return TIKTOK_HOSTS.any { host == it || host.endsWith(".$it") }
-    }
-
-    private object Client : WebViewClient() {
+    private val client = object : WebViewClient() {
         override fun onPageStarted(view: WebView, url: String?, favicon: Bitmap?) {
             pageReady = false
         }
@@ -144,16 +211,7 @@ object TikTokWeb {
         }
     }
 
-    /** Make local slide files fetchable by the page; returns their in-page URLs. */
-    fun serve(postId: String, files: List<File>): List<String> = files.mapIndexed { i, f ->
-        val url = "$SERVE_PREFIX$postId/${i + 1}.jpg"
-        served[url] = f
-        url
-    }
-
-    fun unserve(postId: String) = served.keys.removeIf { it.startsWith("$SERVE_PREFIX$postId/") }
-
-    /** Ask the page something ("hello" or "job"); the callback gets null on timeout. */
+    /** Ask the page something ("hello", "job", "listMine"); the callback gets null on timeout. */
     fun ask(kind: String, payload: JSONObject, timeoutMs: Long, callback: (JSONObject?) -> Unit) {
         val id = "and" + UUID.randomUUID().toString().replace("-", "")
         pending[id] = callback
@@ -170,7 +228,7 @@ object TikTokWeb {
     }
 
     /** Methods the page can call. Only TikTok pages are ever loaded in this WebView. */
-    private object Native {
+    private inner class Native {
         @JavascriptInterface
         fun onResult(id: String, json: String) {
             val result = runCatching { if (json == "null") null else JSONObject(json) }.getOrNull()

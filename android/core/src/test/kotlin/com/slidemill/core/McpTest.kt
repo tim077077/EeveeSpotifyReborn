@@ -49,7 +49,7 @@ class McpTest {
         val names = result("tools/list").objs("tools").map { it.str("name") }
         assertEquals(listOf(
             "writing_guide", "research_library", "add_to_library", "discover_slideshows", "carousel_formats", "read_library_slides", "save_slide_texts", "create_slideshow",
-            "import_slides", "save_draft", "schedule_slideshow", "view_slideshow", "list_slideshows", "delete_slideshow", "predict_virality", "my_posts", "analytics", "best_times", "phone_status",
+            "import_slides", "save_draft", "schedule_slideshow", "view_slideshow", "list_slideshows", "delete_slideshow", "predict_virality", "analytics", "best_times", "phone_status",
         ), names)
         // Notifications get no body; modern-era discovery falls back to the handshake; GET isn't served.
         assertEquals(202, e.relay.mcp.handle("POST", """{"jsonrpc":"2.0","method":"notifications/initialized"}""").status)
@@ -62,7 +62,7 @@ class McpTest {
         val out = create("save_draft" to true)
         assertEquals(false, out["isError"], out.toString())
         assertEquals("Saved to TikTok Studio drafts (draft id 70000000001).", text(out, 1))
-        assertEquals(4, out.objs("content").count { it.str("type") == "image" }) // Claude sees what it made
+        assertEquals(1, out.objs("content").count { it.str("type") == "image" }) // Claude sees what it made, tiled on one image
         val id = idOf(out)
 
         val (title, caption, slides) = tiktok.saved.single()
@@ -135,7 +135,7 @@ class McpTest {
         assertTrue("2 hours" in text(call("schedule_slideshow", obj("slideshow_id" to other, "at" to iso))))
         val later = java.time.Instant.ofEpochSecond(at + 3 * 3600).toString()
         val direct = call("schedule_slideshow", obj("slideshow_id" to other, "at" to later))
-        assertTrue("Scheduled on TikTok" in text(direct), text(direct))
+        assertTrue("Scheduled on @tim" in text(direct), text(direct))
         assertEquals("scheduled", row(other).objAt("post").str("status"))
 
         // Outside TikTok's window, or unreadable: refused before anything is sent.
@@ -160,7 +160,7 @@ class McpTest {
             ))
             assertEquals(false, out["isError"], out.toString())
             assertEquals("Saved to TikTok Studio drafts (draft id 70000000001).", text(out, 1))
-            assertEquals(2, out.objs("content").count { it.str("type") == "image" })
+            assertEquals(1, out.objs("content").count { it.str("type") == "image" })
             val (title, caption, slides) = tiktok.saved.single()
             assertEquals("my own slides", title)
             assertEquals("made by Claude #test", caption)
@@ -205,7 +205,7 @@ class McpTest {
         tiktok.user = "tim"
         val plain = create()
         assertEquals(null, row(idOf(plain))["draft"])
-        assertEquals(1, plain.objs("content").count { it.str("type") == "text" })
+        assertTrue(plain.objs("content").none { "drafts" in it.str("text") }) // no draft note
         assertTrue("not saved" !in text(call("list_slideshows")).substringAfter(idOf(plain)).substringBefore("}"))
     }
 
@@ -259,7 +259,7 @@ class McpTest {
         assertEquals("Deleted.", text(call("delete_slideshow", obj("slideshow_id" to id))))
         assertEquals(true, call("delete_slideshow", obj("slideshow_id" to id))["isError"])
         val status = Json.parseObj(text(call("phone_status")))
-        assertEquals("tim", status.str("tiktok"))
+        assertEquals(listOf("@tim (default, research)"), status.strings("tiktok_accounts"))
         assertTrue("AI only" in status.str("backgrounds"))
     }
 
@@ -292,10 +292,10 @@ class McpTest {
 
         val toRead = call("read_library_slides", obj("limit" to 2)).objs("content")
         assertTrue("post_id 744: 3 slides" in toRead[0].str("text"), toRead[0].str("text")) // most viewed first
-        assertEquals(6, toRead.count { it.str("type") == "image" })
+        assertEquals(2, toRead.count { it.str("type") == "image" })
         assertEquals("Saved.", text(call("save_slide_texts", obj("post_id" to "744", "slide_texts" to arr("things that changed my skin", "1. double cleanse", "2. spf")))))
-        val research = Json.parse(text(call("research_library", obj("niche" to "skincare")))) as List<*>
-        val top = research[0] as Map<String, Any?>
+        val research = records(Json.parse(text(call("research_library", obj("niche" to "skincare")))))
+        val top = research[0]
         assertEquals(listOf("things that changed my skin", "1. double cleanse", "2. spf"), top.strings("slides"))
         assertEquals(true, top["slide_text_read"])
         assertTrue("library is empty" in text(call("research_library", obj("niche" to "cooking"))))
@@ -337,21 +337,32 @@ class McpTest {
         assertTrue("slide_count: 7-9 slides" in all.str("summary"), all.str("summary"))
         assertEquals("7-9 slides", all.objAt("by").objs("slide_count")[0].str("bucket"))
         assertEquals(2, all.objs("examples").size)
-        assertTrue(call("carousel_formats", obj("examples" to 2)).objs("content").count { it.str("type") == "image" } >= 4)
+        assertTrue(call("carousel_formats", obj("examples" to 2)).objs("content").count { it.str("type") == "image" } == 1)
         assertTrue("Not logged in" in text(FakeTikTok("").let { e.tiktok = it; call("discover_slideshows", obj("queries" to arr("x"))) }))
     }
 
-    @Test fun my_posts_reads_the_logged_in_account() {
-        platform.profilePosts["tim"] = listOf(CoreTest.WEB_ITEM.copyObj().also { it["author"] = obj("uniqueId" to "tim") })
-        val mine = Json.parseObj(text(call("my_posts")))
-        assertEquals("tim", mine.str("username"))
-        assertEquals(850000L, mine.objs("posts")[0].long("views"))
-        assertEquals("https://www.tiktok.com/@tim/photo/7400000000000000001", mine.objs("posts")[0].str("url"))
-        tiktok.user = ""
-        assertTrue("Not logged in" in text(call("my_posts")))
+    /** A [Lean] table ({"cols", "rows"}) or plain list, as records. */
+    private fun records(v: Any?): List<Obj> = when (v) {
+        is Map<*, *> -> (v as Obj).let { t -> t.objsRows() }
+        is List<*> -> v.map { it as Obj }
+        else -> emptyList()
     }
 
-    @Test fun my_posts_checks_the_score_against_real_views() {
+    private fun Obj.objsRows(): List<Obj> {
+        val cols = strings("cols")
+        return list("rows").map { r -> obj(*cols.zip(r as List<Any?>).toTypedArray()) }
+    }
+
+    @Test fun analytics_reads_the_logged_in_account() {
+        platform.profilePosts["tim"] = listOf(CoreTest.WEB_ITEM.copyObj().also { it["author"] = obj("uniqueId" to "tim") })
+        val report = Json.parseObj(text(call("analytics")))
+        assertEquals("tim", report.objAt("account").str("username"))
+        val post = records(report["posts"]).single()
+        assertEquals(850000L, post.long("views"))
+        assertEquals("7400000000000000001", post.str("post_id")) // links shrink to the post id
+    }
+
+    @Test fun analytics_checks_the_score_against_real_views() {
         // Too few: no verdict about the score.
         assertTrue("Not enough yet" in Virality.predictionCheck(listOf(80.0 to 1000.0)).str("verdict"))
         val tracks = (1..10).map { it * 10.0 to it * 1000.0 }
@@ -365,10 +376,11 @@ class McpTest {
         platform.profilePosts["tim"] = listOf(CoreTest.WEB_ITEM.copyObj().also {
             it["author"] = obj("uniqueId" to "tim"); it["id"] = item; it["createTime"] = Db.nowMs() / 1000 - 3 * 86400
         })
-        val mine = Json.parseObj(text(call("my_posts")))
-        assertEquals(id, mine.objs("posts")[0].objAt("slidemill").str("slideshow_id"))
-        assertEquals(72L, mine.objs("posts")[0].objAt("slidemill").long("predicted_score"))
-        assertEquals(1L, mine.objAt("prediction_check").long("posts_checked"))
+        val report = Json.parseObj(text(call("analytics")))
+        val post = records(report["posts"]).single()
+        assertEquals(id, post.objAt("slidemill").str("slideshow_id"))
+        assertEquals(72L, post.objAt("slidemill").long("predicted_score"))
+        assertEquals(1L, report.objAt("prediction_check").long("posts_checked"))
     }
 
     @Test fun claude_scores_a_slideshow_itself() {
@@ -390,7 +402,7 @@ class McpTest {
         val text = brief[0].str("text")
         assertTrue("ANSWER_SCHEMA" in text && "rank_order" in text && "swipe_on" in text, text)
         assertTrue("rival hook" in text && "views" !in text.substringAfter("Comparison:").substringAfter("\n"), text) // no results leaked
-        assertEquals(4 + 6, brief.count { it.str("type") == "image" }) // its slides, then the 6 references' covers
+        assertEquals(2, brief.count { it.str("type") == "image" }) // its slides tiled, then the 6 references. covers tiled
         val me = Regex("Slideshow ([A-G]) \\(this one\\)").find(text)!!.groupValues[1]
 
         // Step 2: Claude's read, ranking itself first.

@@ -11,6 +11,8 @@ class Store(private val db: Db, private val platform: Platform) {
             "image_api_key" to listOf("IMAGE_API_KEY"),
             "image_model" to listOf("IMAGE_MODEL"),
             "claude_schedules" to listOf(), // "0": schedule_slideshow only proposes; anything else (the default): Claude schedules itself
+            "default_account" to listOf(), // TikTok username Claude's slideshows go to when it names none ("" = the main tab)
+            "research_account" to listOf(), // TikTok username whose session does research (search, other accounts) ("" = the main tab)
         )
         val SECRET_KEYS = setOf("image_api_key", "pexels_api_key", "unsplash_access_key")
 

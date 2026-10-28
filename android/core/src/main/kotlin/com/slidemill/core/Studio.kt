@@ -61,12 +61,12 @@ class Studio(
         ))
     }
 
-    /** Store a new slideshow (status "rendering"); [build] fills it in. */
-    fun create(plan: Map<String, Any?>, aspectRatio: String): String {
+    /** Store a new slideshow (status "rendering") for TikTok [account] ("" = the default one); [build] fills it in. */
+    fun create(plan: Map<String, Any?>, aspectRatio: String, account: String = ""): String {
         val spec = specFromPlan(plan, aspectRatio)
         return db.tx {
             insert("slideshows", obj(
-                "title" to plan.str("title"), "status" to "rendering", "spec" to spec,
+                "title" to plan.str("title"), "status" to "rendering", "spec" to spec, "account" to account,
                 "caption" to plan.str("caption").take(89), "description" to plan.str("description"),
                 "rendered" to arr(), "error" to "", "draft" to null, "prediction" to null,
             ))
@@ -77,7 +77,7 @@ class Studio(
      * Store finished slide images Claude made elsewhere, as a ready slideshow (no rendering). Each image is
      * re-encoded as a JPEG of at most 2160x2700, keeping its shape.
      */
-    fun importSlides(title: String, caption: String, description: String, images: List<ByteArray>): String {
+    fun importSlides(title: String, caption: String, description: String, images: List<ByteArray>, account: String = ""): String {
         if (images.isEmpty()) throw PipelineError("No slides.")
         if (images.size > MAX_SLIDES) throw PipelineError("TikTok takes at most $MAX_SLIDES slides; got ${images.size}.")
         val jpegs = images.mapIndexed { i, data ->
@@ -89,7 +89,7 @@ class Studio(
         }
         val id = db.tx {
             insert("slideshows", obj(
-                "title" to title.ifEmpty { caption }.ifEmpty { "Imported slideshow" }, "status" to "rendering", "source" to "imported",
+                "title" to title.ifEmpty { caption }.ifEmpty { "Imported slideshow" }, "status" to "rendering", "source" to "imported", "account" to account,
                 "spec" to Models.SPEC.of(obj("title" to title, "slides" to jpegs.map { obj() }.toMutableList<Any?>())),
                 "caption" to caption.take(89), "description" to description,
                 "rendered" to arr(), "error" to "", "draft" to null, "prediction" to null,
@@ -242,15 +242,21 @@ class Studio(
             obj("status" to "failed", "item_id" to "", "url" to "", "error" to (x.message ?: x.toString()))
         }
         record["at"] = Db.iso(Db.nowMs())
-        db.tx { get("slideshows", id)?.set("post", record) }
+        db.tx {
+            val s = get("slideshows", id) ?: return@tx
+            s["post"] = record
+            if (record.str("status") != "failed") s["account"] = record.str("url").substringAfter("/@").substringBefore("/") // where it really went
+        }
         if (record.str("status") == "failed") throw DraftError(record.str("error"))
         db.tx { get("slideshows", id)?.set("suggested_time", 0L) }
         return record
     }
 
     /** Unix seconds of every Slidemill post that's live, scheduled or being posted. */
-    fun postTimes(): List<Long> = db.tx {
-        all("slideshows").mapNotNull { s ->
+    fun postTimes(account: String? = null, unassigned: Boolean = true): List<Long> = db.tx {
+        all("slideshows").filter { s ->
+            account == null || s.str("account").equals(account, ignoreCase = true) || (unassigned && s.str("account").isEmpty())
+        }.mapNotNull { s ->
             val p = s.objOrNull("post") ?: return@mapNotNull null
             when (p.str("status")) {
                 "scheduled" -> Db.epochS(p.str("scheduled_for"))
@@ -260,11 +266,14 @@ class Studio(
         }
     }
 
-    /** Autopilot's spam guard: why posting at [at] would crowd the account, or null if it's fine. */
-    fun crowding(at: Long): String? {
-        val times = postTimes()
+    /**
+     * Autopilot's spam guard: why posting at [at] would crowd [account] (null = all of them), or null if
+     * it's fine. Posts recorded before accounts existed count for the default account ([unassigned]).
+     */
+    fun crowding(at: Long, account: String? = null, unassigned: Boolean = true): String? {
+        val times = postTimes(account, unassigned)
         times.firstOrNull { kotlin.math.abs(it - at) < MIN_GAP_S }?.let {
-            return "Another Slidemill post goes out within 2 hours of that time (${Db.iso(it * 1000)} UTC). Keep posts at least 2 hours apart."
+            return "Another Slidemill post${account?.let { " on @$it" }.orEmpty()} goes out within 2 hours of that time (${Db.iso(it * 1000)} UTC). Keep posts at least 2 hours apart."
         }
         if (times.count { kotlin.math.abs(it - at) < 12 * 3600 } >= MAX_PER_DAY) {
             return "That would be more than $MAX_PER_DAY Slidemill posts within 24 hours. Pick another day."

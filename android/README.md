@@ -13,7 +13,7 @@ The app has three tabs:
   - every post with its views, likes, comments, shares, saves, engagement, views per day and views in the last 24 hours (tap one to open it).
   
   The phone snapshots your posts every 3 hours (and when you tap Refresh). It reads them from TikTok Studio's content list, the same list as tiktok.com/tiktokstudio/content, so every published post is counted (up to 100); scheduled posts are left out until they go live. That list has no sound info, so `what_works` can't group by sound. TikTok only shows current totals, so growth numbers (views gained per week or in 24 hours, followers gained) appear once there are snapshots to compare. Claude gets the same report from the `analytics` tool.
-- **TikTok**: tiktok.com in desktop mode. Log in here once.
+- **TikTok**: tiktok.com in desktop mode. Log in here once. **+ Add account** logs in another TikTok account in its own profile (separate cookies); the Slidemill tab picks which one Claude posts to by default and which one does the research.
 
 ## How you post one
 
