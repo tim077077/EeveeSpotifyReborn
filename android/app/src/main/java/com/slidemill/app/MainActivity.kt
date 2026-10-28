@@ -342,7 +342,14 @@ class MainActivity : Activity() {
 
     private fun setAccount(key: String, slot: String) = io.execute {
         engine.store.setMany(mapOf(key to if (slot == TikTokTab.MAIN) "" else slot))
-        main.post { show("Slidemill") }
+        main.post {
+            // Redraw in place (not back at the top) and say what changed, so the tap visibly did something.
+            val y = (content.getChildAt(0) as? ScrollView)?.scrollY ?: 0
+            show("Slidemill")
+            (content.getChildAt(0) as? ScrollView)?.post { (content.getChildAt(0) as? ScrollView)?.scrollTo(0, y) }
+            val who = if (slot == com.slidemill.core.Accounts.NO_LOGIN) "no login" else accountName(slot)
+            toast(if (key == "research_account") "Research now runs on $who." else "Claude now posts to $who by default.")
+        }
     }
 
     private fun refresh() {
