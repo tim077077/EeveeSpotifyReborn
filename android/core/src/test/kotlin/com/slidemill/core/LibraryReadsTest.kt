@@ -44,6 +44,7 @@ class LibraryReadsTest {
         e.library.importProfile("glow", 30)
         assertEquals(listOf("1", "2"), postIds())
         assertTrue(platform.via.isEmpty(), "no profile scroll when the page can list") // the scroll fallback wasn't used
+        assertEquals("direct", e.db.tx { all("library_profiles").single().str("read_via") })
     }
 
     @Test fun it_scrolls_the_profile_when_the_page_cant_list() {
@@ -52,6 +53,7 @@ class LibraryReadsTest {
         e.library.importProfile("glow", 30)
         assertEquals(listOf("9"), postIds())
         assertEquals(listOf(""), platform.via.toList())
+        assertEquals("scroll", e.db.tx { all("library_profiles").single().str("read_via") })
     }
 
     @Test fun a_fresh_profile_isnt_read_again_and_a_stale_one_stops_at_known_posts() {
