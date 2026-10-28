@@ -29,15 +29,15 @@ object LibraryScraper {
     private val main = Handler(Looper.getMainLooper())
 
     /** Blocking; call off the main thread. Returns raw itemStructs. */
-    fun profilePosts(context: Context, username: String, max: Int, via: String = "", timeoutMs: Long = 90_000): List<Obj> =
-        scrape(context, "https://www.tiktok.com/@$username", "/api/post/item_list", max, via, timeoutMs)
+    fun profilePosts(context: Context, username: String, max: Int, via: String = "", known: Set<String> = emptySet(), timeoutMs: Long = 90_000): List<Obj> =
+        scrape(context, "https://www.tiktok.com/@$username", "/api/post/item_list", max, via, timeoutMs, known)
 
     /** TikTok's search results for [query] (logged-in search page, scrolled), as raw itemStructs. Blocking. */
     fun searchPosts(context: Context, query: String, max: Int, via: String = "", timeoutMs: Long = 90_000): List<Obj> =
         scrape(context, "https://www.tiktok.com/search?q=" + URLEncoder.encode(query, "UTF-8"), "/api/search/", max, via, timeoutMs)
 
     /** [via] is the account slot whose login (WebView profile and cookies) the page uses; "" is the main one. */
-    private fun scrape(context: Context, url: String, apiPath: String, max: Int, via: String, timeoutMs: Long): List<Obj> {
+    private fun scrape(context: Context, url: String, apiPath: String, max: Int, via: String, timeoutMs: Long, known: Set<String> = emptySet()): List<Obj> {
         // Without separate profiles, "no login" would quietly use the main account's cookies.
         if (via.isNotEmpty() && via != TikTokTab.MAIN && !TikTokWeb.multiSupported()) {
             throw IllegalStateException("This phone's WebView can't keep research apart from your login. Update \"Android System WebView\" in the Play Store.")
@@ -45,7 +45,7 @@ object LibraryScraper {
         val items = ConcurrentHashMap<String, Obj>()
         val done = CountDownLatch(1)
         var web: WebView? = null
-        main.post { web = start(context.applicationContext, url, apiPath, max, via, items, done) }
+        main.post { web = start(context.applicationContext, url, apiPath, max, via, known, items, done) }
         done.await(timeoutMs, TimeUnit.MILLISECONDS)
         main.post { web?.apply { stopLoading(); destroy() } }
         return items.values.take(max)
@@ -69,7 +69,7 @@ object LibraryScraper {
     }
 
     @SuppressLint("SetJavaScriptEnabled")
-    private fun start(context: Context, pageUrl: String, apiPath: String, max: Int, via: String, items: ConcurrentHashMap<String, Obj>, done: CountDownLatch): WebView {
+    private fun start(context: Context, pageUrl: String, apiPath: String, max: Int, via: String, known: Set<String>, items: ConcurrentHashMap<String, Obj>, done: CountDownLatch): WebView {
         val view = WebView(context)
         TikTokWeb.useProfile(view, via)
         val cookies = TikTokWeb.cookies(via)
@@ -96,7 +96,8 @@ object LibraryScraper {
         val scroll = object : Runnable {
             override fun run() {
                 if (done.count == 0L) return
-                if (items.size >= max || stale >= 4) {
+                // Stop once posts the library already has show up: everything below them is known too.
+                if (items.size >= max || stale >= 4 || (known.isNotEmpty() && items.keys.any { it in known })) {
                     done.countDown()
                     return
                 }

@@ -11,8 +11,8 @@ android {
         applicationId = "com.slidemill.app"
         minSdk = 26
         targetSdk = 35
-        versionCode = 12
-        versionName = "12.0.0"
+        versionCode = 13
+        versionName = "13.0.0"
     }
 
     // A fixed key checked into the repo, so every build (local or CI) can update the installed app.

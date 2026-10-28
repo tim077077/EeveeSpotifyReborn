@@ -186,3 +186,32 @@ const refused = new Promise((resolve) => (win.postMessage = (m) => m.__vbtt === 
 listeners.forEach((f) => f({ source: page, data: { __vbtt: "listMine", id: 6 } }));
 assert.equal((await refused).ok, false);
 console.log("listMine: ok");
+
+// Another account's posts: the profile's own post list, paged by cursor, stopping after the page with a post the library has.
+const userCalls = [];
+win.fetch = async (url) => {
+  const u = new URL(url);
+  if (u.pathname !== "/api/post/item_list/") throw new Error("unexpected request " + url);
+  userCalls.push(u.searchParams);
+  const pages = {
+    "0": { hasMore: true, cursor: "c1", statusCode: 0, itemList: [{ id: "30" }, { id: "29" }] },
+    c1: { hasMore: true, cursor: "c2", statusCode: 0, itemList: [{ id: "28" }, { id: "27" }, { id: "26" }] },
+  };
+  return { ok: true, text: async () => JSON.stringify(pages[u.searchParams.get("cursor")]) };
+};
+const ask = (data) => new Promise((resolve) => {
+  win.postMessage = (m) => m.__vbtt === "listUserResult" && resolve(JSON.parse(JSON.stringify(m.result)));
+  listeners.forEach((f) => f({ source: page, data: { __vbtt: "listUser", id: 7, pauseMs: 0, ...data } }));
+});
+const theirs = await ask({ secUid: "MS4x", max: 50, known: ["27"] });
+assert.equal(theirs.ok, true, theirs.error);
+assert.deepEqual(theirs.items.map((i) => i.id), ["30", "29", "28", "27", "26"]); // the page with a known post, then stop
+assert.equal(theirs.stoppedAtKnown, true);
+assert.deepEqual(userCalls.map((q) => q.get("cursor")), ["0", "c1"]);
+assert.equal(userCalls[0].get("secUid"), "MS4x");
+userCalls.length = 0;
+assert.deepEqual((await ask({ secUid: "MS4x", max: 2 })).items.map((i) => i.id), ["30", "29"]);
+assert.equal(userCalls.length, 1); // no second page once max is reached
+win.fetch = async () => ({ ok: true, text: async () => "" });
+assert.equal((await ask({ secUid: "MS4x" })).ok, false); // an empty answer is an error, so the app falls back
+console.log("listUser: ok");

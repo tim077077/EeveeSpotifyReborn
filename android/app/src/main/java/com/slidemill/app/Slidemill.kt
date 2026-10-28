@@ -24,7 +24,7 @@ class AndroidPlatform(private val context: Context) : Platform {
     override fun encryptSecret(plain: String) = Secrets.encrypt(plain)
     override fun decryptSecret(stored: String) = Secrets.decrypt(stored)
 
-    override fun listProfilePosts(username: String, max: Int, via: String): List<Obj> = LibraryScraper.profilePosts(context, username, max, via)
+    override fun listProfilePosts(username: String, max: Int, via: String, known: Set<String>): List<Obj> = LibraryScraper.profilePosts(context, username, max, via, known)
     override fun searchPosts(query: String, max: Int, via: String): List<Obj> = LibraryScraper.searchPosts(context, query, max, via)
 
     override fun <T> awake(block: () -> T): T {

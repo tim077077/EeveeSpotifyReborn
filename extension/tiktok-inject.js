@@ -461,6 +461,40 @@
 
   // Every published post of the logged-in account with its stats, newest first, as TikTok Studio's
   // Content page lists them (POST /tiktok/creator/manage/item_list/v1/, paged by cursor).
+  /**
+   * Another account's public posts, as raw itemStructs, from the same post list its profile page loads.
+   * The page's own fetch makes the requests (so TikTok's own scripts sign them); pages are a second or
+   * two apart, like scrolling. Stops after the page that reaches a post in [known] (newest first, so
+   * the older ones are known too) or when TikTok has no more.
+   */
+  async function listUser({ secUid, max, known, pauseMs } = {}) {
+    if (!secUid) throw new Error("no secUid");
+    const limit = Math.max(1, Math.min(Number(max) || 30, 200));
+    const seen = new Set((known || []).map(String));
+    const items = [];
+    let cursor = "0";
+    let stoppedAtKnown = false;
+    let pages = 0;
+    for (; pages < 10 && items.length < limit && !stoppedAtKnown; pages++) {
+      if (pages > 0) await new Promise((r) => setTimeout(r, pauseMs != null ? pauseMs : 1000 + Math.random() * 1500));
+      const q = new URLSearchParams({ aid: "1988", app_name: "tiktok_web", device_platform: "web_pc", secUid, count: "35", cursor, coverFormat: "2" });
+      const r = await fetch(ORIGIN + "/api/post/item_list/?" + q, { credentials: "include" });
+      const text = await r.text();
+      if (!text) throw new Error("TikTok sent an empty post list");
+      const j = JSON.parse(text);
+      if (j.statusCode && j.statusCode !== 0) throw new Error("post list refused: " + text.slice(0, 200));
+      // The page that reaches known posts is kept whole: their view counts still change.
+      for (const it of j.itemList || []) {
+        if (seen.has(String(it.id))) stoppedAtKnown = true;
+        items.push(it);
+        if (items.length >= limit) break;
+      }
+      if (!j.hasMore) break;
+      cursor = String(j.cursor || "0");
+    }
+    return { items, pages: Math.max(pages, 1), stoppedAtKnown };
+  }
+
   async function listMine({ max } = {}) {
     const limit = Math.max(1, Math.min(Number(max) || 100, 500));
     const q = new URLSearchParams({ aid: "1988", app_name: "tiktok_creator_center", channel: "tiktok_web", device_platform: "web_pc" });
@@ -669,6 +703,16 @@
       window.postMessage({ __vbtt: "listMineResult", id: d.id, result }, "*");
       return;
     }
+    if (d.__vbtt === "listUser") {
+      let result;
+      try {
+        result = { ok: true, ...(await listUser(d)) };
+      } catch (e) {
+        result = { ok: false, error: String((e && e.message) || e) };
+      }
+      window.postMessage({ __vbtt: "listUserResult", id: d.id, result }, "*");
+      return;
+    }
     if (d.__vbtt !== "job") return;
     const job = d.job || {};
     let result;
@@ -690,6 +734,6 @@
     window.postMessage({ __vbtt: "jobResult", id: d.id, result }, "*");
   });
 
-  window.VBTikTok = { post, saveDraft, listMine, postFromPicker, recommendMusic, _internals: { getCreds, applyImageUpload, commitImageUpload, sigv4, hashtagExtra, crc32Hex } };
+  window.VBTikTok = { post, saveDraft, listMine, listUser, postFromPicker, recommendMusic, _internals: { getCreds, applyImageUpload, commitImageUpload, sigv4, hashtagExtra, crc32Hex } };
   log("ready. Call: await VBTikTok.postFromPicker({ title, caption })");
 })();
