@@ -49,7 +49,7 @@ class McpTest {
         val names = result("tools/list").objs("tools").map { it.str("name") }
         assertEquals(listOf(
             "writing_guide", "research_library", "add_to_library", "discover_slideshows", "carousel_formats", "read_library_slides", "save_slide_texts", "create_slideshow",
-            "import_slides", "save_draft", "schedule_slideshow", "view_slideshow", "list_slideshows", "delete_slideshow", "predict_virality", "analytics", "best_times", "phone_status",
+            "import_slides", "save_draft", "schedule_slideshow", "view_post", "view_slideshow", "list_slideshows", "delete_slideshow", "predict_virality", "analytics", "best_times", "phone_status",
         ), names)
         // Notifications get no body; modern-era discovery falls back to the handshake; GET isn't served.
         assertEquals(202, e.relay.mcp.handle("POST", """{"jsonrpc":"2.0","method":"notifications/initialized"}""").status)
@@ -339,6 +339,32 @@ class McpTest {
         assertEquals(2, all.objs("examples").size)
         assertTrue(call("carousel_formats", obj("examples" to 2)).objs("content").count { it.str("type") == "image" } == 1)
         assertTrue("Not logged in" in text(FakeTikTok("").let { e.tiktok = it; call("discover_slideshows", obj("queries" to arr("x"), "use_posting_account" to true)) }))
+    }
+
+    @Test fun view_post_shows_the_users_own_carousel_as_posted() {
+        e.analytics.record("tim", listOf(
+            obj("id" to "761", "desc" to "3 apps for resellers", "is_slideshow" to true, "slides" to 3L, "views" to 5000L, "posted_at" to 1_792_000_000L),
+            obj("id" to "762", "desc" to "a video", "is_slideshow" to false, "views" to 900L, "posted_at" to 1_792_000_000L),
+        ))
+        var pages = 0
+        e.library.fetchHtml = { url ->
+            pages++
+            assertTrue("/@tim/photo/761" in url, url)
+            val item = CoreTest.WEB_ITEM.copyObj().also {
+                it["id"] = "761"
+                it["imagePost"] = obj("images" to (1..3).map { i -> obj("imageURL" to obj("urlList" to arr("https://cdn.example/761-$i.jpeg"))) }.toMutableList<Any?>())
+            }
+            "<script id=\"__UNIVERSAL_DATA_FOR_REHYDRATION__\">" + Json.write(obj("__DEFAULT_SCOPE__" to obj("webapp.video-detail" to obj("itemInfo" to obj("itemStruct" to item))))) + "</script>"
+        }
+        e.library.downloadImage = { TestKit.jpeg(90, 120) }
+        val out = call("view_post", obj("post_id" to "761")).objs("content")
+        assertEquals(5000L, Json.parseObj(out[0].str("text")).long("views"))
+        assertTrue("3 slides as posted" in out[1].str("text"), out[1].str("text"))
+        assertEquals(1, out.count { it.str("type") == "image" }) // one tiled sheet
+        assertEquals(1, call("view_post", obj("post_id" to "761", "slide" to 2)).objs("content").count { it.str("type") == "image" })
+        assertEquals(1, pages) // downloaded once, then kept
+        assertTrue("only carousels" in call("view_post", obj("post_id" to "762")).objs("content")[1].str("text"))
+        assertEquals(true, call("view_post", obj("post_id" to "999"))["isError"])
     }
 
     /** A [Lean] table ({"cols", "rows"}) or plain list, as records. */
