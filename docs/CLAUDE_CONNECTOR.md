@@ -63,6 +63,7 @@ On the phone:
 | `predict_virality` | Score a slideshow with Claude as the reader. The first call returns the scoring rules, the slides and real library posts to rank it against blind; Claude sends its read back and Slidemill turns it into the score, attention curve and rank |
 | `analytics` | The account's analytics (and whether `predict_virality`'s score tracks real views), the same report as the app's Analytics tab: followers and their weekly change, totals, the last 7 days against the 7 before, views per week, slideshows against videos, top posts, and every post's views, likes, comments, shares, saves, engagement, views per day and views in the last 24 hours, plus the Slidemill slideshow and score it came from |
 | `best_times` | When to post for an audience in a country |
+| `auto_reply` | The automatic comment replies running on the phone: `status` (default) shows the keywords, what went out today and when the next one is due; `set` adds or replaces one keyword with the replies it rotates through (and an optional `private_reply` for commenters whose account is private); `remove`, `on`, `off`. The phone answers matching comments by itself, at most 20 an hour, 50 a day, 1-3 minutes apart, never twice on the same comment |
 | `phone_status` | Which TikTok accounts are logged in (default and research marked), where backgrounds come from, the library size |
 
 ### Several TikTok accounts

@@ -18,6 +18,10 @@
  *   3. POST /top/v1?Action=CommitImageUpload      -> final image Uri + dimensions
  *   4. POST /tiktok/web/project/post/v1/          -> create the post (auto-signed in-page)
  *      or POST /api/v1/draft/create_update/      -> save it to TikTok Studio's drafts instead
+ * Comments (the phone app's auto-reply):
+ *   GET  /api/comment/list/?aweme_id=…            -> a post's comments (VBTikTok.comments)
+ *   POST /api/comment/publish/?aweme_id=…&reply_id=…&text=… -> answer one (VBTikTok.replyToComment)
+ *   GET  /api/user/detail/?uniqueId=…             -> whether that commenter's account is private
  *
  * Usage in the console (after pasting this file):
  *   await VBTikTok.postFromPicker({
@@ -541,6 +545,97 @@
     return posts;
   }
 
+  // ---- comments: read a post's comments, answer one --------------------------
+  // Both go through the page's own fetch, so TikTok's scripts sign them (msToken / X-Bogus /
+  // X-Gnarly / X-Dynosaur), exactly as a reply typed by hand looks in a captured HAR:
+  //   GET  /api/comment/list/?aweme_id=…&count=…&cursor=…
+  //   POST /api/comment/publish/?aweme_id=…&reply_id=…&text=…&text_extra=[]
+  // A top-level comment is answered with reply_id only; answering a reply also sends
+  // reply_to_reply_id (the reply being answered), the way the web client threads them.
+
+  function slimComment(c, rootCid) {
+    const u = c.user || {};
+    return {
+      cid: String(c.cid || ""),
+      text: c.text || "",
+      author: u.unique_id || u.uniqueId || "",
+      nickname: u.nickname || "",
+      at: num(c.create_time),
+      likes: num(c.digg_count),
+      creator: num(c.label_type) === 1,
+      root_cid: rootCid || (c.reply_id && String(c.reply_id) !== "0" ? String(c.reply_id) : ""),
+      replies: num(c.reply_comment_total != null ? c.reply_comment_total : (c.reply_comment || []).length),
+    };
+  }
+
+  // The comments on one of the account's own posts, newest first, replies included (one level).
+  async function comments({ itemId, max, cursor, pauseMs } = {}) {
+    if (!itemId) throw new Error("no post id");
+    const limit = Math.max(1, Math.min(Number(max) || 60, 200));
+    const out = [];
+    const seen = new Set();
+    let cur = String(cursor || 0);
+    for (let page = 0; page < 8 && out.length < limit; page++) {
+      if (page > 0) await new Promise((r) => setTimeout(r, pauseMs != null ? pauseMs : 700 + Math.random() * 900));
+      const q = new URLSearchParams({ aid: "1988", app_name: "tiktok_web", channel: "tiktok_web", device_platform: "web_pc", aweme_id: String(itemId), count: "50", cursor: cur });
+      const tz = timeZone();
+      if (tz) q.set("tz_name", tz);
+      const r = await fetch(ORIGIN + "/api/comment/list/?" + q, { credentials: "include" });
+      const text = await r.text();
+      if (!text) throw new Error("TikTok sent an empty comment list");
+      const j = JSON.parse(text);
+      if (j.status_code && j.status_code !== 0) throw new Error("comment list refused: " + text.slice(0, 200));
+      for (const c of j.comments || []) {
+        if (!c || !c.cid) continue;
+        if (!seen.has(String(c.cid))) { seen.add(String(c.cid)); out.push(slimComment(c)); }
+        for (const rep of c.reply_comment || []) {
+          if (rep && rep.cid && !seen.has(String(rep.cid))) { seen.add(String(rep.cid)); out.push(slimComment(rep, String(c.cid))); }
+        }
+        if (out.length >= limit) break;
+      }
+      if (!j.has_more) break;
+      cur = String(j.cursor || 0);
+    }
+    return { comments: out, count: out.length };
+  }
+
+  // One commenter's profile: private accounts can't take a DM and hide their posts.
+  async function userPrivate({ uniqueId } = {}) {
+    const user = String(uniqueId || "").replace(/^@/, "");
+    if (!user) throw new Error("no username");
+    const q = new URLSearchParams({ aid: "1988", app_name: "tiktok_web", device_platform: "web_pc", uniqueId: user });
+    const r = await fetch(ORIGIN + "/api/user/detail/?" + q, { credentials: "include" });
+    const j = await r.json();
+    const u = (j.userInfo && j.userInfo.user) || {};
+    if (!u.uniqueId && !u.uid) throw new Error("no profile came back");
+    return { private: !!u.privateAccount, username: u.uniqueId || user };
+  }
+
+  // Answer a comment publicly, as the logged-in account. Returns the new comment's id.
+  async function replyToComment({ itemId, cid, rootCid, text } = {}) {
+    const body = String(text || "").trim();
+    if (!itemId || !cid) throw new Error("need the post id and the comment id");
+    if (!body) throw new Error("the reply is empty");
+    const root = String(rootCid || cid);
+    const q = new URLSearchParams({
+      aid: "1988", app_name: "tiktok_web", channel: "tiktok_web", device_platform: "web_pc",
+      aweme_id: String(itemId), reply_id: root, text: body, text_extra: "[]",
+    });
+    if (root !== String(cid)) q.set("reply_to_reply_id", String(cid));
+    // msToken / X-Bogus / X-Gnarly / X-Dynosaur are added by TikTok's in-page fetch hook, as for drafts.
+    const r = await fetch(ORIGIN + "/api/comment/publish/?" + q, {
+      method: "POST",
+      credentials: "include",
+      headers: { "content-type": "application/x-www-form-urlencoded" },
+      body: new URLSearchParams({ reply_id: root, text: body, text_extra: "[]" }).toString(),
+    });
+    const j = await r.json();
+    const c = j.comment || (j.data && j.data.comment) || null;
+    if (!c || !c.cid) throw new Error("TikTok refused the reply: " + JSON.stringify(j).slice(0, 300));
+    log("%c✓ REPLIED", "color:#12b886;font-weight:bold", c.cid + " → " + (c.text || body));
+    return { cid: String(c.cid), text: c.text || body, at: num(c.create_time) };
+  }
+
   // Steps 0-3: upload every slide to TikTok's image store (used by posts and drafts alike).
   async function uploadImages(images) {
     log("fetching upload credentials…");
@@ -713,6 +808,36 @@
       window.postMessage({ __vbtt: "listUserResult", id: d.id, result }, "*");
       return;
     }
+    if (d.__vbtt === "comments") {
+      let result;
+      try {
+        result = { ok: true, ...(await comments({ itemId: d.itemId, max: d.max, cursor: d.cursor })) };
+      } catch (e) {
+        result = { ok: false, error: String((e && e.message) || e) };
+      }
+      window.postMessage({ __vbtt: "commentsResult", id: d.id, result }, "*");
+      return;
+    }
+    if (d.__vbtt === "replyComment") {
+      let result;
+      try {
+        result = { ok: true, ...(await replyToComment({ itemId: d.itemId, cid: d.cid, rootCid: d.rootCid, text: d.text })) };
+      } catch (e) {
+        result = { ok: false, error: String((e && e.message) || e) };
+      }
+      window.postMessage({ __vbtt: "replyCommentResult", id: d.id, result }, "*");
+      return;
+    }
+    if (d.__vbtt === "userPrivate") {
+      let result;
+      try {
+        result = { ok: true, ...(await userPrivate({ uniqueId: d.uniqueId })) };
+      } catch (e) {
+        result = { ok: false, error: String((e && e.message) || e) };
+      }
+      window.postMessage({ __vbtt: "userPrivateResult", id: d.id, result }, "*");
+      return;
+    }
     if (d.__vbtt !== "job") return;
     const job = d.job || {};
     let result;
@@ -734,6 +859,6 @@
     window.postMessage({ __vbtt: "jobResult", id: d.id, result }, "*");
   });
 
-  window.VBTikTok = { post, saveDraft, listMine, listUser, postFromPicker, recommendMusic, _internals: { getCreds, applyImageUpload, commitImageUpload, sigv4, hashtagExtra, crc32Hex } };
+  window.VBTikTok = { post, saveDraft, listMine, listUser, comments, replyToComment, userPrivate, postFromPicker, recommendMusic, _internals: { getCreds, applyImageUpload, commitImageUpload, sigv4, hashtagExtra, crc32Hex } };
   log("ready. Call: await VBTikTok.postFromPicker({ title, caption })");
 })();

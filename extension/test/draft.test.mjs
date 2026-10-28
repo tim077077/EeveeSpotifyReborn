@@ -215,3 +215,93 @@ assert.equal(userCalls.length, 1); // no second page once max is reached
 win.fetch = async () => ({ ok: true, text: async () => "" });
 assert.equal((await ask({ secUid: "MS4x" })).ok, false); // an empty answer is an error, so the app falls back
 console.log("listUser: ok");
+
+// Comments: the auto-reply's read and write. The publish shape is a reply typed by hand (captured HAR):
+// POST /api/comment/publish/?aweme_id=…&reply_id=…&text=…&text_extra=[], reply_to_reply_id for a reply.
+const commentCalls = [];
+const pagesOf = {
+  "0": { status_code: 0, has_more: true, cursor: "77", comments: [
+    { cid: "c1", text: "PLAN please 🙏", create_time: "1793214000", digg_count: 3, reply_id: "0", reply_comment_total: 1,
+      user: { unique_id: "gigel", nickname: "Gigel" },
+      reply_comment: [{ cid: "c1r", text: "pln", create_time: "1793214100", user: { unique_id: "ana" }, label_type: 1 }] },
+    { cid: "c2", text: "not interested", create_time: "1793213000", user: { uniqueId: "marius" } },
+  ] },
+  "77": { status_code: 0, has_more: false, cursor: "77", comments: [{ cid: "c3", text: "plan!!", create_time: "1793212000", user: { unique_id: "ioana" } }] },
+};
+win.fetch = async (url, init = {}) => {
+  const u = new URL(url);
+  if (u.pathname !== "/api/comment/list/") throw new Error("unexpected request " + url);
+  commentCalls.push({ query: u.searchParams, credentials: init.credentials });
+  return { ok: true, text: async () => JSON.stringify(pagesOf[u.searchParams.get("cursor")]) };
+};
+const askComments = (data) => new Promise((resolve) => {
+  win.postMessage = (m) => m.__vbtt === "commentsResult" && resolve(JSON.parse(JSON.stringify(m.result)));
+  listeners.forEach((f) => f({ source: page, data: { __vbtt: "comments", id: 8, pauseMs: 0, ...data } }));
+});
+const listed2 = await askComments({ itemId: "7535824345877220630", max: 3 });
+assert.equal(listed2.ok, true, listed2.error);
+assert.deepEqual(listed2.comments.map((c) => c.cid), ["c1", "c1r", "c2"]); // the reply comes with its root's comments
+assert.deepEqual(listed2.comments.map((c) => c.author), ["gigel", "ana", "marius"]); // unique_id and uniqueId alike
+assert.deepEqual([listed2.comments[0].creator, listed2.comments[1].creator, listed2.comments[0].root_cid], [false, true, ""]);
+assert.equal(listed2.comments[1].root_cid, "c1"); // a reply points at the comment it answers
+assert.equal(commentCalls[0].query.get("aweme_id"), "7535824345877220630");
+assert.equal(commentCalls[0].query.get("count"), "50");
+assert.equal(commentCalls[0].credentials, "include");
+assert.equal(commentCalls.length, 1); // max 3 reached inside the first page: no second request
+assert.deepEqual((await askComments({ itemId: "7535824345877220630", max: 60 })).comments.length, 4);
+assert.deepEqual(commentCalls.map((c) => c.query.get("cursor")), ["0", "0", "77"]);
+win.fetch = async () => ({ ok: true, text: async () => "" });
+assert.equal((await askComments({ itemId: "75", max: 10 })).ok, false); // empty answer = error, not "no comments"
+win.fetch = async () => ({ ok: true, text: async () => JSON.stringify({ status_code: 8, status_msg: "login" }) });
+assert.equal((await askComments({ itemId: "75", max: 10 })).ok, false);
+
+const published = [];
+win.fetch = async (url, init = {}) => {
+  const u = new URL(url);
+  if (u.pathname !== "/api/comment/publish/") throw new Error("unexpected request " + url);
+  published.push({ query: u.searchParams, method: init.method, headers: init.headers, body: init.body });
+  return { json: async () => ({ comment: { cid: "newcid1", text: u.searchParams.get("text"), create_time: 1793215000 } }) };
+};
+const askReply = (data) => new Promise((resolve) => {
+  win.postMessage = (m) => m.__vbtt === "replyCommentResult" && resolve(JSON.parse(JSON.stringify(m.result)));
+  listeners.forEach((f) => f({ source: page, data: { __vbtt: "replyComment", id: 9, ...data } }));
+});
+const answered = await askReply({ itemId: "7535", cid: "c1", text: "Ți-am trimis planul ✅" });
+assert.equal(answered.ok, true, answered.error);
+assert.equal(answered.cid, "newcid1");
+assert.equal(published[0].method, "POST");
+assert.equal(published[0].headers["content-type"], "application/x-www-form-urlencoded");
+assert.equal(published[0].query.get("aweme_id"), "7535");
+assert.equal(published[0].query.get("reply_id"), "c1");
+assert.equal(published[0].query.get("text"), "Ți-am trimis planul ✅");
+assert.equal(published[0].query.get("text_extra"), "[]");
+assert.equal(published[0].query.get("reply_to_reply_id"), null); // answering a top-level comment
+assert.match(published[0].body, /reply_id=c1/);
+// Answering a reply threads under the root, exactly as the web client does (HAR).
+await askReply({ itemId: "7535", cid: "c1r", rootCid: "c1", text: "ok" });
+assert.equal(published[1].query.get("reply_id"), "c1");
+assert.equal(published[1].query.get("reply_to_reply_id"), "c1r");
+assert.equal((await askReply({ itemId: "7535", cid: "c1", text: "   " })).ok, false); // an empty reply is refused here
+win.fetch = async () => ({ json: async () => ({ status_code: 10000, status_msg: "rate limit" }) });
+const rejected = await askReply({ itemId: "7535", cid: "c1", text: "hi" });
+assert.equal(rejected.ok, false);
+assert.match(rejected.error, /refused the reply/);
+
+const profiles = [];
+win.fetch = async (url) => {
+  const u = new URL(url);
+  if (u.pathname !== "/api/user/detail/") throw new Error("unexpected request " + url);
+  profiles.push(u.searchParams.get("uniqueId"));
+  return { json: async () => (u.searchParams.get("uniqueId") === "gigel"
+    ? { userInfo: { user: { uniqueId: "gigel", privateAccount: true } } }
+    : { statusCode: 10221, userInfo: {} }) };
+};
+const askPrivate = (who) => new Promise((resolve) => {
+  win.postMessage = (m) => m.__vbtt === "userPrivateResult" && resolve(JSON.parse(JSON.stringify(m.result)));
+  listeners.forEach((f) => f({ source: page, data: { __vbtt: "userPrivate", id: 10, uniqueId: who } }));
+});
+const priv = await askPrivate("@gigel");
+assert.deepEqual([priv.ok, priv.private, priv.username], [true, true, "gigel"]);
+assert.deepEqual(profiles, ["gigel"]); // the @ is stripped before asking
+assert.equal((await askPrivate("marius")).ok, false); // a profile that didn't come back is an error, not "not private"
+console.log("comments + reply: ok");

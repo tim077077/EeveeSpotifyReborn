@@ -19,6 +19,7 @@ import android.os.Looper
 import android.provider.Settings
 import android.text.InputType
 import android.util.TypedValue
+import android.view.Gravity
 import android.view.View
 import android.view.ViewGroup
 import android.widget.Button
@@ -31,9 +32,12 @@ import android.widget.LinearLayout
 import android.widget.ScrollView
 import android.widget.TextView
 import android.widget.Toast
+import com.slidemill.core.AutoReplySettings
 import com.slidemill.core.Engine
+import com.slidemill.core.ReplyRule
 import com.slidemill.core.TikTokTab
 import com.slidemill.core.copyObj
+import com.slidemill.core.int
 import com.slidemill.core.long
 import com.slidemill.core.objAt
 import com.slidemill.core.objs
@@ -66,6 +70,9 @@ class MainActivity : Activity() {
     private var current = ""
     private val main = Handler(Looper.getMainLooper())
     private val io = Executors.newSingleThreadExecutor()
+
+    /** Empty keyword rows shown in the auto-reply card; nothing is saved until they have a keyword. */
+    private var blankRules = 0
     private lateinit var engine: Engine
 
     private var relayState: TextView? = null
@@ -304,6 +311,15 @@ class MainActivity : Activity() {
             12f, muted,
         ))
 
+        // 6. Auto-reply to comments
+        col.addView(heading("6. Answer comments for me"))
+        col.addView(label(
+            "The phone reads the comments on your own posts from the last 7 days every minute and answers the ones that contain a keyword you set below. Nobody has to tap anything. " +
+                "Matching ignores case, accents and one typo (plan, PLAN, pln). Every comment is answered at most once ever, and the replies below rotate.",
+            13f, muted,
+        ), spaced(6))
+        col.addView(autoReplyCard(), spaced(6))
+
         // What Claude made
         col.addView(heading("Drafts"))
         showsList = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL }.also { col.addView(it, spaced(6)) }
@@ -350,6 +366,163 @@ class MainActivity : Activity() {
             val who = if (slot == com.slidemill.core.Accounts.NO_LOGIN) "no login" else accountName(slot)
             toast(if (key == "research_account") "Research now runs on $who." else "Claude now posts to $who by default.")
         }
+    }
+
+    // ---- the auto-reply card: the keywords, what to answer, and what it has answered ----------------
+
+    /**
+     * The auto-reply editor: one card per keyword (the word a comment must contain, the replies it
+     * rotates through, and what to say when that commenter's account is private), the caps, and a log
+     * of what the phone answered on its own. Saving redraws the tab where it was.
+     */
+    private fun autoReplyCard(): View {
+        val settings = engine.autoReplySettings()
+        val box = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL }
+
+        fun input(value: String, hint: String, lines: Int = 1) = field(hint).apply {
+            setText(value)
+            if (lines > 1) {
+                inputType = InputType.TYPE_CLASS_TEXT or InputType.TYPE_TEXT_FLAG_MULTI_LINE
+                minLines = lines
+                gravity = Gravity.TOP
+            }
+        }
+
+        fun number(value: Int, hint: String) = input(value.toString(), hint).apply {
+            inputType = InputType.TYPE_CLASS_NUMBER
+            layoutParams = LinearLayout.LayoutParams(dp(72), ViewGroup.LayoutParams.WRAP_CONTENT)
+        }
+
+        val onOff = CheckBox(this).apply {
+            text = "Answer comments that contain my keywords, without asking me"
+            setTextColor(ink)
+            isChecked = settings.enabled
+        }
+        val gapFrom = number(settings.minGapSec, "60")
+        val gapTo = number(settings.maxGapSec, "180")
+        val perHour = number(settings.maxPerHour, "20")
+        val perDay = number(settings.maxPerDay, "50")
+        val keywords = ArrayList<EditText>()
+        val answers = ArrayList<EditText>()
+        val privateOnes = ArrayList<EditText>()
+
+        fun collected(): List<ReplyRule> = keywords.indices.mapNotNull { i ->
+            val key = AutoReplySettings.clean(keywords[i].text.toString())
+            val replies = answers[i].text.toString().split('\n').map { it.trim() }.filter { it.isNotEmpty() }
+            if (key.isEmpty() || replies.isEmpty()) null else ReplyRule(key, replies, privateOnes[i].text.toString().trim())
+        }
+
+        fun current(rules: List<ReplyRule>): AutoReplySettings = AutoReplySettings.from(
+            settings.copy(
+                enabled = onOff.isChecked,
+                minGapSec = gapFrom.text.toString().trim().toIntOrNull() ?: settings.minGapSec,
+                maxGapSec = gapTo.text.toString().trim().toIntOrNull() ?: settings.maxGapSec,
+                maxPerHour = perHour.text.toString().trim().toIntOrNull() ?: settings.maxPerHour,
+                maxPerDay = perDay.text.toString().trim().toIntOrNull() ?: settings.maxPerDay,
+                rules = rules,
+            ).toObj(),
+        )
+
+        /** Save, then redraw with [blank] empty rows and say what happened. */
+        fun commit(s: AutoReplySettings, blank: Int, message: String) = io.execute {
+            engine.saveAutoReply(s)
+            main.post {
+                blankRules = blank
+                toast(message)
+                redraw()
+            }
+        }
+
+        onOff.setOnCheckedChangeListener { _, on ->
+            io.execute {
+                engine.saveAutoReply(current(collected()).copy(enabled = on))
+                main.post { toast(if (on) "Auto-reply is on: matching comments get answered by themselves." else "Auto-reply is off.") }
+            }
+        }
+
+        val rows = settings.rules + List(blankRules) { ReplyRule() }
+        val cards = rows.withIndex().map { (i, rule) ->
+            val key = input(rule.match, "PLAN").also { keywords.add(it) }
+            val answer = input(rule.replies.joinToString("\n"), "one reply per line; they rotate", 3).also { answers.add(it) }
+            val privateReply = input(rule.privateReply, "sent instead when their account is private (blank = off)").also { privateOnes.add(it) }
+            LinearLayout(this).apply {
+                orientation = LinearLayout.VERTICAL
+                setBackgroundColor(panel)
+                setPadding(dp(10), dp(10), dp(10), dp(10))
+                addView(label("A comment must contain", 11f, muted))
+                addView(key, spaced(2))
+                addView(label("Answer with (one per line — they rotate)", 11f, muted), spaced(8))
+                addView(answer, spaced(2))
+                addView(label("If their account is private", 11f, muted), spaced(8))
+                addView(privateReply, spaced(2))
+                addView(row(
+                    button("Save", secondary = true) { commit(current(collected()), 0, "Saved.") },
+                    button("Remove", secondary = true) { commit(current(collected().filterIndexed { j, _ -> j != i }), 0, "Keyword removed.") },
+                ), spaced(8))
+            }
+        }
+
+        box.addView(onOff, spaced(4))
+        box.addView(label("Keywords", 13f, ink, bold = true), spaced(12))
+        cards.forEach { box.addView(it, spaced(8)) }
+        box.addView(button("Add a keyword", secondary = true) {
+            commit(current(collected()), 1, "Type the keyword and its replies, then Save.")
+        }, spaced(8))
+        box.addView(row(
+            label("Max an hour", 11f, muted), perHour,
+            label("a day", 11f, muted), perDay,
+            label("and wait", 11f, muted), gapFrom, label("to", 11f, muted), gapTo, label("s", 11f, muted),
+        ), spaced(10))
+        box.addView(button("Save") { commit(current(collected()), 0, "Saved: ${collected().size} keyword(s).") }, spaced(6))
+        box.addView(button("Check the comments now", secondary = true) {
+            io.execute {
+                engine.saveAutoReply(current(collected()))
+                val out = engine.autoReplier.runOnce()
+                main.post {
+                    val waiting = out.str("waiting")
+                    toast(
+                        when {
+                            out.str("error").isNotEmpty() -> "Nothing done: ${out.str("error")}"
+                            else -> "${out.int("comments")} comments read, ${out.int("replied")} answered" +
+                                if (waiting.isEmpty()) "" else " (held back: $waiting)"
+                        },
+                    )
+                    redraw()
+                }
+            }
+        }, spaced(8))
+
+        val last = engine.replies.lastRun()
+        box.addView(label(
+            if (last == null) "Not checked yet."
+            else "Last check ${whenText(last.long("at") / 1000)}: ${last.int("replied")} answered, ${last.int("comments")} comments read." +
+                last.str("error").let { if (it.isEmpty()) "" else " — ${it}" },
+            12f, muted,
+        ), spaced(12))
+        box.addView(label("Sent: ${engine.replies.sentLastHour()} in the last hour, ${engine.replies.sentToday()} today.", 12f, muted))
+        val sent = engine.replies.recent(8)
+        if (sent.isEmpty()) {
+            box.addView(label("No automatic replies yet.", 12f, muted), spaced(6))
+        } else {
+            for (r in sent) {
+                box.addView(label(
+                    "${whenText(r.long("at") / 1000)}  @${r.str("author")}  \"${r.str("comment").take(70)}\"\n    → ${r.str("text")}",
+                    12f, ink,
+                ), spaced(6))
+            }
+        }
+        box.addView(label(
+            "Replying from your own logged-in tab uses TikTok's private web endpoints, which is against TikTok's terms. Keep the caps low and use an account you can afford to lose.",
+            12f, muted,
+        ), spaced(12))
+        return box
+    }
+
+    /** Redraw the Slidemill tab where it was, so a tap visibly did something. */
+    private fun redraw() {
+        val y = (content.getChildAt(0) as? ScrollView)?.scrollY ?: 0
+        show("Slidemill")
+        (content.getChildAt(0) as? ScrollView)?.post { (content.getChildAt(0) as? ScrollView)?.scrollTo(0, y) }
     }
 
     private fun refresh() {

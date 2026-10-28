@@ -13,6 +13,7 @@ class Store(private val db: Db, private val platform: Platform) {
             "claude_schedules" to listOf(), // "0": schedule_slideshow only proposes; anything else (the default): Claude schedules itself
             "default_account" to listOf(), // TikTok username Claude's slideshows go to when it names none ("" = the main tab)
             "research_account" to listOf(), // TikTok username whose session does research (search, other accounts) ("" = the main tab)
+            "auto_reply" to listOf(), // the automatic comment replies: keywords, what to answer, caps (JSON)
         )
         val SECRET_KEYS = setOf("image_api_key", "pexels_api_key", "unsplash_access_key")
 

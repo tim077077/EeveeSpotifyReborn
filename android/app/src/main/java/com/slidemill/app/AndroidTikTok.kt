@@ -26,6 +26,8 @@ class AndroidTikTok(private val context: Context, override val id: String = TikT
         private const val DRAFT_MS = 4 * 60_000L
         private const val LIST_MS = 60_000L
         private const val USER_LIST_MS = 90_000L
+        private const val REPLY_MS = 30_000L
+        private const val PROFILE_MS = 15_000L
 
     }
 
@@ -83,6 +85,31 @@ class AndroidTikTok(private val context: Context, override val id: String = TikT
         val items = Json.parse(result.optJSONArray("items")?.toString() ?: "[]") as? List<*> ?: return null
         @Suppress("UNCHECKED_CAST")
         return items.filterIsInstance<Map<*, *>>().map { (it as Map<String, Any?>).toMutableMap() }
+    }
+
+    /** The comments on one of the account's own posts, read by this tab's logged-in page (tiktok-inject.js comments). */
+    override fun comments(itemId: String, max: Int): List<Obj>? {
+        if (username().isEmpty()) return null
+        val result = ask("comments", JSONObject().put("itemId", itemId).put("max", max), LIST_MS) ?: return null
+        if (!result.optBoolean("ok")) throw DraftError("TikTok didn't list the comments: ${result.optString("error", "unknown error")}")
+        val items = Json.parse(result.optJSONArray("comments")?.toString() ?: "[]") as? List<*> ?: return null
+        @Suppress("UNCHECKED_CAST")
+        return items.filterIsInstance<Map<*, *>>().map { (it as Map<String, Any?>).toMutableMap() }
+    }
+
+    /** Answer one comment publicly, as the logged-in account (tiktok-inject.js replyComment). */
+    override fun replyToComment(itemId: String, cid: String, rootCid: String, text: String): String? {
+        val result = ask("replyComment", JSONObject().put("itemId", itemId).put("cid", cid).put("rootCid", rootCid).put("text", text), REPLY_MS) ?: return null
+        if (!result.optBoolean("ok")) throw DraftError("TikTok refused the reply: ${result.optString("error", "unknown error")}")
+        return result.optString("cid")
+    }
+
+    /** Whether that commenter's account is private (tiktok-inject.js userPrivate); null when it can't be told. */
+    override fun isPrivate(username: String): Boolean? {
+        if (username.isEmpty()) return null
+        val result = ask("userPrivate", JSONObject().put("uniqueId", username), PROFILE_MS) ?: return null
+        if (!result.optBoolean("ok")) return null
+        return result.optBoolean("private")
     }
 
     /** Hand one job to tiktok-inject.js (upload the slides, then draft or publish) and wait for TikTok's answer. */

@@ -223,6 +223,17 @@ Save tokens: don't repeat calls whose answer you already have in this conversati
             }
         },
 
+        "auto_reply" to Tool(
+            "The phone's automatic comment replies, sent by itself: status (default) lists the keywords and what went out; set adds or replaces one keyword (keyword + replies, one per line, which rotate); remove, on, off.",
+            input(
+                listOf(),
+                "action" to str("status, set, remove, on or off.", listOf("status", "set", "remove", "on", "off")),
+                "keyword" to str("The word a comment must contain (set/remove). Case, accents and one typo don't matter."),
+                "replies" to str("What to answer, one per line (set)."),
+                "private_reply" to str("Sent instead if that commenter's account is private (set)."),
+            ),
+        ) { a -> autoReplyTool(a) },
+
         "phone_status" to Tool(
             "Phone readiness: TikTok account, background source, library size, phone time, autopilot.",
             input(),
@@ -628,6 +639,57 @@ Save tokens: don't repeat calls whose answer you already have in this conversati
         val report = e.analytics.report(weeks, posts, predicted = e.predictedByPost(), username = user)
         if (note.isNotEmpty()) report["refresh"] = note
         return lean(report)
+    }
+
+    /**
+     * The auto-reply keywords and what the phone has done with them: the same state the app's Auto-reply
+     * card shows, and how a keyword gets set without the phone in hand.
+     */
+    private fun autoReplyTool(a: Obj): Any? {
+        val action = a.str("action", "status").lowercase().ifEmpty { "status" }
+        var settings = e.autoReplySettings()
+        when (action) {
+            "status" -> {}
+            "set" -> {
+                val keyword = AutoReplySettings.clean(a.str("keyword"))
+                if (keyword.isEmpty()) throw ToolError("Give keyword: the word a comment must contain (for example PLAN).")
+                val replies = a.str("replies").split('\n', ',').map { it.trim() }.filter { it.isNotEmpty() }
+                if (replies.isEmpty()) throw ToolError("Give replies for '$keyword': what to answer, one per line.")
+                settings = settings.with(keyword, replies, a.str("private_reply"))
+            }
+            "remove" -> {
+                val keyword = AutoReplySettings.clean(a.str("keyword"))
+                if (keyword.isEmpty()) throw ToolError("Give keyword: which one to remove.")
+                if (settings.rule(keyword) == null) throw ToolError("No keyword '$keyword' is set.")
+                settings = settings.without(keyword)
+            }
+            "on" -> settings = settings.copy(enabled = true)
+            "off" -> settings = settings.copy(enabled = false)
+            else -> throw ToolError("action must be status, set, remove, on or off.")
+        }
+        if (action != "status") e.saveAutoReply(settings)
+        val book = e.replies
+        val now = Db.nowMs()
+        val wait = book.nextAllowed() - now
+        return lean(obj(
+            "enabled" to settings.enabled,
+            "rules" to settings.rules.map { r ->
+                obj("keyword" to r.match, "replies" to r.replies, "private_reply" to r.privateReply.ifEmpty { null }, "on" to r.enabled)
+            }.toMutableList<Any?>(),
+            "sent_today" to book.sentToday(now),
+            "sent_last_hour" to book.sentLastHour(now),
+            "next_reply" to if (wait > 0) "in ${wait / 1000}s" else "at the next check (a pass every minute)",
+            "blocked" to book.blocked(settings, now).ifEmpty { null },
+            "caps" to obj(
+                "per_hour" to settings.maxPerHour, "per_day" to settings.maxPerDay,
+                "gap_sec" to "${settings.minGapSec}-${settings.maxGapSec}",
+                "typos_allowed" to settings.typos,
+            ),
+            "reads" to "the account's own posts from the last ${settings.postsDays} days",
+            "last_replies" to book.recent(5).map { r ->
+                obj("at" to Db.iso(r.long("at")), "author" to r.str("author"), "comment" to r.str("comment"), "reply" to r.str("text"), "keyword" to r.str("keyword"))
+            }.toMutableList<Any?>(),
+        ))
     }
 
     private fun status(): String {

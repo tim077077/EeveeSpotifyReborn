@@ -26,6 +26,15 @@ class Engine(val platform: Platform, val dataDir: File) {
     val analytics = Analytics(db, platform).also { a -> a.profile = { user -> library.fetchProfile(user) } }
     val relay = Relay(this)
 
+    /** The automatic comment replies: the reply log, and the pass that answers matching comments. */
+    val replies = ReplyBook(db)
+    val autoReplier = AutoReplier(this)
+
+    /** The user's auto-reply keywords and caps, as the app's Auto-reply card saves them. */
+    fun autoReplySettings(): AutoReplySettings = AutoReplySettings.fromJson(store.get(AutoReplySettings.KEY))
+
+    fun saveAutoReply(settings: AutoReplySettings) = store.setMany(mapOf(AutoReplySettings.KEY to settings.toJson()))
+
     /** The phone's logged-in TikTok sessions, one per account, by [TikTokTab.id]. */
     val tabs = java.util.concurrent.ConcurrentHashMap<String, TikTokTab>()
 
@@ -44,6 +53,9 @@ class Engine(val platform: Platform, val dataDir: File) {
     /** Snapshots the user's TikTok numbers every few hours, so Analytics can show growth over time. */
     private val ticker = Executors.newSingleThreadScheduledExecutor { r -> Thread(r, "slidemill-analytics").apply { isDaemon = true } }
 
+    /** Answers matching comments on its own, on this phone, with nobody watching. */
+    private val replier = Executors.newSingleThreadScheduledExecutor { r -> Thread(r, "slidemill-replies").apply { isDaemon = true } }
+
     init {
         studio.recoverInterrupted()
     }
@@ -55,6 +67,12 @@ class Engine(val platform: Platform, val dataDir: File) {
                 runCatching { platform.awake { analytics.refresh(tab) } }.onFailure { platform.log("analytics refresh of ${tab.id} skipped: ${it.message}") }
             }
         }, 2, 180, TimeUnit.MINUTES)
+        // Every minute: a pass that reads the comments and answers the ones matching a keyword. It does
+        // nothing at all while auto-reply is off, and the caps and the gap inside AutoReplier stop it
+        // from replying faster than the user allowed.
+        replier.scheduleWithFixedDelay({
+            runCatching { platform.awake { autoReplier.runOnce() } }.onFailure { platform.log("auto-reply pass skipped: ${it.message}") }
+        }, 45, 60, TimeUnit.SECONDS)
     }
 
     /** Slideshows posted from Slidemill, by TikTok post id: their slideshow id and predicted score. */
@@ -71,6 +89,7 @@ class Engine(val platform: Platform, val dataDir: File) {
     fun stop() {
         relay.stop()
         ticker.shutdownNow()
+        replier.shutdownNow()
         work.shutdownNow()
     }
 }
