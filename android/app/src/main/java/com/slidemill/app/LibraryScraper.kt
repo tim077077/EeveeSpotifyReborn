@@ -10,6 +10,7 @@ import android.webkit.WebView
 import android.webkit.WebViewClient
 import com.slidemill.core.Json
 import com.slidemill.core.Obj
+import com.slidemill.core.TikTokTab
 import com.slidemill.core.str
 import java.io.ByteArrayInputStream
 import java.net.HttpURLConnection
@@ -37,6 +38,10 @@ object LibraryScraper {
 
     /** [via] is the account slot whose login (WebView profile and cookies) the page uses; "" is the main one. */
     private fun scrape(context: Context, url: String, apiPath: String, max: Int, via: String, timeoutMs: Long): List<Obj> {
+        // Without separate profiles, "no login" would quietly use the main account's cookies.
+        if (via.isNotEmpty() && via != TikTokTab.MAIN && !TikTokWeb.multiSupported()) {
+            throw IllegalStateException("This phone's WebView can't keep research apart from your login. Update \"Android System WebView\" in the Play Store.")
+        }
         val items = ConcurrentHashMap<String, Obj>()
         val done = CountDownLatch(1)
         var web: WebView? = null

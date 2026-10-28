@@ -73,6 +73,7 @@ The phone can hold several TikTok logins at once. In the app's **TikTok** tab, t
 - `analytics` reports one account at a time.
 - `phone_status` lists the logged-in accounts and which is the default and which does research.
 - **Research account:** `discover_slideshows` and `add_to_library` search TikTok and open other people's profiles, which is the bot-like part. Pick a spare account for it in the app (**Research with it**), so the accounts you post from never do it.
+- **No login:** **Research with no login** runs research in a WebView profile nobody logs in to, so no account is at risk. Tested logged out (Oct 2026, from a server): search showed a login wall; a profile's post list came back empty; hashtag pages listed about 180 posts but no photo carousels, even on #photocarousel. So it usually finds nothing, and `discover_slideshows` says so. A phone's home connection may do better; a spare account is the dependable choice.
 
 Every account still runs from one phone and one IP address, which TikTok can link. Use separate accounts for separate niches, never post the same slideshow to two of them, and keep anything you can't afford to lose off this setup.
 

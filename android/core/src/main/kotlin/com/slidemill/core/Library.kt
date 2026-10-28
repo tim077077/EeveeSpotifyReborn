@@ -308,7 +308,10 @@ class Library(
             imported += line
             pause()
         }
+        val note = if (slot == Accounts.NO_LOGIN && found.isEmpty()) "Nothing found with no login: TikTok hides search results and photo posts from " +
+            "logged-out visitors. In the Slidemill app, pick a spare TikTok account for research (Slidemill tab → Research with it), then try again." else ""
         return obj(
+            "note" to note,
             "searched" to searched,
             "slideshows_found" to found.size.toLong(),
             "accounts_found" to ranked.size.toLong(),

@@ -8,6 +8,15 @@ import java.util.concurrent.ConcurrentHashMap
  * a tab takes a few seconds.
  */
 class Accounts(private val e: Engine) {
+    companion object {
+        /**
+         * Research with no TikTok login at all: a WebView profile nobody logs in to, so no account is at
+         * risk. TikTok shows logged-out visitors no search results and few or no photo posts, so this mode
+         * often finds nothing; [Library.discover] says so.
+         */
+        const val NO_LOGIN = "nologin"
+    }
+
     private val names = ConcurrentHashMap<String, String>() // slot -> username
 
     /** [tab]'s logged-in username, asked fresh and cached; "" when logged out. Keeps the cached one if the page doesn't answer. */
@@ -52,5 +61,7 @@ class Accounts(private val e: Engine) {
      * "" = the main tab.
      */
     fun researchSlot(): String = e.store.get("research_account").takeIf { it.isNotEmpty() }
-        ?.let { runCatching { tab(it).id }.getOrNull() } ?: ""
+        ?.let { if (it == NO_LOGIN) NO_LOGIN else runCatching { tab(it).id }.getOrNull() } ?: ""
+
+    fun researchWithoutLogin(): Boolean = e.store.get("research_account") == NO_LOGIN
 }

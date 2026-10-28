@@ -327,12 +327,13 @@ Save tokens: don't repeat calls whose answer you already have in this conversati
     private fun discover(queries: List<String>, accounts: Int, perAccount: Int): String {
         if (queries.none { it.isNotBlank() }) throw ToolError("queries is empty")
         val research = e.store.get("research_account")
-        val user = tab(research).username().ifEmpty { throw ToolError("Not logged in to TikTok on the phone: TikTok's search needs it. Open Slidemill → TikTok and log in.") }
+        val user = if (e.accounts.researchWithoutLogin()) "no login"
+        else "@" + tab(research).username().ifEmpty { throw ToolError("Not logged in to TikTok on the phone: TikTok's search needs it. Open Slidemill → TikTok and log in.") }
         val res = within {
             e.library.discover(queries.take(5), accounts, perAccount).also { r ->
                 e.db.tx { (get("state", "discover") ?: insert("state", obj("id" to "discover")))["last"] = r.copyObj().also { it["at"] = Db.iso(Db.nowMs()) } }
             }
-        } ?: return "Still exploring on the phone as @$user (searching TikTok, then reading each account's posts). " +
+        } ?: return "Still exploring on the phone as $user (searching TikTok, then reading each account's posts). " +
             "Call carousel_formats in a few minutes; discover_slideshows' summary is in the state then too."
         val unread = e.library.unread(100).size
         return lean(res) + "\n\nNext: carousel_formats" + if (unread > 0) " (and read_library_slides: $unread slideshows have no slide text yet, which hook and words-per-slide need)." else "."
@@ -580,8 +581,9 @@ Save tokens: don't repeat calls whose answer you already have in this conversati
     private fun status(): String {
         val tabs = e.accounts.list(fresh = true)
         val default = e.accounts.default()?.id
-        val research = e.store.get("research_account").takeIf { it.isNotEmpty() }?.let { runCatching { e.accounts.tab(it).id }.getOrNull() } ?: default
-        val accounts = tabs.map { a ->
+        val research = if (e.accounts.researchWithoutLogin()) null
+        else e.store.get("research_account").takeIf { it.isNotEmpty() }?.let { runCatching { e.accounts.tab(it).id }.getOrNull() } ?: default
+        val accounts = (if (e.accounts.researchWithoutLogin()) listOf("research: no login (only public pages)") else emptyList()) + tabs.map { a ->
             val name = a.str("username").let { if (it.isEmpty()) "${a.str("slot")}: not logged in" else "@$it" }
             name + listOfNotNull(if (a.str("slot") == default) "default" else null, if (a.str("slot") == research) "research" else null)
                 .takeIf { it.isNotEmpty() }?.joinToString(prefix = " (", postfix = ")").orEmpty()
