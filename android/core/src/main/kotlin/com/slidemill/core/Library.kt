@@ -254,6 +254,67 @@ class Library(
         return setOf(pid)
     }
 
+    /**
+     * Explore: search TikTok for each query, keep the slideshows, and import the [accounts] accounts behind
+     * the ones that reached furthest beyond their own followers (views per follower), with up to
+     * [postsPerAccount] posts each. A whole account is needed: lift compares a post with its own
+     * account's usual views. Accounts already in the library are skipped.
+     */
+    fun discover(queries: List<String>, accounts: Int, postsPerAccount: Int): Obj {
+        val searched = arr()
+        val found = mutableListOf<Obj>()
+        for (q in queries.map { it.trim() }.filter { it.isNotEmpty() }.distinct()) {
+            val posts = try {
+                platform.searchPosts(q, 60).map { normalizeWebItem(it) }
+            } catch (e: Exception) {
+                searched += obj("query" to q, "error" to (e.message ?: e.toString()))
+                continue
+            }
+            val slideshows = posts.filter { it.bool("is_slideshow") && it.str("username").isNotEmpty() }
+            slideshows.forEach { it["query"] = q }
+            found += slideshows
+            searched += obj("query" to q, "results" to posts.size.toLong(), "slideshows" to slideshows.size.toLong())
+            pause()
+        }
+        val known = db.tx {
+            where("library_posts") { it.bool("is_slideshow") }.groupBy { it.str("profile_id") }.filter { it.value.size >= 3 }
+                .keys.mapNotNull { get("library_profiles", it)?.str("username") }.toSet()
+        }
+        val ranked = found.groupBy { it.str("username") }.map { (user, ps) -> Triple(user, ps, ps.maxOf { reach(it) }) }
+            .sortedByDescending { it.third }
+        val imported = arr()
+        for ((user, ps, r) in ranked.filter { it.first !in known }.take(accounts.coerceIn(0, 10))) {
+            val best = ps.maxBy { reach(it) }
+            val line = obj(
+                "username" to user, "found_by" to ps.map { it.str("query") }.distinct().toMutableList<Any?>(),
+                "best_hit_views" to best.long("views"), "followers" to best.objAt("author").long("followers"),
+                "views_per_follower" to Methods.round2(r),
+            )
+            try {
+                importProfile(user, postsPerAccount)
+                db.tx {
+                    where("library_profiles") { it.str("username") == user }.firstOrNull()?.let { p ->
+                        if (p.str("niche").isEmpty()) p["niche"] = ps.first().str("query")
+                        line["slideshows_in_library"] = where("library_posts") { it.str("profile_id") == p.str("id") && it.bool("is_slideshow") }.size.toLong()
+                    }
+                }
+            } catch (e: Exception) {
+                line["error"] = e.message ?: e.toString()
+            }
+            imported += line
+            pause()
+        }
+        return obj(
+            "searched" to searched,
+            "slideshows_found" to found.size.toLong(),
+            "accounts_found" to ranked.size.toLong(),
+            "already_in_library" to ranked.count { it.first in known }.toLong(),
+            "imported" to imported,
+        )
+    }
+
+    private fun reach(p: Obj): Double = p.long("views").toDouble() / p.objAt("author").long("followers").coerceAtLeast(100)
+
     /** Daily refresh of tracked profiles (stats + new posts). */
     fun refreshAll(maxPosts: Int = 20) {
         val names = db.tx { all("library_profiles").map { it.str("username") } }

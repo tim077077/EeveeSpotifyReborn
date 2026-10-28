@@ -25,6 +25,7 @@ class AndroidPlatform(private val context: Context) : Platform {
     override fun decryptSecret(stored: String) = Secrets.decrypt(stored)
 
     override fun listProfilePosts(username: String, max: Int): List<Obj> = LibraryScraper.profilePosts(context, username, max)
+    override fun searchPosts(query: String, max: Int): List<Obj> = LibraryScraper.searchPosts(context, query, max)
 
     override fun <T> awake(block: () -> T): T {
         val lock = context.getSystemService(PowerManager::class.java)
