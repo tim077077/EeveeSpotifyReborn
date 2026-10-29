@@ -77,7 +77,7 @@ class McpCostTest {
     companion object {
         // Before slimming (Oct 2026): tools 3924, analytics 5344, create 3451, view 3451, predict 4293, list 335.
         val BUDGET = mapOf(
-            "tools/list + instructions" to 3400, // 3200 until auto_reply (Oct 2026); 3000 until view_post (Oct 2026) "analytics" to 2500, "create_slideshow (7 slides)" to 1500, "view_slideshow" to 1500,
+            "tools/list + instructions" to 3650, // 3400 until pinterest (Oct 2026), 3200 until auto_reply, 3000 until view_post "analytics" to 2500, "create_slideshow (7 slides)" to 1500, "view_slideshow" to 1500,
             "predict_virality (brief)" to 2500, "predict_virality (brief, slides seen)" to 1200, "list_slideshows (10)" to 300,
         )
     }

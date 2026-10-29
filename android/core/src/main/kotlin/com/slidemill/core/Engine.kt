@@ -15,8 +15,9 @@ class Engine(val platform: Platform, val dataDir: File) {
     val store = Store(db, platform)
     val imageGen = ImageGen(store)
     val images = Images(db, store, platform, mediaDir)
+    val pinterest = Pinterest()
     val renderer = Renderer(platform.imaging, mediaDir)
-    val studio = Studio(db, platform, mediaDir, imageGen, images, renderer)
+    val studio = Studio(db, platform, mediaDir, imageGen, images, renderer, pinterest)
     val library = Library(db, images, platform).also { l ->
         l.via = { accounts.researchSlot() }
         l.researchTab = { accounts.researchSlot().let { s -> if (s == Accounts.NO_LOGIN) null else tabs[s.ifEmpty { TikTokTab.MAIN }] } }
