@@ -4,6 +4,8 @@ A self-hosted TikTok slideshow factory. Describe what you want and it plans the 
 
 It was built by tearing down how reel.farm works; see [docs/REELFARM_TEARDOWN.md](docs/REELFARM_TEARDOWN.md).
 
+**Start here:** [docs/USER_GUIDE.md](docs/USER_GUIDE.md) - every screen, every tool Claude can call (21 of them), the guards, and what to do when something refuses.
+
 ## Features
 
 - **Studio.** Type something like "glow-up slideshows for girls 16–22, soft pink aesthetic, 6 slides". It plans a content format (voice, slide structure, visual style and a set of hooks), then makes N complete slideshows with text and AI-generated or stock backgrounds. One checkbox turns the format into an automation that keeps posting.
