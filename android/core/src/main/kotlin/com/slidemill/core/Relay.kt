@@ -43,7 +43,7 @@ class Relay(private val e: Engine) {
 
     val mcp = Mcp(e)
     private val http = OkHttpClient.Builder()
-        .pingInterval(30, TimeUnit.SECONDS) // also notices a dead connection
+        .pingInterval(25, TimeUnit.SECONDS) // also notices a dead connection
         .readTimeout(0, TimeUnit.MILLISECONDS)
         .build()
     private val daemon = java.util.concurrent.ThreadFactory { r -> Thread(r, "relay").apply { isDaemon = true } }
@@ -57,6 +57,9 @@ class Relay(private val e: Engine) {
     @Volatile private var detail = ""
     @Volatile var handled = 0
         private set
+    @Volatile private var lastHeardMs = 0L // the last time the relay sent anything (or the socket opened)
+    private val inFlight = java.util.concurrent.atomic.AtomicInteger()
+    private val drops = java.util.concurrent.ConcurrentLinkedDeque<Pair<Long, String>>() // (time, why), the last 24 h
 
     private fun saved(): Obj = e.db.tx { get("state", "relay")?.copyObj() } ?: obj()
 
@@ -82,7 +85,35 @@ class Relay(private val e: Engine) {
             "state" to if (base.isEmpty()) "off" else state,
             "detail" to detail,
             "handled" to handled,
+            "drops_24h" to dropsSince(Db.nowMs() - 24 * 3600_000L),
+            "last_drop" to drops.peekLast()?.let { (at, why) -> "$why (${java.time.Instant.ofEpochMilli(at)})" },
         )
+    }
+
+    private fun dropsSince(ms: Long): Int {
+        while (drops.peekFirst()?.let { it.first < ms } == true) drops.pollFirst()
+        return drops.size
+    }
+
+    val connected: Boolean get() = state == "connected"
+
+    /**
+     * Called when the phone wakes up (a Doze-proof alarm, the network coming back): while it slept,
+     * the reconnect timers didn't run and the socket may have died without noticing. Reconnects now
+     * if offline, and replaces a socket that has been quiet longer than [quietMs] (unless a request
+     * is running on it). Returns whether a new connection was started.
+     */
+    fun ensureConnected(quietMs: Long = 9 * 60_000L): Boolean {
+        if (url.isEmpty()) return false
+        val stale = synchronized(lock) {
+            when (state) {
+                "connected" -> inFlight.get() == 0 && Db.nowMs() - lastHeardMs > quietMs
+                "connecting" -> false
+                else -> true
+            }
+        }
+        if (stale) start()
+        return stale
     }
 
     /** Set (or clear, with "") the relay address and (re)connect. */
@@ -136,6 +167,7 @@ class Relay(private val e: Engine) {
     private fun reconnectLater(gen: Int, why: String) {
         synchronized(lock) {
             if (gen != generation) return
+            if (state == "connected") drops.addLast(Db.nowMs() to why)
             state = "offline"
             detail = why
             socket = null
@@ -179,17 +211,24 @@ class Relay(private val e: Engine) {
             state = "connected"
             detail = ""
             backoff = 2
+            lastHeardMs = Db.nowMs()
             e.platform.log("relay connected")
         }
 
         override fun onMessage(webSocket: WebSocket, text: String) {
+            lastHeardMs = Db.nowMs()
             val msg = runCatching { Json.parseObj(text) }.getOrNull() ?: return
             if (msg.str("t") == "queued") return runQueued(webSocket, msg)
             if (msg.str("t") != "req") return
+            inFlight.incrementAndGet()
             work.submit {
-                val reply = e.platform.awake {
-                    runCatching { mcp.handle(msg.str("method"), msg.str("body")) }
-                        .getOrElse { Mcp.Reply(500, Json.write(obj("jsonrpc" to "2.0", "id" to null, "error" to obj("code" to -32603, "message" to (it.message ?: "failed"))))) }
+                val reply = try {
+                    e.platform.awake {
+                        runCatching { mcp.handle(msg.str("method"), msg.str("body")) }
+                            .getOrElse { Mcp.Reply(500, Json.write(obj("jsonrpc" to "2.0", "id" to null, "error" to obj("code" to -32603, "message" to (it.message ?: "failed"))))) }
+                    }
+                } finally {
+                    inFlight.decrementAndGet()
                 }
                 handled++
                 val id = msg.str("id")

@@ -37,6 +37,9 @@ interface Platform {
     /** Keep the device awake while `block` runs (Claude asked for something through the relay). */
     fun <T> awake(block: () -> T): T = block()
 
+    /** Whether Android lets the app run freely with the screen off (null = not a phone / unknown). */
+    fun batteryUnrestricted(): Boolean? = null
+
     fun defaultTimezone(): String = ZoneId.systemDefault().id
 
     fun log(message: String) = println("slidemill: $message")

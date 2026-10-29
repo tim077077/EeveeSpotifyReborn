@@ -37,6 +37,8 @@ class AndroidPlatform(private val context: Context) : Platform {
         }
     }
 
+    override fun batteryUnrestricted(): Boolean = Keepalive.unrestricted(context)
+
     override fun defaultTimezone(): String = ZoneId.systemDefault().id
 
     override fun log(message: String) {

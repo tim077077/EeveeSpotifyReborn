@@ -56,7 +56,7 @@ On the phone:
 | `import_slides` | Use finished slide images Claude made itself (https links, or small `data:image` URIs): stored as they are, in order; with `save_draft: true`, saved to TikTok drafts in the same call. The relay takes about 1 MB per call, so inline images must be small; links have no such limit |
 | `save_draft` | Save a slideshow to TikTok Studio drafts now; answers with TikTok's draft id or why it failed |
 | `schedule_slideshow` | Pick when a slideshow goes live on TikTok Studio's own schedule (15 minutes to 30 days ahead). Autopilot by default: it schedules directly, and the post goes public with no approval (at least 2 hours apart, at most 4 in 24 hours). With autopilot turned off in the app, it only proposes the time for the user's one-tap approval |
-| `view_post` | One of your own posted TikToks (post id from `analytics`): its numbers and, for a carousel, its real slides as posted, tiled on one image (downloaded once, then kept) |
+| `view_post` | One of your own posted TikToks (post id from `analytics`): its numbers and, for a carousel, its real slides as posted, tiled on one image (downloaded once, then kept). The slide links come from TikTok Studio's list, since TikTok hides photo posts from logged-out visitors; if they expired, `analytics` with `refresh=true` gets fresh ones |
 | `view_slideshow` | Details, draft status and rendered slides of one slideshow |
 | `list_slideshows` | Recent slideshows with their draft status and scores |
 | `delete_slideshow` | Remove a weaker version (doesn't touch TikTok drafts) |
@@ -65,7 +65,7 @@ On the phone:
 | `best_times` | When to post for an audience in a country |
 | `auto_reply` | The automatic comment replies running on the phone: `status` (default) shows the keywords, what went out today and when the next one is due; `set` adds or replaces one keyword with the replies it rotates through (and an optional `private_reply` for commenters whose account is private); `remove`, `on`, `off`. The phone answers matching comments by itself, at most 20 an hour, 50 a day, 1-3 minutes apart, never twice on the same comment |
 | `pinterest` | Explore Pinterest for carousel backgrounds: a contact sheet of real pins (portrait, tall, square or any) plus their shapes and source domains. Write each slide's `image_query` from what you see, then render with `create_slideshow` `image_source=pinterest`, which searches per slide, downloads the pick into the image cache and reuses it by URL. The photos belong to their owners: keep the pin's domain if the user needs attribution |
-| `phone_status` | Which TikTok accounts are logged in (default and research marked), where backgrounds come from, the library size |
+| `phone_status` | Which TikTok accounts are logged in (default and research marked), where backgrounds come from, the library size, and `connection`: whether the battery is unrestricted and how often the relay link dropped in the last 24 h (with the last reason) |
 
 ### Several TikTok accounts
 

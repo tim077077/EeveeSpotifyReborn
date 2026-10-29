@@ -3,6 +3,7 @@ package com.slidemill.core
 import kotlin.test.AfterTest
 import kotlin.test.Test
 import kotlin.test.assertEquals
+import kotlin.test.assertFalse
 import kotlin.test.assertFailsWith
 import kotlin.test.assertTrue
 
@@ -261,6 +262,19 @@ class McpTest {
         val status = Json.parseObj(text(call("phone_status")))
         assertEquals(listOf("@tim (default, research)"), status.strings("tiktok_accounts"))
         assertTrue("AI only" in status.str("backgrounds"))
+        assertTrue("no drops in 24 h" in status.str("connection"), status.str("connection"))
+    }
+
+    @Test fun relay_reconnects_on_wake_when_offline() {
+        assertFalse(e.relay.ensureConnected()) // no relay set: nothing to do
+        val closed = java.net.ServerSocket(0).use { it.localPort } // nothing listens here any more
+        e.relay.configure("http://127.0.0.1:$closed")
+        val until = System.currentTimeMillis() + 10_000
+        while (e.relay.status().str("state") != "offline" && System.currentTimeMillis() < until) Thread.sleep(50)
+        assertEquals("offline", e.relay.status().str("state"))
+        assertTrue(e.relay.ensureConnected()) // woken up offline: reconnects now, not after the backoff
+        assertEquals(0, e.relay.status().int("drops_24h")) // it was never connected, so nothing dropped
+        e.relay.stop()
     }
 
     @Test fun relay_link() {
@@ -365,6 +379,32 @@ class McpTest {
         assertEquals(1, pages) // downloaded once, then kept
         assertTrue("only carousels" in call("view_post", obj("post_id" to "762")).objs("content")[1].str("text"))
         assertEquals(true, call("view_post", obj("post_id" to "999"))["isError"])
+    }
+
+    @Test fun view_post_uses_tiktok_studios_slide_links_before_the_logged_out_page() {
+        e.analytics.record("tim", listOf(e.analytics.fromStudio(obj(
+            "id" to "771", "desc" to "gym", "is_slideshow" to true, "slides" to 2L, "views" to 800L, "posted_at" to 1_792_000_000L,
+            "slide_urls" to arr("https://cdn.example/771-1.jpeg", "https://cdn.example/771-2.jpeg"),
+        ))))
+        e.library.fetchHtml = { throw AssertionError("the logged-out page isn't needed: $it") }
+        val fetched = mutableListOf<String>()
+        e.library.downloadImage = { fetched += it; TestKit.jpeg(90, 120) }
+        val out = call("view_post", obj("post_id" to "771")).objs("content")
+        assertTrue("2 slides as posted" in out[1].str("text"), out[1].str("text"))
+        assertEquals(listOf("https://cdn.example/771-1.jpeg", "https://cdn.example/771-2.jpeg"), fetched)
+
+        // Expired links and a hidden public page: say how to get fresh links, not "private or deleted".
+        e.analytics.record("tim", listOf(e.analytics.fromStudio(obj("id" to "772", "is_slideshow" to true, "slides" to 1L, "slide_urls" to arr("https://cdn.example/old.jpeg")))))
+        e.library.downloadImage = { null }
+        e.library.fetchHtml = { "<html></html>" }
+        assertTrue("refresh=true" in call("view_post", obj("post_id" to "772")).objs("content")[1].str("text"))
+    }
+
+    @Test fun add_to_library_points_the_users_own_account_to_analytics() {
+        e.analytics.record("tim", listOf(obj("id" to "781", "desc" to "x", "is_slideshow" to true, "views" to 10L, "posted_at" to 1_792_000_000L)))
+        e.library.fetchHtml = { "<html></html>" }
+        val out = call("add_to_library", obj("accounts" to arr("@Tim"))).objs("content")[0].str("text")
+        assertTrue("own account" in out && "view_post" in out, out)
     }
 
     /** A [Lean] table ({"cols", "rows"}) or plain list, as records. */

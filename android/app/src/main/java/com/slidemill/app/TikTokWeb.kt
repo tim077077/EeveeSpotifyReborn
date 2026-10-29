@@ -11,6 +11,7 @@ import android.os.Looper
 import android.view.ViewGroup
 import android.webkit.CookieManager
 import android.webkit.JavascriptInterface
+import android.webkit.RenderProcessGoneDetail
 import android.webkit.WebChromeClient
 import android.webkit.WebResourceRequest
 import android.webkit.WebResourceResponse
@@ -135,6 +136,8 @@ class TikTokWeb private constructor(val slot: String) {
         }
         cookies(slot).setAcceptCookie(true)
         cookies(slot).setAcceptThirdPartyCookies(view, true)
+        // Detached and invisible, the page's renderer would be first in line when Android frees memory.
+        view.setRendererPriorityPolicy(WebView.RENDERER_PRIORITY_IMPORTANT, false)
         view.webChromeClient = WebChromeClient()
         view.webViewClient = client
         view.addJavascriptInterface(Native(), "SlidemillNative")
@@ -190,6 +193,19 @@ class TikTokWeb private constructor(val slot: String) {
         // Inject as soon as the page is visible: a heavy tiktok.com page (video feed) can take a long
         // time to "finish", or never, while its scripts are already running.
         override fun onPageCommitVisible(view: WebView, url: String?) = inject(view, url)
+
+        // Android killed the page's renderer (memory, or the screen was off a long time): drop the dead
+        // view and answer what was waiting on it; the next use loads tiktok.com again with the same login.
+        override fun onRenderProcessGone(view: WebView, detail: RenderProcessGoneDetail): Boolean {
+            if (web === view) {
+                pageReady = false
+                (view.parent as? ViewGroup)?.removeView(view)
+                view.destroy()
+                web = null
+                pending.keys.toList().forEach { id -> pending.remove(id)?.invoke(null) }
+            }
+            return true // handled: don't take the whole app down
+        }
 
         override fun onPageFinished(view: WebView, url: String?) = inject(view, url)
 

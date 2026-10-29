@@ -126,7 +126,26 @@ class MainActivity : Activity() {
             addView(bar, LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT))
         })
         EngineService.start(this) // keeps the relay and the TikTok tab alive with the app closed
+        Keepalive.askOnce(this) // the battery exemption, offered once per install
         show("Slidemill")
+    }
+
+    private var batteryLine: TextView? = null
+
+    private fun refreshBattery() {
+        val line = batteryLine ?: return
+        if (Keepalive.unrestricted(this)) {
+            line.text = "Unrestricted ✓: Claude can reach the phone with the screen off."
+            line.setTextColor(good)
+        } else {
+            line.text = "Restricted: Android cuts Claude off when the screen is off. Tap \"Allow running in the background\"."
+            line.setTextColor(accent)
+        }
+    }
+
+    override fun onResume() {
+        super.onResume()
+        refreshBattery() // back from the battery dialog or settings
     }
 
     override fun onDestroy() {
@@ -291,11 +310,25 @@ class MainActivity : Activity() {
         // 4. Keep running
         col.addView(heading("4. Keep it reachable"))
         col.addView(label(
-            "Claude can only reach the phone while Android lets Slidemill run. Set battery use to \"Unrestricted\" (Samsung: also remove it from sleeping apps).",
+            "Claude can only reach the phone while Android lets Slidemill run with the screen off. Allow it below (Samsung: also take it out of \"Sleeping apps\" in its battery page).",
             13f, muted,
         ))
-        col.addView(button("Open battery settings", secondary = true) {
-            runCatching { startActivity(Intent(Settings.ACTION_IGNORE_BATTERY_OPTIMIZATION_SETTINGS)) }
+        batteryLine = label("", 13f, muted).also { col.addView(it, spaced(6)) }
+        refreshBattery()
+        col.addView(button("Allow running in the background", secondary = true) { Keepalive.askUnrestricted(this) }, spaced(6))
+        col.addView(button("Open Slidemill's battery page", secondary = true) {
+            runCatching { startActivity(Intent(Settings.ACTION_APPLICATION_DETAILS_SETTINGS, Uri.parse("package:$packageName"))) }
+        }, spaced(6))
+        col.addView(CheckBox(this).apply {
+            text = "Keep the phone awake for Claude (uses more battery; for a phone on the charger)"
+            setTextColor(ink)
+            isChecked = engine.store.get("stay_awake") == "1"
+            setOnCheckedChangeListener { _, on ->
+                io.execute {
+                    engine.store.setMany(mapOf("stay_awake" to if (on) "1" else "0"))
+                    main.post { EngineService.start(this@MainActivity) } // applies the change
+                }
+            }
         }, spaced(6))
 
         // 5. Scheduling

@@ -161,7 +161,7 @@ win.fetch = async (url, init = {}) => {
   listCalls.push({ query: u.searchParams, headers: init.headers, body: JSON.parse(init.body) });
   const page1 = { cursor: "50", has_more: true, status_code: 0, item_list: [
     { item_id: "9", desc: "scheduled one", status: 141, item_type: 2, play_count: "0" },
-    { item_id: "8", desc: "5 money tips #money", status: 102, item_type: 2, post_time: "1761500000", play_count: "1200", like_count: "40", comment_count: "3", share_count: "2", favorite_count: "7", visibility: 1, photo_list: ["a", "b", "c"] },
+    { item_id: "8", desc: "5 money tips #money", status: 102, item_type: 2, post_time: "1761500000", play_count: "1200", like_count: "40", comment_count: "3", share_count: "2", favorite_count: "7", visibility: 1, photo_list: ["https://p.example/1.jpeg", { url_list: ["https://p.example/2.jpeg"] }, { image_url: { url_list: ["https://p.example/3.jpeg"] } }] },
   ] };
   const page2 = { cursor: "51", has_more: false, status_code: 0, item_list: [
     { item_id: "7", desc: "a video", status: 102, item_type: 1, create_time: "1761400000", play_count: "300", duration: "15400", visibility: 1 },
@@ -174,6 +174,7 @@ const mine = JSON.parse(JSON.stringify(await listed)); // arrays from the page's
 assert.equal(mine.ok, true, mine.error);
 assert.deepEqual(mine.posts.map((p) => p.id), ["8", "7"]); // the scheduled post isn't counted
 assert.deepEqual([mine.posts[0].views, mine.posts[0].likes, mine.posts[0].saves, mine.posts[0].slides, mine.posts[0].is_slideshow], [1200, 40, 7, 3, true]);
+assert.deepEqual(mine.posts[0].slide_urls, ["https://p.example/1.jpeg", "https://p.example/2.jpeg", "https://p.example/3.jpeg"]); // any entry shape
 assert.deepEqual([mine.posts[1].posted_at, mine.posts[1].is_slideshow, mine.posts[1].duration_s], [1761400000, false, 15]);
 assert.equal(listCalls.length, 2);
 assert.deepEqual(listCalls.map((c) => c.body.cursor), [0, 50]);

@@ -44,7 +44,7 @@ Web drafts are never public. Open them with **Web drafts** in the app or on tikt
 2. **Slidemill** tab: paste your relay address, tap **Save relay address**, then **Copy Claude link** and add it in Claude (Settings → Connectors → Add custom connector). See [docs/CLAUDE_CONNECTOR.md](../docs/CLAUDE_CONNECTOR.md) for deploying the relay.
 3. **TikTok** tab: log in with email or username and a password. Google and Apple login don't work inside apps.
 4. Optional: paste a free Pexels key for real stock photos. Without one, backgrounds are free AI images, which are slower and watermarked.
-5. **Open battery settings** and set Slidemill to *Unrestricted*. On Samsung, also take it out of "sleeping apps".
+5. **Allow running in the background**: tap Allow in Android's dialog (the app offers it once on first start; section 4 shows "Unrestricted ✓" when done). On Samsung, also take it out of "sleeping apps" via **Open Slidemill's battery page**.
 
 ## How it's built
 
@@ -75,6 +75,6 @@ Every build is signed with the same key, `slidemill-debug.keystore`, so new APKs
 
 ## Known limits (honest)
 
-- **The phone has to be on, online and running Slidemill** when Claude calls. Android can still freeze background apps on some brands (Samsung, Xiaomi, Huawei); use the Unrestricted battery setting.
+- **The phone has to be on, online and running Slidemill** when Claude calls. Android can still freeze background apps on some brands (Samsung, Xiaomi, Huawei); use the Unrestricted battery setting. With the screen off, the phone wakes for a moment about every 10 minutes (and whenever the network comes back) to reconnect to the relay and revive the TikTok tabs. If it still drops off, `phone_status` shows how often and why, and **Keep the phone awake for Claude** (section 4) keeps the CPU on for a phone left on the charger.
 - **Saving drafts uses TikTok's private web endpoints**, which is against TikTok's terms. Use an account you can afford to lose. If TikTok changes its web uploader, saves fail with TikTok's error, and that error reaches Claude.
 - **Library profile scraping** reads a profile's post list through a hidden TikTok page on the phone. TikTok can change that at any time. Single post URLs don't depend on it.
