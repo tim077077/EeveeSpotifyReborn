@@ -49,7 +49,7 @@ class McpTest {
         val names = result("tools/list").objs("tools").map { it.str("name") }
         assertEquals(listOf(
             "writing_guide", "research_library", "add_to_library", "discover_slideshows", "carousel_formats", "read_library_slides", "save_slide_texts", "create_slideshow",
-            "import_slides", "save_draft", "schedule_slideshow", "view_post", "view_slideshow", "list_slideshows", "delete_slideshow", "predict_virality", "analytics", "best_times", "phone_status",
+            "import_slides", "save_draft", "schedule_slideshow", "view_post", "view_slideshow", "list_slideshows", "delete_slideshow", "predict_virality", "analytics", "best_times", "auto_reply", "pinterest", "phone_status",
         ), names)
         // Notifications get no body; modern-era discovery falls back to the handshake; GET isn't served.
         assertEquals(202, e.relay.mcp.handle("POST", """{"jsonrpc":"2.0","method":"notifications/initialized"}""").status)

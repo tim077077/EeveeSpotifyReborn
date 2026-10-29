@@ -22,8 +22,9 @@ class Studio(
     private val imageGen: ImageGen,
     private val images: Images,
     private val renderer: Renderer,
+    private val pinterest: Pinterest = Pinterest(),
 ) {
-    val sources = listOf("auto", "stock", "ai")
+    val sources = listOf("auto", "stock", "ai", "pinterest")
 
     companion object {
         const val MAX_SLIDES = 35 // TikTok's photo-post limit
@@ -141,9 +142,17 @@ class Studio(
         val orientation = images.orientationFor(spec.str("aspect_ratio"))
         val usedUrls = mutableSetOf<String>()
         val needsAi = mutableListOf<Obj>()
-        for (slide in spec.objs("slides")) {
+        // The renderer reads the spec's own slide maps, and objs() hands out copies: mutate the originals
+        // so the background actually reaches the render.
+        val originals = (spec["slides"] as? List<*>)?.mapNotNull { it as? Obj }.orEmpty()
+        val slides = if (originals.isNotEmpty()) originals else spec.objs("slides")
+        for (slide in slides) {
             if (slide.strOrNull("image") != null) continue
-            val picked = if (source == "stock") images.autoImage(slide.str("image_query").ifEmpty { spec.str("title") }, orientation, usedUrls)?.str("path") else null
+            val picked = when (source) {
+                "stock" -> images.autoImage(slide.str("image_query").ifEmpty { spec.str("title") }, orientation, usedUrls)?.str("path")
+                "pinterest" -> pinterestBackground(slide.str("image_query").ifEmpty { spec.str("title") }, usedUrls)
+                else -> null
+            }
             if (picked != null) slide["image"] = picked else needsAi += slide
         }
         if (needsAi.isEmpty()) return 0
@@ -157,6 +166,30 @@ class Studio(
             pool.shutdown()
         }
         return needsAi.count { it["image"] == null }
+    }
+
+    /**
+     * A portrait Pinterest pin for this slide's query: downloaded once, then reused by URL like any other
+     * image. Returns null (and the slide falls back to AI) when Pinterest has nothing usable.
+     */
+    private fun pinterestBackground(query: String, used: MutableSet<String>): String? {
+        val pins = try {
+            pinterest.search(query.ifEmpty { "aesthetic background" }, 12)
+        } catch (x: Exception) {
+            platform.log("pinterest search failed (${x.message})")
+            return null
+        }
+        if (pins.isEmpty()) return null
+        val fresh = pins.filter { it.url !in used }
+        val pick = (fresh.take(6).ifEmpty { pins }).random()
+        used += pick.url
+        db.tx { where("images") { it.str("source_url") == pick.url }.firstOrNull() }?.let { return it.str("path") }
+        return try {
+            images.downloadInto(pick.toStock(), query).str("path")
+        } catch (x: Exception) {
+            platform.log("pinterest download failed (${x.message})")
+            null
+        }
     }
 
     private fun aiBackground(slide: Map<String, Any?>, spec: Map<String, Any?>): String? {

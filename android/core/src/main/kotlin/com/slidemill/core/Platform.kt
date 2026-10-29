@@ -80,6 +80,24 @@ interface TikTokTab {
      * caller falls back to scrolling the profile.
      */
     fun listUserPosts(secUid: String, max: Int, known: Set<String>): List<Obj>? = null
+
+    /**
+     * The comments on one of this account's own posts, newest first, read by the logged-in page: maps
+     * with cid, text, author, nickname, at (unix s), likes, creator (written by the account itself),
+     * root_cid (set when the comment is a reply to another comment) and replies (how many answers it
+     * has). null when the page can't read them.
+     */
+    fun comments(itemId: String, max: Int): List<Obj>? = null
+
+    /**
+     * Answer a comment publicly, as the logged-in account. [cid] is the comment being answered; pass
+     * [rootCid] when that comment is itself a reply, so TikTok threads the answer under the right one.
+     * Returns the new comment's id, "" when TikTok didn't say, null when the page couldn't ask.
+     */
+    fun replyToComment(itemId: String, cid: String, rootCid: String, text: String): String? = null
+
+    /** Whether that username's account is private. null when it can't be told. */
+    fun isPrivate(username: String): Boolean? = null
 }
 
 class DraftError(message: String) : RuntimeException(message)

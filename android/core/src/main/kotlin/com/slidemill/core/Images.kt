@@ -154,6 +154,10 @@ class ImageGenError(message: String) : RuntimeException(message)
 
 /** Stock-photo search (Pexels / Unsplash) and the downloaded-image cache. */
 class Images(private val db: Db, private val store: Store, private val platform: Platform, private val mediaDir: File) {
+
+    /** How an image URL becomes bytes. Overridable so tests don't touch the network. */
+    var download: (String) -> ByteArray = { url -> Net.get(url, timeoutSec = 30).body }
+
     data class StockPhoto(val url: String, val thumb: String, val width: Int, val height: Int, val source: String, val credit: String = "") {
         fun toObj(): Obj = obj("url" to url, "thumb" to thumb, "width" to width, "height" to height, "source" to source, "credit" to credit)
     }
@@ -204,9 +208,9 @@ class Images(private val db: Db, private val store: Store, private val platform:
     }
 
     fun downloadInto(photo: StockPhoto, query: String = ""): Obj {
-        val resp = Net.get(photo.url, timeoutSec = 30)
-        if (resp.status >= 400) throw ImageSearchError("download failed (${resp.status})")
-        val (rel, w, h) = storeBytes(resp.body, "library/auto")
+        val bytes = download(photo.url)
+        if (bytes.isEmpty()) throw ImageSearchError("download failed (empty response)")
+        val (rel, w, h) = storeBytes(bytes, "library/auto")
         return db.tx {
             insert("images", obj(
                 "path" to rel, "source" to photo.source, "source_url" to photo.url,

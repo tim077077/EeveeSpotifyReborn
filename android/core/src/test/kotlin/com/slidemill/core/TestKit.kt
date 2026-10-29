@@ -52,6 +52,29 @@ class FakeTikTok(var user: String = "tim", override val id: String = TikTokTab.M
         knownGiven += known
         return userPosts?.get(secUid)?.take(max)
     }
+
+    /** Comments per post id, as the page's comment list returns them (cid, text, author, root_cid, …). */
+    val commentsOf = java.util.concurrent.ConcurrentHashMap<String, MutableList<Obj>>()
+
+    override fun comments(itemId: String, max: Int): List<Obj>? =
+        commentsOf[itemId]?.take(max)?.map { it.copyObj() }
+
+    /** Every reply the app sent: post id, the comment it answered, and what it said. */
+    val replies = CopyOnWriteArrayList<Triple<String, String, String>>()
+
+    /** When set, replying fails with this (as TikTok refusing would). */
+    @Volatile var refuseReply: String? = null
+
+    override fun replyToComment(itemId: String, cid: String, rootCid: String, text: String): String? {
+        refuseReply?.let { throw DraftError("TikTok refused the reply: $it") }
+        replies += Triple(itemId, cid, text)
+        return "c9" + replies.size.toString().padStart(6, '0')
+    }
+
+    /** Usernames whose accounts are private. */
+    @Volatile var privateUsers: Set<String> = emptySet()
+
+    override fun isPrivate(username: String): Boolean? = if (username.isEmpty()) null else username in privateUsers
 }
 
 object TestKit {

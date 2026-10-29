@@ -18,6 +18,7 @@ class Db(val dir: File) {
         "products", "collections", "images", "automations", "slideshows", "posts", "settings",
         "library_profiles", "library_posts", "jobs", "state",
         "my_posts", "post_snapshots", "account_snapshots",
+        "auto_reply", // every comment the phone answered by itself, keyed by the comment id
     )
     private val data = HashMap<String, LinkedHashMap<String, Obj>>()
     private val written = HashMap<String, String>()

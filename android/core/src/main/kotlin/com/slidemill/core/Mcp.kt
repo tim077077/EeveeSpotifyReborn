@@ -118,7 +118,7 @@ Save tokens: don't repeat calls whose answer you already have in this conversati
             input(
                 listOf("plan"),
                 "plan" to Shapes.SLIDESHOW_PLAN.toJson(),
-                "image_source" to str("Backgrounds: stock (needs a Pexels key), ai, or auto.", e.studio.sources),
+                "image_source" to str("Backgrounds: stock (needs a Pexels key), ai, pinterest (explore it first), or auto.", e.studio.sources),
                 "aspect_ratio" to str("", listOf("4:5", "9:16", "1:1")),
                 "save_draft" to bool("Only if asked: also save to TikTok Studio web drafts."),
                 "account" to str("TikTok username to use (blank = the default account; phone_status lists them)."),
@@ -222,6 +222,27 @@ Save tokens: don't repeat calls whose answer you already have in this conversati
                 throw ToolError("No posting-time data for country '$code'.")
             }
         },
+
+        "auto_reply" to Tool(
+            "The phone's automatic comment replies, sent by itself: status (default) lists the keywords and what went out; set adds or replaces one keyword (keyword + replies, one per line, which rotate); remove, on, off.",
+            input(
+                listOf(),
+                "action" to str("status, set, remove, on or off.", listOf("status", "set", "remove", "on", "off")),
+                "keyword" to str("The word a comment must contain (set/remove). Case, accents and one typo don't matter."),
+                "replies" to str("What to answer, one per line (set)."),
+                "private_reply" to str("Sent instead if that commenter's account is private (set)."),
+            ),
+        ) { a -> autoReplyTool(a) },
+
+        "pinterest" to Tool(
+            "Explore Pinterest for carousel backgrounds: a contact sheet of real pins plus their shapes and sources. Then write each slide's image_query from what you see and render with create_slideshow image_source=pinterest, which searches per slide and downloads the pick. The photos belong to their owners: keep the pin's source domain if the user needs attribution.",
+            input(
+                listOf("query"),
+                "query" to str("What the photo should show: 'minimal beige bedroom', 'brown aesthetic coffee', 'gym mirror selfie'."),
+                "count" to int("How many pins to show.", 8, 4, 12),
+                "shape" to str("portrait (4:5-ish), tall (9:16-ish), square, or any.", listOf("portrait", "tall", "square", "any")),
+            ),
+        ) { a -> pinterestTool(a) },
 
         "phone_status" to Tool(
             "Phone readiness: TikTok account, background source, library size, phone time, autopilot.",
@@ -636,6 +657,103 @@ Save tokens: don't repeat calls whose answer you already have in this conversati
         val report = e.analytics.report(weeks, posts, predicted = e.predictedByPost(), username = user)
         if (note.isNotEmpty()) report["refresh"] = note
         return lean(report)
+    }
+
+    /**
+     * Pinterest exploration: real pins for a query, tiled into one contact sheet so the writer can see
+     * what it is choosing between for a fraction of the tokens of separate images.
+     */
+    private fun pinterestTool(a: Obj): Any? {
+        val query = a.str("query").trim()
+        if (query.isEmpty()) throw ToolError("query is required: what the photo should show.")
+        val want = a.int("count", 8).coerceIn(4, 12)
+        val shape = a.str("shape", "portrait").ifEmpty { "portrait" }
+        val bounds = when (shape) {
+            "tall" -> 1.6 to 3.0
+            "square" -> 0.85 to 1.15
+            "any" -> 0.0 to 4.0
+            else -> 1.05 to 3.0
+        }
+        val pins = try {
+            e.pinterest.search(query, want * 3, portrait = shape != "any", minAspect = bounds.first, maxAspect = bounds.second)
+        } catch (x: Exception) {
+            throw ToolError("Pinterest search failed: ${x.message}")
+        }
+        if (pins.isEmpty()) throw ToolError("No $shape pins for '$query'. Try a simpler, more visual query.")
+        val shown = pins.take(want)
+        val dir = java.io.File(e.mediaDir, "library/thumbs").also { it.mkdirs() }
+        val files = shown.mapNotNull { pin ->
+            runCatching {
+                val bytes = Net.get(pin.thumb, timeoutSec = 20).body
+                if (bytes.isEmpty()) null
+                else java.io.File(dir, pin.id.replace(Regex("[^A-Za-z0-9]"), "").take(40) + ".jpg").also { it.writeBytes(bytes) }
+            }.getOrNull()
+        }
+        val rows = shown.mapIndexed { i, pin ->
+            obj(
+                "n" to i + 1, "pin" to pin.id.take(26),
+                "shape" to Math.round(pin.aspect * 100) / 100.0,
+                "title" to pin.title.take(70), "from" to pin.domain,
+            )
+        }
+        val summary = lean(obj(
+            "query" to query, "shape" to shape, "shown" to shown.size,
+            "pins" to rows.toMutableList<Any?>(),
+            "next" to "write each slide's image_query from these, then create_slideshow with image_source=pinterest",
+        ))
+        val image = sheet(files, cell = 240, cols = 4)
+        return if (image != null) arr(text(summary), image) else text(summary)
+    }
+
+    /**
+     * The auto-reply keywords and what the phone has done with them: the same state the app's Auto-reply
+     * card shows, and how a keyword gets set without the phone in hand.
+     */
+    private fun autoReplyTool(a: Obj): Any? {
+        val action = a.str("action", "status").lowercase().ifEmpty { "status" }
+        var settings = e.autoReplySettings()
+        when (action) {
+            "status" -> {}
+            "set" -> {
+                val keyword = AutoReplySettings.clean(a.str("keyword"))
+                if (keyword.isEmpty()) throw ToolError("Give keyword: the word a comment must contain (for example PLAN).")
+                val replies = a.str("replies").split('\n', ',').map { it.trim() }.filter { it.isNotEmpty() }
+                if (replies.isEmpty()) throw ToolError("Give replies for '$keyword': what to answer, one per line.")
+                settings = settings.with(keyword, replies, a.str("private_reply"))
+            }
+            "remove" -> {
+                val keyword = AutoReplySettings.clean(a.str("keyword"))
+                if (keyword.isEmpty()) throw ToolError("Give keyword: which one to remove.")
+                if (settings.rule(keyword) == null) throw ToolError("No keyword '$keyword' is set.")
+                settings = settings.without(keyword)
+            }
+            "on" -> settings = settings.copy(enabled = true)
+            "off" -> settings = settings.copy(enabled = false)
+            else -> throw ToolError("action must be status, set, remove, on or off.")
+        }
+        if (action != "status") e.saveAutoReply(settings)
+        val book = e.replies
+        val now = Db.nowMs()
+        val wait = book.nextAllowed() - now
+        return lean(obj(
+            "enabled" to settings.enabled,
+            "rules" to settings.rules.map { r ->
+                obj("keyword" to r.match, "replies" to r.replies, "private_reply" to r.privateReply.ifEmpty { null }, "on" to r.enabled)
+            }.toMutableList<Any?>(),
+            "sent_today" to book.sentToday(now),
+            "sent_last_hour" to book.sentLastHour(now),
+            "next_reply" to if (wait > 0) "in ${wait / 1000}s" else "at the next check (a pass every minute)",
+            "blocked" to book.blocked(settings, now).ifEmpty { null },
+            "caps" to obj(
+                "per_hour" to settings.maxPerHour, "per_day" to settings.maxPerDay,
+                "gap_sec" to "${settings.minGapSec}-${settings.maxGapSec}",
+                "typos_allowed" to settings.typos,
+            ),
+            "reads" to "the account's own posts from the last ${settings.postsDays} days",
+            "last_replies" to book.recent(5).map { r ->
+                obj("at" to Db.iso(r.long("at")), "author" to r.str("author"), "comment" to r.str("comment"), "reply" to r.str("text"), "keyword" to r.str("keyword"))
+            }.toMutableList<Any?>(),
+        ))
     }
 
     private fun status(): String {
