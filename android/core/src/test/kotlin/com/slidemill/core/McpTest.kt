@@ -3,6 +3,7 @@ package com.slidemill.core
 import kotlin.test.AfterTest
 import kotlin.test.Test
 import kotlin.test.assertEquals
+import kotlin.test.assertFalse
 import kotlin.test.assertFailsWith
 import kotlin.test.assertTrue
 
@@ -261,6 +262,19 @@ class McpTest {
         val status = Json.parseObj(text(call("phone_status")))
         assertEquals(listOf("@tim (default, research)"), status.strings("tiktok_accounts"))
         assertTrue("AI only" in status.str("backgrounds"))
+        assertTrue("no drops in 24 h" in status.str("connection"), status.str("connection"))
+    }
+
+    @Test fun relay_reconnects_on_wake_when_offline() {
+        assertFalse(e.relay.ensureConnected()) // no relay set: nothing to do
+        val closed = java.net.ServerSocket(0).use { it.localPort } // nothing listens here any more
+        e.relay.configure("http://127.0.0.1:$closed")
+        val until = System.currentTimeMillis() + 10_000
+        while (e.relay.status().str("state") != "offline" && System.currentTimeMillis() < until) Thread.sleep(50)
+        assertEquals("offline", e.relay.status().str("state"))
+        assertTrue(e.relay.ensureConnected()) // woken up offline: reconnects now, not after the backoff
+        assertEquals(0, e.relay.status().int("drops_24h")) // it was never connected, so nothing dropped
+        e.relay.stop()
     }
 
     @Test fun relay_link() {

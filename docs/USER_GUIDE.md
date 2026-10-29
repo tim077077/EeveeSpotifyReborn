@@ -21,7 +21,7 @@ One phone, one account (or several), one relay. No AI key is needed on the phone
 ## 2. First run, in order
 
 1. **Install the APK.** It uses the same signing key as earlier builds, so it updates over them.
-2. **Battery:** Android Settings → Apps → Slidemill → Battery → **Unrestricted**. Samsung: also remove it from "sleeping apps". Background passes stop if the system freezes the app.
+2. **Battery:** tap **Allow running in the background** in section 4 and choose Allow (the line turns green: "Unrestricted ✓"). Samsung: also remove it from "sleeping apps" (**Open Slidemill's battery page**). Background passes stop if the system freezes the app.
 3. **Relay:** GitHub → Actions → **Deploy Claude relay** → Run workflow. It needs two repository secrets (`CLOUDFLARE_API_TOKEN`, `CLOUDFLARE_ACCOUNT_ID`). The run summary prints your relay address.
 4. **App → Slidemill tab → 1. Connect Claude:** paste the relay address, **Save relay address**, wait for "✓ Connected", then **Copy Claude link**.
 5. **Claude:** Settings → Connectors → add a custom connector, paste the link. Claude can reach the phone whenever the app is running (the "Slidemill running" notification).
@@ -40,7 +40,7 @@ If Claude says the phone is offline, the app isn't running, or the relay address
 | **1. Connect Claude** | Relay address, connection state, the connector link (the URL *is* the password), and **New link** to rotate it. |
 | **2. Log in to TikTok** | Login state per account, the default account Claude posts to, and which account does the research (use a spare: research is the bot-looking part). |
 | **3. Real photos (optional)** | A Pexels key gives real stock photos instead of watermarked AI images. Any AI key is reused for AI backgrounds. |
-| **4. Keep it reachable** | Opens the battery settings that matter. |
+| **4. Keep it reachable** | Shows whether Android lets Slidemill run with the screen off, asks for it in one tap, and has an optional "keep the phone awake" switch for a phone on the charger. |
 | **5. Scheduling** | **Let Claude schedule posts without asking me** (autopilot, on by default). On: Claude puts posts on TikTok Studio's own schedule and they go live without you. Off: Claude only proposes a time and you tap SCHEDULE. |
 | **6. Answer comments for me** | The auto-replier: the on/off switch, one card per keyword (the word a comment must contain, the replies it rotates through, an optional private-account reply), the caps, **Check the comments now**, and a log of what it sent. |
 | **Drafts** | Every slideshow Claude made, newest first. Tap one to preview the slides and **POST** it live, or **SCHEDULE** it for the time Claude proposed. |

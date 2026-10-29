@@ -773,9 +773,22 @@ Save tokens: don't repeat calls whose answer you already have in this conversati
             else "AI only: ${e.imageGen.describe()}. A free Pexels key in the app gives real photos.",
             "library" to "$posts slideshows from $profiles accounts",
             "phone_time" to localTime(Db.nowMs() / 1000),
+            "connection" to connectionLine(),
             "claude_can_schedule" to if (e.store.get("claude_schedules") != "0") "yes: schedule_slideshow schedules on TikTok directly"
             else "no: schedule_slideshow proposes a time; the user approves it in the app",
         ))
+    }
+
+    /** Why Claude may lose the phone: Android's battery limits and how often the relay link dropped. */
+    private fun connectionLine(): String {
+        val r = e.relay.status()
+        val battery = when (e.platform.batteryUnrestricted()) {
+            true -> "battery unrestricted"
+            false -> "battery RESTRICTED: Android cuts Claude off while the screen is off (fix it in the app, section 4)"
+            null -> null
+        }
+        val drops = r.int("drops_24h").let { if (it == 0) "no drops in 24 h" else "dropped $it× in 24 h, last: ${r.str("last_drop")}" }
+        return listOfNotNull(battery, drops).joinToString("; ")
     }
 
     private fun image(f: File): Obj? {

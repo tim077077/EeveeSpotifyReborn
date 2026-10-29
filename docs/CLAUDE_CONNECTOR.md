@@ -65,7 +65,7 @@ On the phone:
 | `best_times` | When to post for an audience in a country |
 | `auto_reply` | The automatic comment replies running on the phone: `status` (default) shows the keywords, what went out today and when the next one is due; `set` adds or replaces one keyword with the replies it rotates through (and an optional `private_reply` for commenters whose account is private); `remove`, `on`, `off`. The phone answers matching comments by itself, at most 20 an hour, 50 a day, 1-3 minutes apart, never twice on the same comment |
 | `pinterest` | Explore Pinterest for carousel backgrounds: a contact sheet of real pins (portrait, tall, square or any) plus their shapes and source domains. Write each slide's `image_query` from what you see, then render with `create_slideshow` `image_source=pinterest`, which searches per slide, downloads the pick into the image cache and reuses it by URL. The photos belong to their owners: keep the pin's domain if the user needs attribution |
-| `phone_status` | Which TikTok accounts are logged in (default and research marked), where backgrounds come from, the library size |
+| `phone_status` | Which TikTok accounts are logged in (default and research marked), where backgrounds come from, the library size, and `connection`: whether the battery is unrestricted and how often the relay link dropped in the last 24 h (with the last reason) |
 
 ### Several TikTok accounts
 
