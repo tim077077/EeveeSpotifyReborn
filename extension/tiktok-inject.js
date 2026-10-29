@@ -457,6 +457,17 @@
     } catch (_) { return ""; }
   }
 
+  // The first https link in a photo_list entry, whatever its shape (a string, {url}, {url_list: []}, nested).
+  const firstHttps = (x, depth = 0) => {
+    if (typeof x === "string") return /^https:\/\//.test(x) ? x : "";
+    if (!x || typeof x !== "object" || depth > 3) return "";
+    for (const v of Array.isArray(x) ? x : Object.values(x)) {
+      const u = firstHttps(v, depth + 1);
+      if (u) return u;
+    }
+    return "";
+  };
+
   const num = (v) => { const n = Number(v); return Number.isFinite(n) ? n : 0; };
 
   // Every published post of the logged-in account with its stats, newest first, as TikTok Studio's
@@ -528,6 +539,8 @@
           saves: num(it.favorite_count),
           is_slideshow: num(it.item_type) === 2,
           slides: photos.length,
+          // The slide images as posted (signed links, good for a while): logged out, TikTok hides photo posts.
+          slide_urls: photos.map((x) => firstHttps(x)).filter(Boolean),
           cover: it.cover_url || photos[0] || "",
           duration_s: Math.round(num(it.duration) / 1000),
           private: num(it.visibility) !== 1,

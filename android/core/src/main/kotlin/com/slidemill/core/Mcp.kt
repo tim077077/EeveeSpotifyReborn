@@ -404,7 +404,10 @@ Save tokens: don't repeat calls whose answer you already have in this conversati
         val lines = within { e.library.add(accounts.take(20), maxPosts.coerceIn(1, 100)) }
             ?: return "Still importing on the phone (it reads each account's posts in its TikTok tab). Check research_library in a few minutes."
         val unread = e.library.unread(100).size
-        return lines.joinToString("\n") + if (unread > 0) "\n\n$unread slideshows have no slide text yet: read_library_slides lets you read them." else ""
+        val mine = e.db.tx { where("my_posts") { true }.map { it.str("username").lowercase() }.toSet() }
+        val own = accounts.map { it.trim().removePrefix("@").substringAfter("tiktok.com/@").substringBefore("/").lowercase() }.filter { it in mine }
+        val note = if (own.isEmpty()) "" else "\n\n" + own.joinToString { "@$it" } + " is the user's own account: TikTok often shows an account little of itself here. Its posts are in analytics, and view_post shows their slides."
+        return lines.joinToString("\n") + note + if (unread > 0) "\n\n$unread slideshows have no slide text yet: read_library_slides lets you read them." else ""
     }
 
     private fun readLibrarySlides(limit: Int): List<Any?> {
@@ -553,10 +556,15 @@ Save tokens: don't repeat calls whose answer you already have in this conversati
         if (!p.bool("is_slideshow")) return arr(text(lean(stats)), text("It's a video: only carousels have slides to show."))
         var files = p.strings("slide_files").filter { File(e.mediaDir, it).isFile }
         if (files.isEmpty()) {
+            // The slide links from TikTok Studio's list first: logged out, TikTok hides most photo posts.
             val url = "https://www.tiktok.com/@${p.str("username")}/photo/${p.str("id")}"
-            files = within { e.library.postSlides(url, "mine/${p.str("id")}") }
-                ?: return arr(text(lean(stats)), text("Still downloading the slides on the phone. Call view_post again in a minute."))
-            if (files.isEmpty()) return arr(text(lean(stats)), text("TikTok didn't give this post's slides (it may be private or deleted)."))
+            val folder = "mine/${p.str("id")}"
+            files = within {
+                e.library.downloadSlides(p.list("slide_urls"), folder).ifEmpty { runCatching { e.library.postSlides(url, folder) }.getOrDefault(emptyList()) }
+            } ?: return arr(text(lean(stats)), text("Still downloading the slides on the phone. Call view_post again in a minute."))
+            if (files.isEmpty()) return arr(text(lean(stats)), text(
+                if (p.list("slide_urls").isEmpty()) "No slide links for this post yet: call analytics with refresh=true (it reads TikTok Studio's list, which has them), then view_post again."
+                else "TikTok refused the slide links (they expire): call analytics with refresh=true for fresh ones, then view_post again."))
             e.db.tx { get("my_posts", p.str("id"))?.set("slide_files", files.toMutableList<Any?>()) }
         }
         if (slide > 0) {

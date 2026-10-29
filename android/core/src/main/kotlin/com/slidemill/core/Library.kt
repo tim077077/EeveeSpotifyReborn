@@ -148,10 +148,11 @@ class Library(
     }
 
     /** A post's slide images, downloaded fresh from its public page into [folder]; relative paths, in order. */
-    fun postSlides(url: String, folder: String): List<String> {
-        val post = fetchPost(url)
-        return post.list("slide_urls").map { urls -> download((urls as? List<*>).orEmpty().map { it.toString() }, folder) }.filter { it.isNotEmpty() }
-    }
+    fun postSlides(url: String, folder: String): List<String> = downloadSlides(fetchPost(url).list("slide_urls"), folder)
+
+    /** Download slides given as one list of mirror URLs per slide; relative paths of those that worked, in order. */
+    fun downloadSlides(slideUrls: List<*>, folder: String): List<String> =
+        slideUrls.map { urls -> download((urls as? List<*>).orEmpty().map { it.toString() }, folder) }.filter { it.isNotEmpty() }
 
     fun upsertProfile(data: Map<String, Any?>): String {
         val username = data.str("username")

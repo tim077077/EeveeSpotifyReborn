@@ -100,6 +100,7 @@ class Analytics(private val db: Db, private val platform: Platform) {
         "description" to p.str("desc"),
         "is_slideshow" to p.bool("is_slideshow"),
         "slides" to p.long("slides"),
+        "slide_urls" to p.strings("slide_urls").map { arr(it) }.toMutableList<Any?>(), // one mirror per slide, like web items
         "views" to p.long("views"),
         "likes" to p.long("likes"),
         "comments" to p.long("comments"),
@@ -123,6 +124,7 @@ class Analytics(private val db: Db, private val platform: Platform) {
             row["posted_at"] = p.long("posted_at")
             if (p.containsKey("music")) row["music"] = p.str("music") // TikTok Studio's list has no sound info
             row["slides"] = if (p.containsKey("slides")) p.long("slides") else p.list("slide_urls").size.toLong()
+            if (p.list("slide_urls").isNotEmpty()) row["slide_urls"] = p.list("slide_urls").toMutableList() // for view_post
             for (k in STATS) row[k] = p.long(k)
             row["updated_at"] = atMs
             val snap = obj("id" to "$id@$atMs", "post_id" to id, "at" to atMs)
