@@ -36,6 +36,7 @@ import com.slidemill.core.AutoReplySettings
 import com.slidemill.core.Engine
 import com.slidemill.core.ReplyRule
 import com.slidemill.core.TikTokTab
+import com.slidemill.core.bool
 import com.slidemill.core.copyObj
 import com.slidemill.core.int
 import com.slidemill.core.long
@@ -596,7 +597,17 @@ class MainActivity : Activity() {
             p?.str("status") == "posting" -> "posting…"
             p?.str("status") == "failed" -> "✗ not posted: ${p.str("error")} (tap to retry)"
             r.long("suggested_time") > 0 -> "Claude suggests ${whenText(r.long("suggested_time"))}: tap to approve"
-            else -> "Draft: tap to preview and post"
+            else -> "Draft (${reviewTag(r)}): tap to preview and post"
+        }
+    }
+
+    /** Whether Claude's check passed for the slides as they are now (Claude can't schedule until it has). */
+    private fun reviewTag(r: Map<String, Any?>): String {
+        val rev = r.objOrNull("review")
+        return when {
+            rev == null || rev.long("version") != r.long("render_version") -> "not reviewed"
+            rev.bool("passed") -> "reviewed ✓"
+            else -> "review failed"
         }
     }
 

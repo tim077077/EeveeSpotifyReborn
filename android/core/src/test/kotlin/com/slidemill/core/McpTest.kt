@@ -41,6 +41,13 @@ class McpTest {
     private fun create(vararg extra: Pair<String, Any?>): Obj = call("create_slideshow", obj("plan" to plan, "image_source" to "ai", *extra))
     private fun idOf(out: Obj) = Json.parseObj(text(out)).str("id")
 
+    /** Claude's passing check of the slideshow's current render (every slide seen, nothing wrong). */
+    private fun passed(id: String): String {
+        val out = call("review_slideshow", obj("slideshow_id" to id, "slides_checked" to 35L, "issues" to arr(), "claims" to arr()))
+        assertTrue("Passed" in text(out), text(out))
+        return id
+    }
+
     @Test fun handshake_and_tool_list() {
         val init = result("initialize", obj("protocolVersion" to "2025-06-18", "capabilities" to obj(), "clientInfo" to obj("name" to "t", "version" to "1")))
         assertEquals("2025-06-18", init.str("protocolVersion"))
@@ -50,7 +57,7 @@ class McpTest {
         val names = result("tools/list").objs("tools").map { it.str("name") }
         assertEquals(listOf(
             "writing_guide", "research_library", "add_to_library", "discover_slideshows", "carousel_formats", "read_library_slides", "save_slide_texts", "create_slideshow",
-            "import_slides", "save_draft", "schedule_slideshow", "view_post", "view_slideshow", "list_slideshows", "delete_slideshow", "predict_virality", "analytics", "best_times", "auto_reply", "pinterest", "phone_status",
+            "import_slides", "edit_slideshow", "review_slideshow", "save_draft", "schedule_slideshow", "view_post", "view_slideshow", "list_slideshows", "delete_slideshow", "predict_virality", "analytics", "best_times", "auto_reply", "pinterest", "phone_status",
         ), names)
         // Notifications get no body; modern-era discovery falls back to the handshake; GET isn't served.
         assertEquals(202, e.relay.mcp.handle("POST", """{"jsonrpc":"2.0","method":"notifications/initialized"}""").status)
@@ -108,7 +115,7 @@ class McpTest {
     }
 
     @Test fun schedule_is_autopilot_by_default_and_proposes_when_turned_off() {
-        val id = idOf(create())
+        val id = passed(idOf(create()))
         val at = (Db.nowMs() / 1000 / 300 + 36) * 300 // on TikTok Studio's 5-minute steps
         val iso = java.time.Instant.ofEpochSecond(at).toString()
 
@@ -132,7 +139,7 @@ class McpTest {
         // Autopilot (the default when the setting was never touched): Claude's call schedules it directly,
         // but never crowding another Slidemill post.
         e.store.setMany(mapOf("claude_schedules" to ""))
-        val other = idOf(create())
+        val other = passed(idOf(create()))
         assertTrue("2 hours" in text(call("schedule_slideshow", obj("slideshow_id" to other, "at" to iso))))
         val later = java.time.Instant.ofEpochSecond(at + 3 * 3600).toString()
         val direct = call("schedule_slideshow", obj("slideshow_id" to other, "at" to later))
@@ -140,7 +147,7 @@ class McpTest {
         assertEquals("scheduled", row(other).objAt("post").str("status"))
 
         // Outside TikTok's window, or unreadable: refused before anything is sent.
-        val third = idOf(create())
+        val third = passed(idOf(create()))
         assertTrue("15 minutes" in text(call("schedule_slideshow", obj("slideshow_id" to third, "at" to java.time.Instant.now().plusSeconds(60).toString()))))
         assertTrue("30 days" in text(call("schedule_slideshow", obj("slideshow_id" to third, "at" to java.time.Instant.now().plusSeconds(40L * 86400).toString()))))
         assertTrue("ISO 8601" in text(call("schedule_slideshow", obj("slideshow_id" to third, "at" to "tomorrow at 6"))))
@@ -275,6 +282,63 @@ class McpTest {
         assertTrue(e.relay.ensureConnected()) // woken up offline: reconnects now, not after the backoff
         assertEquals(0, e.relay.status().int("drops_24h")) // it was never connected, so nothing dropped
         e.relay.stop()
+    }
+
+    @Test fun every_render_must_pass_review_before_it_can_be_scheduled() {
+        val id = idOf(create())
+        val at = java.time.Instant.ofEpochSecond(Db.nowMs() / 1000 + 6 * 3600).toString()
+        val out = create().objs("content")
+        assertTrue("Review: not done" in out.last().str("text"), out.last().str("text")) // the checklist comes with every render
+        val refused = call("schedule_slideshow", obj("slideshow_id" to id, "at" to at))
+        assertEquals(true, refused["isError"])
+        assertTrue("hasn't been reviewed" in text(refused), text(refused))
+
+        // A false or unsure claim fails it, with the issues listed; the gate stays shut.
+        val bad = call("review_slideshow", obj("slideshow_id" to id, "slides_checked" to 35L, "issues" to arr(),
+            "claims" to arr(obj("claim" to "lose 10 kg in a week", "verdict" to "unsure"))))
+        assertTrue("Failed (round 1)" in text(bad) && "lose 10 kg" in text(bad), text(bad))
+        assertTrue("failed its last review" in text(call("schedule_slideshow", obj("slideshow_id" to id, "at" to at))))
+
+        // A text-only fix re-renders without fetching any background, and needs a new review.
+        val before = row(id).objAt("spec").objs("slides").map { it.str("image") }
+        val edited = call("edit_slideshow", obj("slideshow_id" to id, "edits" to arr(obj("slide" to 2L, "texts" to arr("train 3x a week")))))
+        assertEquals(false, edited["isError"], edited.toString())
+        assertEquals(before, row(id).objAt("spec").objs("slides").map { it.str("image") })
+        assertEquals("train 3x a week", row(id).objAt("spec").objs("slides")[1].objs("text_items")[0].str("text"))
+        assertTrue("changed since its last review" in text(call("schedule_slideshow", obj("slideshow_id" to id, "at" to at))))
+        passed(id)
+        assertTrue("Review: passed" in call("view_slideshow", obj("slideshow_id" to id)).objs("content").last().str("text"))
+        assertTrue("Scheduled on @tim" in text(call("schedule_slideshow", obj("slideshow_id" to id, "at" to at))))
+
+        // Posted: no more edits.
+        assertTrue("already posted or scheduled" in text(call("edit_slideshow", obj("slideshow_id" to id, "caption" to "x"))))
+    }
+
+    @Test fun edits_replace_only_the_backgrounds_asked_for_and_reshape_the_slides() {
+        val id = idOf(create())
+        val images = row(id).objAt("spec").objs("slides").map { it.str("image") }
+        val out = call("edit_slideshow", obj("slideshow_id" to id, "edits" to arr(
+            obj("slide" to 1L, "new_background" to true),
+            obj("slide" to 3L, "delete" to true),
+            obj("slide" to 2L, "insert_after" to true, "texts" to arr("new slide"), "image_prompt" to "gym mirror"),
+        )))
+        assertEquals(false, out["isError"], out.toString())
+        val slides = row(id).objAt("spec").objs("slides")
+        assertEquals(images.size, slides.size) // one deleted, one inserted
+        assertEquals("new slide", slides[2].objs("text_items")[0].str("text"))
+        assertTrue(slides[0].str("image") != images[0]) // a new background for slide 1
+        assertEquals(images[1], slides[1].str("image")) // slide 2 untouched
+        assertEquals(images.size, row(id).strings("rendered").size)
+        assertTrue("doesn't exist" in text(call("edit_slideshow", obj("slideshow_id" to id, "edits" to arr(obj("slide" to 9L, "delete" to true))))))
+    }
+
+    @Test fun three_failed_reviews_hand_it_back_to_the_user() {
+        val id = idOf(create())
+        val bad = obj("slideshow_id" to id, "slides_checked" to 35L, "issues" to arr("slide 1: text cut off"), "claims" to arr())
+        repeat(2) { call("review_slideshow", bad) }
+        val third = text(call("review_slideshow", bad))
+        assertTrue("only 1 of" in text(call("review_slideshow", obj("slideshow_id" to id, "slides_checked" to 1L, "issues" to arr(), "claims" to arr()))))
+        assertTrue("round 3" in third && "ask how to proceed" in third, third)
     }
 
     @Test fun relay_link() {

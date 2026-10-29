@@ -75,6 +75,110 @@ class Studio(
     }
 
     /**
+     * Claude's fixes to a rendered slideshow, then a fresh render (call [build] after). Each edit names a
+     * slide by its number before this call: new texts (styles kept), a new background (new_background, or a new
+     * image_query/image_prompt), delete, or insert_after (a new slide after it; slide 0 = first).
+     * Only the changed backgrounds are fetched again. Returns the background URLs to avoid.
+     */
+    fun edit(id: String, caption: String?, description: String?, edits: List<Obj>): Set<String> {
+        val replaced = mutableListOf<String>()
+        db.tx {
+            val row = get("slideshows", id) ?: throw PipelineError("Slideshow $id not found.")
+            when {
+                row.objOrNull("post") != null -> throw PipelineError("Slideshow $id is already posted or scheduled on TikTok: it can't be edited. Make a new one.")
+                row.str("status") == "rendering" -> throw PipelineError("Slideshow $id is still rendering: edit it once it's done.")
+                row.str("source") == "imported" && edits.isNotEmpty() -> throw PipelineError("Imported slides are finished images: only caption and description can be edited. Import fixed images instead.")
+            }
+            val spec = row.objAt("spec").copyObj()
+            val originals = spec.objs("slides").toMutableList()
+            val deleted = mutableSetOf<Int>()
+            val inserts = mutableMapOf<Int, MutableList<Obj>>() // after original slide n (0 = before the first)
+            for (ed in edits) {
+                val n = ed.int("slide")
+                if (ed.bool("insert_after")) {
+                    if (n !in 0..originals.size) throw PipelineError("insert_after: slide must be 0-${originals.size}.")
+                    // A new slide takes the text style of the slide it follows (or the first one).
+                    val like = (originals.getOrNull(n - 1) ?: originals.firstOrNull())?.objs("text_items").orEmpty()
+                    inserts.getOrPut(n) { mutableListOf() } += Models.SLIDE.of(obj(
+                        "role" to "body",
+                        "text_items" to restyle(ed.strings("texts"), like),
+                        "image_query" to ed.str("image_query"), "image_prompt" to ed.str("image_prompt"),
+                    ))
+                    continue
+                }
+                val slide = originals.getOrNull(n - 1) ?: throw PipelineError("Slide $n doesn't exist: this slideshow has ${originals.size}.")
+                if (ed.bool("delete")) { deleted += n; continue }
+                if (ed.containsKey("texts")) slide["text_items"] = restyle(ed.strings("texts"), slide.objs("text_items"))
+                val newQuery = ed.strOrNull("image_query")?.takeIf { it.isNotBlank() }
+                val newPrompt = ed.strOrNull("image_prompt")?.takeIf { it.isNotBlank() }
+                newQuery?.let { slide["image_query"] = it }
+                newPrompt?.let { slide["image_prompt"] = it }
+                if (ed.bool("new_background") || newQuery != null || newPrompt != null) {
+                    slide.strOrNull("image")?.let { replaced += it }
+                    slide["image"] = null
+                }
+            }
+            val slides = mutableListOf<Any?>()
+            inserts[0]?.let { slides.addAll(it) }
+            originals.forEachIndexed { i, sl ->
+                if (i + 1 !in deleted) slides += sl
+                inserts[i + 1]?.let { slides.addAll(it) }
+            }
+            if (slides.isEmpty()) throw PipelineError("That would delete every slide.")
+            if (slides.size > MAX_SLIDES) throw PipelineError("At most $MAX_SLIDES slides.")
+            spec["slides"] = slides
+            row["spec"] = spec
+            caption?.let { row["caption"] = it.take(89) }
+            description?.let { row["description"] = it }
+            row["status"] = if (row.str("source") == "imported") "completed" else "rendering"
+            if (row.str("source") == "imported") row["render_version"] = row.long("render_version") + 1 // the text changed: review again
+        }
+        return db.tx { replaced.mapNotNull { p -> where("images") { it.str("path") == p }.firstOrNull()?.str("source_url")?.takeIf { it.isNotEmpty() } }.toSet() }
+    }
+
+    /** New texts in the styles of [like] (item by item; extra texts take the last style). */
+    private fun restyle(texts: List<String>, like: List<Obj>): MutableList<Any?> = texts.mapIndexed { i, t ->
+        Models.TEXT_ITEM.of((like.getOrNull(i) ?: like.lastOrNull())?.copyObj()?.also { it["text"] = t } ?: obj("text" to t))
+    }.toMutableList()
+
+    /**
+     * Record Claude's check of the current render. It passes only when every slide was checked, no
+     * problem is left and no claim is false or unsure. Returns the stored review (with the issues and the round).
+     */
+    fun review(id: String, slidesChecked: Int, problems: List<String>, claims: List<Obj>): Obj = db.tx {
+        val row = get("slideshows", id) ?: throw PipelineError("Slideshow $id not found.")
+        if (row.str("status") != "completed") throw PipelineError("Slideshow $id isn't rendered (${row.str("status")}): review it once it is.")
+        val version = row.long("render_version")
+        val issues = arr()
+        problems.map { it.trim() }.filter { it.isNotEmpty() }.forEach { issues += it }
+        for (c in claims) {
+            when (c.str("verdict")) {
+                "unsure" -> issues += "claim \"${c.str("claim")}\" is unsure: reword it as a tip or opinion, or remove it"
+                "false" -> issues += "claim \"${c.str("claim")}\" is false: fix or remove it"
+            }
+        }
+        val total = row.strings("rendered").size
+        if (slidesChecked < total) issues += "only $slidesChecked of $total slides checked: look at every slide"
+        val previous = row.objOrNull("review")
+        val round = if (previous != null && !previous.bool("passed")) previous.long("round") + 1 else 1L
+        val review = obj("version" to version, "passed" to issues.isEmpty(), "issues" to issues, "round" to round, "at" to Db.iso(Db.nowMs()))
+        row["review"] = review
+        review.copyObj()
+    }
+
+    /** Why this slideshow can't go public yet, or null when its current render passed review. */
+    fun reviewProblem(id: String): String? {
+        val row = db.tx { get("slideshows", id)?.copyObj() } ?: return null
+        val r = row.objOrNull("review")
+        return when {
+            r == null -> "Slideshow $id hasn't been reviewed: look at its slides, fix mistakes with edit_slideshow, then record the check with review_slideshow."
+            r.long("version") != row.long("render_version") -> "Slideshow $id changed since its last review: check the new render and call review_slideshow again."
+            !r.bool("passed") -> "Slideshow $id failed its last review: fix these with edit_slideshow, then review again: ${r.strings("issues").joinToString("; ")}"
+            else -> null
+        }
+    }
+
+    /**
      * Store finished slide images Claude made elsewhere, as a ready slideshow (no rendering). Each image is
      * re-encoded as a JPEG of at most 2160x2700, keeping its shape.
      */
@@ -101,15 +205,19 @@ class Studio(
             File(dir, "slide_${i + 1}.jpg").writeBytes(jpeg)
             "slideshows/$id/slide_${i + 1}.jpg"
         }
-        db.tx { get("slideshows", id)?.let { it["rendered"] = rendered.toMutableList<Any?>(); it["status"] = "completed" } }
+        db.tx { get("slideshows", id)?.let { it["rendered"] = rendered.toMutableList<Any?>(); it["status"] = "completed"; it["render_version"] = 1L } }
         return id
     }
 
-    /** Backgrounds, then the slides. Never throws: a failure is recorded on the row. */
-    fun build(id: String, source: String) {
+    /**
+     * Backgrounds, then the slides. Never throws: a failure is recorded on the row. Each render bumps the
+     * row's render_version, so a review only covers the slides it saw. [avoid]: background URLs not to
+     * pick again (the ones an edit replaced).
+     */
+    fun build(id: String, source: String, avoid: Set<String> = emptySet()) {
         try {
             val spec = db.tx { get("slideshows", id)?.objAt("spec")?.copyObj() } ?: throw PipelineError("slideshow not found")
-            val missing = assignImages(spec, source)
+            val missing = assignImages(spec, source, avoid)
             db.tx {
                 get("slideshows", id)?.let {
                     it["spec"] = spec
@@ -125,6 +233,7 @@ class Studio(
                     it["rendered"] = rendered.toMutableList<Any?>()
                     it["status"] = "completed"
                     it["error"] = ""
+                    it["render_version"] = it.long("render_version") + 1
                 }
             }
         } catch (x: Exception) {
@@ -137,10 +246,10 @@ class Studio(
      * Fill each slide's background: stock search (Pexels/Unsplash key) or AI generation, AI being the
      * fallback. Returns how many slides got none.
      */
-    fun assignImages(spec: Obj, source0: String): Int {
+    fun assignImages(spec: Obj, source0: String, avoid: Set<String> = emptySet()): Int {
         val source = if (source0 == "auto") (if (images.providers().isNotEmpty()) "stock" else "ai") else source0
         val orientation = images.orientationFor(spec.str("aspect_ratio"))
-        val usedUrls = mutableSetOf<String>()
+        val usedUrls = avoid.toMutableSet()
         val needsAi = mutableListOf<Obj>()
         // The renderer reads the spec's own slide maps, and objs() hands out copies: mutate the originals
         // so the background actually reaches the render.

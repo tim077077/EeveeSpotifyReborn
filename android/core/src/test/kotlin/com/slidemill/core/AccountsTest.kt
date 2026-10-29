@@ -33,7 +33,14 @@ class AccountsTest {
     )
 
     private fun create(account: String = ""): String =
-        Json.parseObj(text(call("create_slideshow", obj("plan" to plan, "image_source" to "ai", "account" to account)))).str("id")
+        passed(Json.parseObj(text(call("create_slideshow", obj("plan" to plan, "image_source" to "ai", "account" to account)))).str("id"))
+
+    /** Claude's passing check of the slideshow's current render (every slide seen, nothing wrong). */
+    private fun passed(id: String): String {
+        val out = call("review_slideshow", obj("slideshow_id" to id, "slides_checked" to 35L, "issues" to arr(), "claims" to arr()))
+        assertTrue("Passed" in text(out), text(out))
+        return id
+    }
 
     @Test fun each_slideshow_posts_from_its_own_account_with_its_own_limits() {
         val a = create()

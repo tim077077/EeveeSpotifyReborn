@@ -38,10 +38,15 @@ class Mcp(private val e: Engine) {
         const val SHEET_CELL = 300
         const val SHEET_GAP = 6
 
+        /** Returned after every render until it passes; kept short (it's paid for on every check). */
+        const val REVIEW_CHECKLIST = "Check every slide: text fully visible, readable over the photo, no typos, not covering faces, same style throughout, counts match the hook. " +
+            "Every factual claim/number: true, unsure or false (fitness/health: no medical promises or exact results); reword or remove unsure ones. " +
+            "Every background: fits the slide and the user's criteria, no watermark/logo/stray text/AI artifacts. Fix with edit_slideshow, then record with review_slideshow."
+
         const val INSTRUCTIONS = """Slidemill makes TikTok photo carousels on the user's phone: you research, write and judge; the phone renders and posts.
 
 1. Before writing: writing_guide (once) and analytics (what_works = what beats THIS account's median; do more of it). For a topic's best format: discover_slideshows, then carousel_formats; copy the format, never the words. research_library lists real high-lift slideshows.
-2. create_slideshow renders your plan (or import_slides takes finished images). Check the returned slides; fix or delete weak ones.
+2. create_slideshow renders your plan (or import_slides takes finished images). After EVERY render: check the slides (text, facts, backgrounds), fix with edit_slideshow, record with review_slideshow; scheduling needs a passed review.
 3. Optional: predict_virality (two calls; pass seen_slides=true if you've already looked at the slides).
 4. Posting is on autopilot: schedule_slideshow (time from best_times) publishes without the user approving, so only schedule what you'd stand behind. Min 2 h apart, max 4 per 24 h.
 5. save_draft only if the user asks for TikTok Studio web drafts.
@@ -137,6 +142,28 @@ Save tokens: don't repeat calls whose answer you already have in this conversati
                 "account" to str("TikTok username to use (blank = the default account; phone_status lists them)."),
             ),
         ) { a -> importSlides(a) },
+
+        "edit_slideshow" to Tool(
+            "Fix a rendered slideshow (slide text, new background, delete/insert slides, caption); re-renders and returns the slides to check again.",
+            input(
+                listOf("slideshow_id"),
+                "slideshow_id" to str(),
+                "edits" to obj("type" to "array", "items" to Shapes.SLIDE_EDIT.toJson()),
+                "caption" to str(),
+                "description" to str(),
+            ),
+        ) { a -> editSlideshow(id(a), a) },
+
+        "review_slideshow" to Tool(
+            "Record your check of the current render (checklist under its slides). Passes only with every slide checked, no issues and every claim true. Required before schedule_slideshow.",
+            input(
+                listOf("slideshow_id", "slides_checked", "issues", "claims"),
+                "slideshow_id" to str(),
+                "slides_checked" to int("How many slides you looked at.", 0, 0, 35),
+                "issues" to strs("Problems still there, e.g. \"slide 3: text cut off\" ([] if none)."),
+                "claims" to obj("type" to "array", "items" to Shapes.CLAIM_CHECK.toJson(), "description" to "Every factual claim/number ([] if none)."),
+            ),
+        ) { a -> reviewSlideshow(id(a), a) },
 
         "save_draft" to Tool(
             "Only if the user asks: save a slideshow to TikTok Studio web drafts (not the TikTok app's Drafts). Answers with the draft id.",
@@ -456,6 +483,7 @@ Save tokens: don't repeat calls whose answer you already have in this conversati
         if (aspect !in Shapes.ASPECT_RATIOS) throw ToolError("aspect_ratio must be one of ${Shapes.ASPECT_RATIOS}")
         val draft = a.bool("save_draft")
         val id = e.studio.create(plan, aspect, accountFor(a.str("account")))
+        e.db.tx { get("slideshows", id)?.set("image_source", source) } // edits fetch new backgrounds the same way
         // One job renders and then saves the draft, so a slow render can't lose the save.
         val done = within {
             e.studio.build(id, source)
@@ -554,6 +582,7 @@ Save tokens: don't repeat calls whose answer you already have in this conversati
         }
         val s = show(id)
         if (s.str("status") != "completed") throw ToolError("Slideshow $id isn't rendered (${s.str("status")}).")
+        e.studio.reviewProblem(id)?.let { throw ToolError(it) }
         val at = parseAt(raw)
         Studio.scheduleProblem(at)?.let { throw ToolError(it) }
         val user = s.str("account").ifEmpty { defaultUser() }
@@ -834,6 +863,44 @@ Save tokens: don't repeat calls whose answer you already have in this conversati
         val out = arr(text(lean(slim)))
         if (rendered.isNotEmpty()) out += text("The ${rendered.size} slides, tiled left to right then top to bottom (view_slideshow slide=N shows one full size):")
         sheet(rendered.map { File(e.mediaDir, it) })?.let { out += it }
+        if (show.str("status") == "completed" && show.objOrNull("post") == null) out += text(reviewNote(show))
         return out
+    }
+
+    /** Where the slideshow stands with review, and the checklist to work through. */
+    private fun reviewNote(show: Obj): String {
+        val r = show.objOrNull("review")
+        val state = when {
+            r != null && r.long("version") == show.long("render_version") && r.bool("passed") -> return "Review: passed for this render."
+            r != null && r.long("version") == show.long("render_version") -> "Review: FAILED (round ${r.long("round")}): ${r.strings("issues").joinToString("; ")}."
+            else -> "Review: not done for this render."
+        }
+        return "$state $REVIEW_CHECKLIST"
+    }
+
+    private fun editSlideshow(id: String, a: Obj): List<Any?> {
+        val edits = a.list("edits").map { (Shapes.SLIDE_EDIT.validate(it) as Obj) }
+        val caption = a.strOrNull("caption")?.takeIf { it.isNotBlank() }
+        val description = a.strOrNull("description")?.takeIf { it.isNotBlank() }
+        if (edits.isEmpty() && caption == null && description == null) throw ToolError("Nothing to change: pass edits, caption or description.")
+        val avoid = e.studio.edit(id, caption, description, edits)
+        if (show(id).str("status") == "rendering") {
+            val source = show(id).str("image_source").ifEmpty { "auto" }
+            within { e.studio.build(id, source, avoid) }
+                ?: return arr(text("Re-rendering on the phone (slideshow id $id). Call view_slideshow with this id in about a minute, then check it again."))
+        }
+        val s = show(id)
+        if (s.str("status") == "failed") throw ToolError("Re-rendering failed: ${s.str("error")} (slideshow id $id)")
+        return withSlides(s)
+    }
+
+    private fun reviewSlideshow(id: String, a: Obj): String {
+        show(id)
+        val claims = a.list("claims").map { Shapes.CLAIM_CHECK.validate(it) as Obj }
+        val r = e.studio.review(id, a.int("slides_checked", 0), a.strings("issues"), claims)
+        if (r.bool("passed")) return "Passed: this render can be scheduled."
+        val issues = r.strings("issues").joinToString("\n- ", prefix = "- ")
+        return if (r.long("round") >= 3) "Failed again (round ${r.long("round")}):\n$issues\nStop fixing: show the user these remaining issues and ask how to proceed."
+        else "Failed (round ${r.long("round")}). Fix these with edit_slideshow, then check the new render and call review_slideshow again:\n$issues"
     }
 }
