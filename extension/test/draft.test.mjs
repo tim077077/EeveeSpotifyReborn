@@ -304,4 +304,36 @@ const priv = await askPrivate("@gigel");
 assert.deepEqual([priv.ok, priv.private, priv.username], [true, true, "gigel"]);
 assert.deepEqual(profiles, ["gigel"]); // the @ is stripped before asking
 assert.equal((await askPrivate("marius")).ok, false); // a profile that didn't come back is an error, not "not private"
+
+// Replies TikTok doesn't embed under a comment still get read, so a keyword inside any of them matches.
+const replyCalls = [];
+win.fetch = async (url) => {
+  const u = new URL(url);
+  replyCalls.push(u.pathname);
+  if (u.pathname === "/api/comment/list/reply/") {
+    return { ok: true, text: async () => JSON.stringify({ status_code: 0, has_more: false, cursor: "0", comments: [
+      { cid: "c1r2", text: "PLAN", user: { unique_id: "ana" } },
+      { cid: "c1r3", text: "altceva", user: { unique_id: "ioana" } },
+    ] }) };
+  }
+  if (u.pathname !== "/api/comment/list/") throw new Error("unexpected request " + url);
+  return { ok: true, text: async () => JSON.stringify({ status_code: 0, has_more: false, cursor: "0", comments: [
+    { cid: "c1", text: "first", reply_comment_total: 4, reply_comment: [{ cid: "c1r", text: "hi" }], user: { unique_id: "gigel" } },
+  ] }) };
+};
+const deep = await askComments({ itemId: "7535", max: 50 });
+assert.deepEqual(deep.comments.map((c) => c.cid), ["c1", "c1r", "c1r2", "c1r3"]); // c1 says 4 replies, only 1 embedded
+assert.equal(deep.comments[2].root_cid, "c1"); // the paged replies are threaded under their comment too
+assert.deepEqual(replyCalls, ["/api/comment/list/", "/api/comment/list/reply/"]);
+const listQs = commentCalls[0].query; // the first page of an earlier listing (insert_ids only applies to cursor 0)
+assert.equal(listQs.get("fromWeb"), "1"); // the parameters TikTok's own client sends (36_79019)
+assert.equal(listQs.get("enter_from"), "tiktok_web");
+assert.equal(listQs.get("insert_ids"), "0");
+assert.equal(commentCalls[commentCalls.length - 1].query.get("insert_ids"), null); // not on later pages
+
+// A private account answers 10222: TikTok's client reads that as a usable answer, so we call it private.
+win.fetch = async () => ({ json: async () => ({ statusCode: 10222, userInfo: { user: { uniqueId: "secretguy", privateAccount: true } } }) });
+assert.deepEqual([(await askPrivate("secretguy")).ok, (await askPrivate("secretguy")).private], [true, true]);
+win.fetch = async () => ({ json: async () => ({ statusCode: 10222, userInfo: {} }) });
+assert.deepEqual([(await askPrivate("ghost")).ok, (await askPrivate("ghost")).private], [true, true]); // nothing back at all: private, not an error
 console.log("comments + reply: ok");

@@ -568,6 +568,34 @@
     };
   }
 
+  const language = () => { try { return navigator.language || navigator.userLanguage || ""; } catch (_) { return ""; } };
+
+  // The rest of one comment's replies. TikTok embeds only the first few under a comment; the whole
+  // thread comes from the reply list (63_webapp-desktop: comment_id + item_id, not aweme_id).
+  async function commentReplies({ itemId, cid, max, pauseMs } = {}) {
+    const limit = Math.max(1, Math.min(Number(max) || 40, 100));
+    const out = [];
+    let cur = "0";
+    for (let page = 0; page < 3 && out.length < limit; page++) {
+      if (page > 0) await new Promise((r) => setTimeout(r, pauseMs != null ? pauseMs : 600 + Math.random() * 700));
+      const q = new URLSearchParams({
+        aid: "1988", app_name: "tiktok_web", device_platform: "web_pc",
+        comment_id: String(cid), item_id: String(itemId), cursor: cur, count: "20", fromWeb: "1",
+      });
+      if (cur === "0") q.set("insert_ids", "0");
+      const r = await fetch(ORIGIN + "/api/comment/list/reply/?" + q, { credentials: "include" });
+      const text = await r.text();
+      if (!text) break;
+      let j = null;
+      try { j = JSON.parse(text); } catch (_) { break; }
+      if (j.status_code && j.status_code !== 0) break;
+      for (const rep of j.comments || []) if (rep && rep.cid) out.push(slimComment(rep, String(cid)));
+      if (!j.has_more) break;
+      cur = String(j.cursor || "0");
+    }
+    return out;
+  }
+
   // The comments on one of the account's own posts, newest first, replies included (one level).
   async function comments({ itemId, max, cursor, pauseMs } = {}) {
     if (!itemId) throw new Error("no post id");
@@ -577,9 +605,17 @@
     let cur = String(cursor || 0);
     for (let page = 0; page < 8 && out.length < limit; page++) {
       if (page > 0) await new Promise((r) => setTimeout(r, pauseMs != null ? pauseMs : 700 + Math.random() * 900));
-      const q = new URLSearchParams({ aid: "1988", app_name: "tiktok_web", channel: "tiktok_web", device_platform: "web_pc", aweme_id: String(itemId), count: "50", cursor: cur });
+      // The query TikTok's own client sends (36_79019, 63_webapp-desktop): fromWeb and enter_from, and
+      // insert_ids on the first page (the ids already shown above the batch).
+      const q = new URLSearchParams({
+        aid: "1988", app_name: "tiktok_web", channel: "tiktok_web", device_platform: "web_pc",
+        aweme_id: String(itemId), count: "50", cursor: cur, fromWeb: "1", enter_from: "tiktok_web",
+      });
       const tz = timeZone();
       if (tz) q.set("tz_name", tz);
+      const lang = language();
+      if (lang) q.set("app_language", lang);
+      if (cur === "0") q.set("insert_ids", "0");
       const r = await fetch(ORIGIN + "/api/comment/list/?" + q, { credentials: "include" });
       const text = await r.text();
       if (!text) throw new Error("TikTok sent an empty comment list");
@@ -588,8 +624,15 @@
       for (const c of j.comments || []) {
         if (!c || !c.cid) continue;
         if (!seen.has(String(c.cid))) { seen.add(String(c.cid)); out.push(slimComment(c)); }
-        for (const rep of c.reply_comment || []) {
+        const embedded = c.reply_comment || [];
+        for (const rep of embedded) {
           if (rep && rep.cid && !seen.has(String(rep.cid))) { seen.add(String(rep.cid)); out.push(slimComment(rep, String(c.cid))); }
+        }
+        // Replies past the embedded few, so a keyword in any of them still matches.
+        if (num(c.reply_comment_total) > embedded.length && out.length < limit) {
+          for (const rep of await commentReplies({ itemId, cid: c.cid })) {
+            if (rep.cid && !seen.has(String(rep.cid))) { seen.add(String(rep.cid)); out.push(rep); }
+          }
         }
         if (out.length >= limit) break;
       }
@@ -603,11 +646,16 @@
   async function userPrivate({ uniqueId } = {}) {
     const user = String(uniqueId || "").replace(/^@/, "");
     if (!user) throw new Error("no username");
-    const q = new URLSearchParams({ aid: "1988", app_name: "tiktok_web", device_platform: "web_pc", uniqueId: user });
+    const q = new URLSearchParams({ aid: "1988", app_name: "tiktok_web", device_platform: "web_pc", uniqueId: user, fromWeb: "1" });
     const r = await fetch(ORIGIN + "/api/user/detail/?" + q, { credentials: "include" });
     const j = await r.json();
     const u = (j.userInfo && j.userInfo.user) || {};
-    if (!u.uniqueId && !u.uid) throw new Error("no profile came back");
+    // TikTok's own client treats 10222 with a userInfo as a usable answer (63_webapp-desktop), and that
+    // code is what a private account returns: read it as private instead of giving up.
+    if (!u.uniqueId && !u.uid) {
+      if (num(j.statusCode) === 10222) return { private: true, username: user, status_code: 10222 };
+      throw new Error("no profile came back" + (j.statusCode ? " (statusCode " + j.statusCode + ")" : ""));
+    }
     return { private: !!u.privateAccount, username: u.uniqueId || user };
   }
 
