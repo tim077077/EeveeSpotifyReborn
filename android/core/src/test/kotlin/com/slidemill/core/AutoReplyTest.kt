@@ -125,16 +125,26 @@ class AutoReplyTest {
         perHour: Int = 20,
         perDay: Int = 50,
         postsDays: Int = 7,
+        quietFrom: Int = 0,
+        quietTo: Int = 0,
+        cooldownMin: Int = 0,
+        skipChance: Int = 0,
+        typing: Boolean = false,
+        refreshMin: Int = 1,
     ) = e.saveAutoReply(
         AutoReplySettings(
             enabled = enabled, rules = rules.toList(), repliesPerRun = perRun,
             minGapSec = gapSec, maxGapSec = gapSec, maxPerHour = perHour, maxPerDay = perDay, postsDays = postsDays,
+            quietFrom = quietFrom, quietTo = quietTo, authorCooldownMin = cooldownMin,
+            skipChance = skipChance, typingDelay = typing, postsRefreshMin = refreshMin,
         ),
     )
 
-    private fun post(id: String, ageDays: Double = 1.0, private: Boolean = false) = obj(
+    /** One of the account's posts as listMyPosts returns it. [comments] is the count the change detector
+     *  compares against, so a test that adds a comment has to move it, exactly like TikTok does. */
+    private fun post(id: String, ageDays: Double = 1.0, private: Boolean = false, comments: Long = 3) = obj(
         "id" to id, "desc" to "5 money tips", "posted_at" to (now / 1000 - (ageDays * 86_400).toLong()),
-        "views" to 1200L, "comments" to 3L, "private" to private, "is_slideshow" to true,
+        "views" to 1200L, "comments" to comments, "private" to private, "is_slideshow" to true,
     )
 
     private fun comment(cid: String, text: String, author: String = "gigel", root: String = "") =
@@ -174,6 +184,7 @@ class AutoReplyTest {
         assertEquals(3, tiktok.replies.size)
         // A new comment on the same post does get an answer, and the replies keep rotating.
         now += 60_000
+        tiktok.myPosts = listOf(post("p1", comments = 4)) // the comment count moved, so the post is read again
         tiktok.commentsOf["p1"]!!.add(comment("c6", "Plan!"))
         val later = e.autoReplier.runOnce()
         assertEquals(1, later.int("replied"))
@@ -183,23 +194,25 @@ class AutoReplyTest {
 
     @Test fun the_pass_respects_the_caps_and_the_gap() {
         save(ReplyRule("plan", listOf("x")), perRun = 1, gapSec = 120)
-        tiktok.myPosts = listOf(post("p1"))
+        tiktok.myPosts = listOf(post("p1", comments = 2))
         tiktok.commentsOf["p1"] = mutableListOf(comment("c1", "PLAN"), comment("c2", "plan"))
         val first = e.autoReplier.runOnce()
         assertEquals(1, first.int("replied")) // repliesPerRun
         assertEquals(1, tiktok.replies.size)
+        tiktok.myPosts = listOf(post("p1", comments = 3))
+        now += 61_000 // a minute on: the post list is re-read, and the gap still has 59s to run
         val second = e.autoReplier.runOnce()
         assertEquals(0, second.int("replied"))
-        assertEquals("waiting 120s", second.str("waiting"))
+        assertTrue(second.str("waiting").startsWith("waiting"), second.str("waiting")) // 59s of the gap left
         assertEquals(1, second.int("blocked"))
         // After the gap, the next one goes out; the daily cap still stops the third.
-        now += 121_000
+        now += 61_000
+        tiktok.myPosts = listOf(post("p1", comments = 4))
         assertEquals(1, e.autoReplier.runOnce().int("replied"))
         tiktok.commentsOf["p1"]!!.add(comment("c3", "PLAN"))
-        e.saveAutoReply(AutoReplySettings(enabled = true, rules = listOf(ReplyRule("plan", listOf("x"))), maxPerHour = 5, maxPerDay = 2, minGapSec = 0, maxGapSec = 0, repliesPerRun = 5))
-        // The gap armed by the last reply still stands, whatever the caps are now.
-        assertEquals("waiting 120s", e.autoReplier.runOnce().str("waiting"))
-        now += 121_000
+        tiktok.myPosts = listOf(post("p1", comments = 5))
+        now += 121_000 // past the gap: now only the daily cap can stop it
+        e.saveAutoReply(AutoReplySettings(enabled = true, rules = listOf(ReplyRule("plan", listOf("x"))), maxPerHour = 5, maxPerDay = 2, minGapSec = 0, maxGapSec = 0, repliesPerRun = 5, authorCooldownMin = 0, skipChance = 0, quietFrom = 0, quietTo = 0, typingDelay = false, postsRefreshMin = 1))
         val capped = e.autoReplier.runOnce()
         assertEquals(0, capped.int("replied"))
         assertEquals("daily cap (2)", capped.str("waiting"))
@@ -213,7 +226,9 @@ class AutoReplyTest {
         assertEquals(2, e.autoReplier.runOnce().int("replied"))
         assertEquals(listOf("ai cont privat, scrie-mi din nou", "Ți-am trimis planul"), tiktok.replies.map { it.third })
         // With no private reply set, a private commenter gets the normal one.
-        e.saveAutoReply(AutoReplySettings(enabled = true, rules = listOf(ReplyRule("plan", listOf("normal"))), minGapSec = 0, maxGapSec = 0))
+        e.saveAutoReply(AutoReplySettings(enabled = true, rules = listOf(ReplyRule("plan", listOf("normal"))), minGapSec = 0, maxGapSec = 0, authorCooldownMin = 0, skipChance = 0, quietFrom = 0, quietTo = 0, typingDelay = false, postsRefreshMin = 1))
+        now += 61_000
+        tiktok.myPosts = listOf(post("p1", comments = 4))
         tiktok.commentsOf["p1"] = mutableListOf(comment("c7", "PLAN", author = "gigel"))
         assertEquals(1, e.autoReplier.runOnce().int("replied"))
         assertEquals("normal", tiktok.replies.last().third)
@@ -262,6 +277,47 @@ class AutoReplyTest {
         assertEquals(listOf("c1", "c2"), would.map { it.str("cid") })
     }
 
+    @Test fun it_stays_quiet_at_night_and_answers_a_person_only_once() {
+        val hour = java.time.Instant.ofEpochMilli(now).atZone(java.time.ZoneId.of(platform.defaultTimezone())).hour
+        save(ReplyRule("plan", listOf("x")), quietFrom = hour, quietTo = (hour + 1) % 24)
+        tiktok.myPosts = listOf(post("p1", comments = 1))
+        tiktok.commentsOf["p1"] = mutableListOf(comment("c1", "PLAN"))
+        val night = e.autoReplier.runOnce()
+        assertEquals(0, night.int("replied"))
+        assertTrue(night.str("waiting").startsWith("quiet hours"), night.str("waiting"))
+        assertEquals(0, tiktok.replies.size) // commented at 3am, answered in the morning
+        assertEquals(0, night.int("comments")) // and nothing was even read
+
+        // Daytime, with a six-hour per-person cooldown: the same person twice is still one answer.
+        save(ReplyRule("plan", listOf("x")), cooldownMin = 360)
+        tiktok.commentsOf["p1"] = mutableListOf(comment("c1", "PLAN"), comment("c2", "plan"), comment("c3", "pln", author = "ana"))
+        val day = e.autoReplier.runOnce()
+        assertEquals(2, day.int("replied")) // gigel once, ana once
+        assertEquals(1, day.int("skipped_person"))
+        assertEquals(listOf("c1", "c3"), tiktok.replies.map { it.second })
+    }
+
+    @Test fun it_misses_one_on_purpose_and_leaves_an_unchanged_post_alone() {
+        save(ReplyRule("plan", listOf("x")), skipChance = 100)
+        tiktok.myPosts = listOf(post("p1", comments = 1))
+        tiktok.commentsOf["p1"] = mutableListOf(comment("c1", "PLAN"))
+        val skipped = e.autoReplier.runOnce()
+        assertEquals(0, skipped.int("replied"))
+        assertEquals(1, skipped.int("skipped_random"))
+        assertEquals(1, skipped.int("comments")) // it looked, then chose not to
+        // A deliberate miss stays unread, so the next pass still finds it.
+        e.replies.random = java.util.Random(7)
+        assertEquals(1, e.autoReplier.runOnce().int("skipped_random"))
+
+        // Answered comments are remembered: an unchanged post is not read again, so no request goes out.
+        save(ReplyRule("plan", listOf("x")))
+        e.replies.random = java.util.Random(7)
+        assertEquals(1, e.autoReplier.runOnce().int("replied"))
+        val quiet = e.autoReplier.runOnce()
+        assertEquals(0, quiet.int("comments"))
+        assertEquals(1, quiet.int("skipped_unchanged"))
+    }
+
     // ---- Claude's tool --------------------------------------------------------------------------
 
     private fun rpc(method: String, params: Obj = obj()): Obj =
@@ -293,8 +349,8 @@ class AutoReplyTest {
         val state = call("auto_reply")
         assertEquals(true, state.bool("enabled"))
         assertEquals("PLAN", state.objs("rules")[0].str("keyword"))
-        assertEquals(20, state.objAt("caps").int("per_hour"))
-        assertEquals("60-180", state.objAt("caps").str("gap_sec"))
+        assertEquals(8, state.objAt("caps").int("per_hour"))
+        assertEquals("90-420", state.objAt("caps").str("gap_sec"))
         assertEquals(false, call("auto_reply", "action" to "off").bool("enabled"))
 
         // Removing, and the errors a wrong call gets.

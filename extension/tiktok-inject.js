@@ -664,6 +664,8 @@
     const body = String(text || "").trim();
     if (!itemId || !cid) throw new Error("need the post id and the comment id");
     if (!body) throw new Error("the reply is empty");
+    // Read, then type: TikTok's own client never publishes in the same millisecond as the list call.
+    await new Promise((r) => setTimeout(r, 900 + Math.min(body.length * 55, 5000) + Math.random() * 700));
     const root = String(rootCid || cid);
     const q = new URLSearchParams({
       aid: "1988", app_name: "tiktok_web", channel: "tiktok_web", device_platform: "web_pc",
@@ -696,6 +698,8 @@
       const { w, h } = await dimsOf(bytes);
       log(`image ${i + 1}/${images.length}: ${bytes.length} bytes, ${w}×${h} — applying…`);
       const ap = await applyImageUpload(creds, bytes.length);
+      // A human's uploader doesn't fire its images back to back; a short, uneven pause between slides.
+      if (i > 0) await new Promise((r) => setTimeout(r, 300 + Math.random() * 900));
       if (i === 0) firstStoreUri = ap.storeUri;
       if (!storageU) storageU = storageUserIdFromAuth(ap.auth);
       log(`  applied → host ${ap.uploadHost}, storageU ${storageU || "MISSING"} — uploading bytes…`);

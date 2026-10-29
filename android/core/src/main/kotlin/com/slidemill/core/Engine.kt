@@ -62,17 +62,21 @@ class Engine(val platform: Platform, val dataDir: File) {
 
     fun start() {
         relay.start()
+        // Analytics: a wide, uneven interval (2.5 to 4 hours) instead of a metronome. A request that lands
+        // every exactly-180-minutes is one of the easiest patterns to spot in a server's logs.
         ticker.scheduleWithFixedDelay({
             for (tab in tabs.values.toList()) {
                 runCatching { platform.awake { analytics.refresh(tab) } }.onFailure { platform.log("analytics refresh of ${tab.id} skipped: ${it.message}") }
             }
-        }, 2, 180, TimeUnit.MINUTES)
-        // Every minute: a pass that reads the comments and answers the ones matching a keyword. It does
-        // nothing at all while auto-reply is off, and the caps and the gap inside AutoReplier stop it
-        // from replying faster than the user allowed.
+        }, 2, 150 + (0..90L).random(), TimeUnit.MINUTES)
+        // Every five minutes (plus a minute of jitter): one pass that reads what changed and answers at
+        // most one comment. It does nothing while auto-reply is off, and the caps, the gap, the quiet
+        // hours and the per-person cooldown inside AutoReplier stop it looking like a machine.
+        val jitter = (0..60_000L).random()
         replier.scheduleWithFixedDelay({
+            Thread.sleep(jitter)
             runCatching { platform.awake { autoReplier.runOnce() } }.onFailure { platform.log("auto-reply pass skipped: ${it.message}") }
-        }, 45, 60, TimeUnit.SECONDS)
+        }, 45, 300, TimeUnit.SECONDS)
     }
 
     /** Slideshows posted from Slidemill, by TikTok post id: their slideshow id and predicted score. */
