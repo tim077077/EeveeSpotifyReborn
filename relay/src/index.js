@@ -111,6 +111,7 @@ export class Relay extends DurableObject {
     let m;
     try { m = JSON.parse(data); } catch { return; }
     if (m.t === "ack") return this.forget(m.id);
+    if (m.t === "ping") return ws.send(JSON.stringify({ t: "pong" })); // the phone checking the link after a sleep
     const p = this.pending.get(m.id);
     if (!p) return;
     if (m.t === "part") p.parts.push(m.data);

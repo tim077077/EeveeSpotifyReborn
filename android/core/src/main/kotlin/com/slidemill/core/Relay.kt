@@ -43,7 +43,7 @@ class Relay(private val e: Engine) {
 
     val mcp = Mcp(e)
     private val http = OkHttpClient.Builder()
-        .pingInterval(25, TimeUnit.SECONDS) // also notices a dead connection
+        .pingInterval(60, TimeUnit.SECONDS) // notices a dead connection; rarer pings let the phone's radio rest
         .readTimeout(0, TimeUnit.MILLISECONDS)
         .build()
     private val daemon = java.util.concurrent.ThreadFactory { r -> Thread(r, "relay").apply { isDaemon = true } }
@@ -98,22 +98,34 @@ class Relay(private val e: Engine) {
     val connected: Boolean get() = state == "connected"
 
     /**
-     * Called when the phone wakes up (a Doze-proof alarm, the network coming back): while it slept,
-     * the reconnect timers didn't run and the socket may have died without noticing. Reconnects now
-     * if offline, and replaces a socket that has been quiet longer than [quietMs] (unless a request
-     * is running on it). Returns whether a new connection was started.
+     * Called when the phone wakes up (a Doze-proof alarm, the network coming back): while it slept, the
+     * reconnect timers didn't run and the socket may have died without noticing. Offline: reconnect now.
+     * Connected: send one tiny ping and reconnect only if the relay doesn't answer within [probeMs]
+     * (much cheaper than a fresh connection every time). Blocking; returns whether it reconnected.
      */
-    fun ensureConnected(quietMs: Long = 9 * 60_000L): Boolean {
+    fun ensureConnected(probeMs: Long = 8_000L): Boolean {
         if (url.isEmpty()) return false
-        val stale = synchronized(lock) {
+        val ws = synchronized(lock) {
             when (state) {
-                "connected" -> inFlight.get() == 0 && Db.nowMs() - lastHeardMs > quietMs
-                "connecting" -> false
-                else -> true
+                "connected" -> socket
+                "connecting" -> return false
+                else -> null
             }
         }
-        if (stale) start()
-        return stale
+        if (ws != null && inFlight.get() == 0) {
+            val sent = Db.nowMs()
+            if (ws.send(Json.write(obj("t" to "ping")))) {
+                val until = sent + probeMs
+                while (Db.nowMs() < until) {
+                    if (lastHeardMs >= sent) return false // answered: the link is alive
+                    Thread.sleep(200)
+                }
+            }
+        } else if (ws != null) {
+            return false // a request is running on it: it's alive
+        }
+        start()
+        return true
     }
 
     /** Set (or clear, with "") the relay address and (re)connect. */

@@ -49,9 +49,11 @@ object LibraryScraper {
         val items = ConcurrentHashMap<String, Obj>()
         val done = CountDownLatch(1)
         var web: WebView? = null
-        main.post { web = start(context.applicationContext, url, apiPath, max, via, known, items, done) }
-        done.await(timeoutMs, TimeUnit.MILLISECONDS)
-        main.post { web?.apply { stopLoading(); destroy() } }
+        TikTokWeb.busyWhile {
+            main.post { web = start(context.applicationContext, url, apiPath, max, via, known, items, done) }
+            done.await(timeoutMs, TimeUnit.MILLISECONDS)
+            main.post { web?.apply { stopLoading(); destroy() } }
+        }
         return items.values.take(max)
     }
 

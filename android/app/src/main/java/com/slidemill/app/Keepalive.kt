@@ -19,11 +19,12 @@ import kotlin.concurrent.thread
 /**
  * Keeps Claude's way in open while the phone sleeps. With the screen off, Android stops the CPU, so
  * the relay socket's pings and its reconnect timer stop too, and the socket dies unnoticed. A
- * Doze-proof alarm every [INTERVAL_MS] and the network coming back each wake the phone briefly to
- * reconnect (Relay.ensureConnected) and revive the TikTok tabs.
+ * Doze-proof alarm every [INTERVAL_MS] and the network coming back each wake the phone for a few
+ * seconds: one tiny ping to the relay, and a reconnect only if it doesn't answer (Relay.ensureConnected).
+ * The TikTok pages are left asleep; they wake when Claude asks for something.
  */
 object Keepalive {
-    private const val INTERVAL_MS = 10 * 60_000L // Doze allows an idle alarm about every 9 minutes
+    private const val INTERVAL_MS = 15 * 60_000L // every wake-up costs battery; Doze allows one per ~9 minutes at most
     private const val CHECK_MS = 30_000L
     private const val PREFS = "keepalive"
 
@@ -58,7 +59,7 @@ object Keepalive {
         else am.setAndAllowWhileIdle(AlarmManager.ELAPSED_REALTIME_WAKEUP, at, pi)
     }
 
-    /** Reconnect if needed and wake the TikTok tabs, holding the CPU up until the relay answers (≤30 s). */
+    /** Check the relay link and reconnect if it's dead, holding the CPU up only until it's back (≤30 s). */
     fun check(context: Context) {
         val app = context.applicationContext
         val lock = app.getSystemService(PowerManager::class.java)
@@ -67,7 +68,6 @@ object Keepalive {
             try {
                 val relay = Slidemill.engine(app).relay
                 relay.ensureConnected()
-                TikTokWeb.slots(app).forEach { TikTokWeb.of(it).wake(app) }
                 val until = SystemClock.elapsedRealtime() + CHECK_MS
                 while (!relay.connected && relay.url.isNotEmpty() && SystemClock.elapsedRealtime() < until) Thread.sleep(500)
             } catch (_: Exception) {

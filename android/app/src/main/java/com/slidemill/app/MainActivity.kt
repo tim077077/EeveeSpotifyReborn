@@ -149,6 +149,25 @@ class MainActivity : Activity() {
         refreshBattery() // back from the battery dialog or settings
     }
 
+    // Battery: the drafts list redraws every 3 s and the TikTok pages run only while the screen shows;
+    // in the background both stop (the pages sleep after a minute and a half of no work).
+    override fun onStart() {
+        super.onStart()
+        TikTokWeb.foreground = true
+        TikTokWeb.resumeAll()
+        if (::tabs.isInitialized && current == "Slidemill") {
+            main.removeCallbacks(ticker)
+            main.post(ticker)
+        }
+    }
+
+    override fun onStop() {
+        TikTokWeb.foreground = false
+        main.removeCallbacks(ticker)
+        TikTokWeb.sleepLater()
+        super.onStop()
+    }
+
     override fun onDestroy() {
         if (::tabs.isInitialized) detachAll()
         main.removeCallbacks(ticker)

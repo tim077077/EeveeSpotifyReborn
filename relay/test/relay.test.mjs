@@ -21,6 +21,7 @@ function phone(secret, answer, { ack = true } = {}) {
   ws.queued = [];
   ws.onmessage = async (ev) => {
     const m = JSON.parse(ev.data);
+    if (m.t === "pong") return ws.pongs = (ws.pongs || 0) + 1;
     if (m.t === "queued") {
       ws.queued.push(JSON.parse(m.body).params.name);
       if (ack) ws.send(JSON.stringify({ t: "ack", id: m.id }));
@@ -104,6 +105,11 @@ try {
   assert.equal(r.result.content[0].text.length, big.length);
   const note = await fetch(url, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ jsonrpc: "2.0", method: "notifications/initialized" }) });
   assert.equal(note.status, 202);
+
+  // The phone's link check after a sleep: one ping, one pong.
+  ws.send(JSON.stringify({ t: "ping" }));
+  for (let i = 0; i < 50 && !ws.pongs; i++) await new Promise((r) => setTimeout(r, 100));
+  assert.equal(ws.pongs, 1);
 
   // Several calls at once each get their own answer.
   const many = await Promise.all([1, 2, 3, 4].map((i) => rpc(url, "ping", {}, i).then((x) => x.json())));
