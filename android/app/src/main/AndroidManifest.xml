@@ -53,6 +53,13 @@
 
         <receiver android:name=".KeepaliveReceiver" android:exported="false" />
 
+        <!-- The relay's wake-up push (Firebase Cloud Messaging), set up from the app's settings. -->
+        <service android:name=".WakeService" android:exported="false">
+            <intent-filter>
+                <action android:name="com.google.firebase.MESSAGING_EVENT" />
+            </intent-filter>
+        </service>
+
         <receiver android:name=".BootReceiver" android:exported="true">
             <intent-filter>
                 <action android:name="android.intent.action.BOOT_COMPLETED" />

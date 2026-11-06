@@ -134,6 +134,18 @@ How matching works: case-, accent- and punctuation-insensitive, whole word, **1 
 
 ---
 
+### Reachable with the screen off (wake-up push, one-time setup)
+With the screen off, the phone's link to the relay dies silently, and Claude gets "phone offline". With wake-up push, the relay sends a free Firebase push when Claude calls. The push wakes the phone, which reconnects within a few seconds and answers. While idle it uses no battery.
+
+1. Go to [console.firebase.google.com](https://console.firebase.google.com) → **Create a project**. Analytics isn't needed, and it's free.
+2. In the project → **Add app** → Android. Package name: `com.slidemill.app`. Register, then **download google-services.json**. Skip the remaining SDK steps.
+3. Open the file on the phone, copy all its text, and paste it into Slidemill → section 4 → **Paste google-services.json** → **Save push setup**. The line turns green ("Wake-up push ✓") within seconds.
+4. In Firebase: ⚙ **Project settings → Service accounts → Generate new private key**. A JSON file downloads. It's a secret: don't share it or commit it.
+5. In GitHub: the repo → **Settings → Secrets and variables → Actions → New repository secret**. Name it `FCM_SERVICE_ACCOUNT` and paste the whole key file's text as the value.
+6. **Actions → Deploy Claude relay → Run workflow.** The relay now holds the key as a Cloudflare secret.
+
+Test it: lock the phone for 10+ minutes, then ask Claude for `phone_status`. It should answer after a few seconds' pause while the phone wakes.
+
 ## 6. Guards and limits (all in the app)
 
 | Guard | Default | Where to change it |

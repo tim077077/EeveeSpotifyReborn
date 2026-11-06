@@ -22,6 +22,8 @@ class SlidemillApp : Application() {
     override fun onCreate() {
         super.onCreate()
         Crash.install(this)
+        // Before a wake-up push is delivered, Firebase must be running (a push can start the process).
+        if (Crash.pending(this) == null) Push.init(this)
     }
 }
 

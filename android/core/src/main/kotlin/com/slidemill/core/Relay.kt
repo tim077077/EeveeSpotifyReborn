@@ -98,6 +98,19 @@ class Relay(private val e: Engine) {
     val connected: Boolean get() = state == "connected"
 
     /**
+     * The Firebase token the relay wakes this phone with when its link died in its sleep ("" = push not
+     * set up). Sent in the hello on every connection, and right away when it changes.
+     */
+    @Volatile var pushToken = ""
+        set(value) {
+            field = value
+            synchronized(lock) { socket?.takeIf { state == "connected" } }?.send(hello())
+        }
+
+    // v2: this phone answers the relay's pings, so the relay can tell a live link from a dead one.
+    private fun hello() = Json.write(obj("t" to "hello", "v" to 2, "push" to pushToken))
+
+    /**
      * Called when the phone wakes up (a Doze-proof alarm, the network coming back): while it slept, the
      * reconnect timers didn't run and the socket may have died without noticing. Offline: reconnect now.
      * Connected: send one tiny ping and reconnect only if the relay doesn't answer within [probeMs]
@@ -224,12 +237,14 @@ class Relay(private val e: Engine) {
             detail = ""
             backoff = 2
             lastHeardMs = Db.nowMs()
+            webSocket.send(hello())
             e.platform.log("relay connected")
         }
 
         override fun onMessage(webSocket: WebSocket, text: String) {
             lastHeardMs = Db.nowMs()
             val msg = runCatching { Json.parseObj(text) }.getOrNull() ?: return
+            if (msg.str("t") == "ping") { webSocket.send(Json.write(obj("t" to "pong"))); return } // the relay checking we're here
             if (msg.str("t") == "queued") return runQueued(webSocket, msg)
             if (msg.str("t") != "req") return
             inFlight.incrementAndGet()

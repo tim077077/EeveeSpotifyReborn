@@ -351,6 +351,34 @@ class MainActivity : Activity() {
             }
         }, spaced(6))
 
+        // Wake-up push: with the screen off the relay link dies; a push from the relay wakes the phone.
+        val pushSet = engine.store.get(Push.CONFIG_KEY).isNotBlank()
+        col.addView(label(
+            when {
+                Push.ready(this) -> "Wake-up push ✓: Claude can wake the phone when the screen is off."
+                pushSet -> "Wake-up push: set up, waiting for Firebase (needs internet and Google Play services)."
+                else -> "Wake-up push: off. Without it, Claude can't reach the phone while the screen is off. " +
+                    "Set it up once: Firebase project → Android app \"$packageName\" → download google-services.json → paste its text below " +
+                    "(and add the service-account key to the relay; see the user guide)."
+            },
+            13f, if (Push.ready(this)) good else muted,
+        ), spaced(6))
+        val pushField = field(if (pushSet) "google-services.json saved (paste to replace)" else "Paste google-services.json here").apply {
+            isSingleLine = false
+            maxLines = 4
+        }
+        col.addView(pushField, spaced(6))
+        col.addView(button("Save push setup", secondary = true) {
+            val json = pushField.text.toString().trim()
+            val problem = if (json.isEmpty()) null else runCatching { Push.options(json, packageName) }.exceptionOrNull()?.message
+            if (problem != null) return@button toast(problem)
+            io.execute {
+                engine.store.setMany(mapOf(Push.CONFIG_KEY to json))
+                if (json.isNotEmpty()) Push.init(this@MainActivity) else engine.relay.pushToken = ""
+                main.post { toast(if (json.isEmpty()) "Push removed" else "Saved: it turns green in a few seconds"); show("Slidemill") }
+            }
+        }, spaced(6))
+
         // 5. Scheduling
         col.addView(heading("5. Scheduling"))
         col.addView(CheckBox(this).apply {

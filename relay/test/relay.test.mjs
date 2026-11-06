@@ -16,12 +16,15 @@ async function waitUp() {
   throw new Error("wrangler dev didn't start");
 }
 
-function phone(secret, answer, { ack = true } = {}) {
+function phone(secret, answer, { ack = true, hello = null } = {}) {
   const ws = new WebSocket(`ws://127.0.0.1:${PORT}/phone`, { headers: { authorization: `Bearer ${secret}` } });
   ws.queued = [];
+  ws.asleep = false; // a v2 phone whose link died: it stops answering
   ws.onmessage = async (ev) => {
+    if (ws.asleep) return;
     const m = JSON.parse(ev.data);
     if (m.t === "pong") return ws.pongs = (ws.pongs || 0) + 1;
+    if (m.t === "ping") return ws.send(JSON.stringify({ t: "pong" }));
     if (m.t === "queued") {
       ws.queued.push(JSON.parse(m.body).params.name);
       if (ack) ws.send(JSON.stringify({ t: "ack", id: m.id }));
@@ -34,13 +37,16 @@ function phone(secret, answer, { ack = true } = {}) {
     if (half) ws.send(JSON.stringify({ t: "part", id: m.id, data: text.slice(0, half) }));
     ws.send(JSON.stringify({ t: "res", id: m.id, status, type: "application/json", data: text.slice(half) }));
   };
-  return new Promise((resolve, reject) => { ws.onopen = () => resolve(ws); ws.onerror = reject; });
+  return new Promise((resolve, reject) => {
+    ws.onopen = () => { if (hello) ws.send(JSON.stringify({ t: "hello", ...hello })); setTimeout(() => resolve(ws), hello ? 200 : 0); };
+    ws.onerror = reject;
+  });
 }
 
 const rpc = (url, method, params = {}, id = 1, headers = {}) =>
   fetch(url, { method: "POST", headers: { "content-type": "application/json", accept: "application/json, text/event-stream", ...headers }, body: JSON.stringify({ jsonrpc: "2.0", id, method, params }) });
 
-const dev = spawn("npx", ["wrangler", "dev", "--port", String(PORT), "--ip", "127.0.0.1"], { cwd: new URL("..", import.meta.url).pathname, stdio: ["ignore", "pipe", "pipe"], detached: true });
+const dev = spawn("npx", ["wrangler", "dev", "--port", String(PORT), "--ip", "127.0.0.1", "--var", "FCM_FAKE:1"], { cwd: new URL("..", import.meta.url).pathname, stdio: ["ignore", "pipe", "pipe"], detached: true });
 let log = "";
 dev.stdout.on("data", (d) => (log += d));
 dev.stderr.on("data", (d) => (log += d));
@@ -111,7 +117,7 @@ try {
   for (let i = 0; i < 50 && !ws.pongs; i++) await new Promise((r) => setTimeout(r, 100));
   assert.equal(ws.pongs, 1);
 
-  // Several calls at once each get their own answer.
+
   const many = await Promise.all([1, 2, 3, 4].map((i) => rpc(url, "ping", {}, i).then((x) => x.json())));
   assert.deepEqual(many.map((x) => x.id), [1, 2, 3, 4]);
 
@@ -122,6 +128,28 @@ try {
   assert.equal(r.result.tools[0].name, "list_slideshows");
   r = await (await rpc(url, "tools/call", { name: "list_slideshows", arguments: {} })).json();
   assert.match(r.result.content[0].text, /offline/);
+
+  // A v2 phone with push: alive, it answers the relay's ping and the call goes through.
+  const answer = async (msg) => ({ status: 200, data: { jsonrpc: "2.0", id: msg.id, result: { from: "phone" } } });
+  const v2 = await phone(SECRET, answer, { hello: { v: 2, push: "fcm-token" } });
+  r = await (await rpc(url, "ping", {}, 21)).json();
+  assert.equal(r.result.from, "phone");
+  // Its link died while the screen was off: the relay gets no pong, wakes it by push, and the woken
+  // phone's new connection answers the same call.
+  v2.asleep = true;
+  const late = rpc(url, "ping", {}, 22).then((x) => x.json());
+  await new Promise((res) => setTimeout(res, 4_500)); // the probe gives up after 4 s
+  const woken = await phone(SECRET, answer, { hello: { v: 2, push: "fcm-token" } });
+  r = await late;
+  assert.equal(r.id, 22);
+  assert.equal(r.result.from, "phone");
+  // No push token: an unanswered phone is offline, as before (and the token is cleared for the next run).
+  woken.send(JSON.stringify({ t: "hello", v: 2, push: "" }));
+  await new Promise((res) => setTimeout(res, 200));
+  woken.asleep = true;
+  r = await (await rpc(url, "tools/call", { name: "list_slideshows", arguments: {} }, 23)).json();
+  assert.match(r.result.content[0].text, /offline/);
+  woken.close();
 
   console.log("relay: all checks passed");
 } catch (e) {
