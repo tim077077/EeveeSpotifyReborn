@@ -41,4 +41,11 @@ class StartupTest {
         found.first { it is android.widget.Button }.performClick()
         assertNull(Crash.pending(app)) // cleared, and the app starts normally
     }
+
+    @Test fun a_crash_from_an_older_version_is_dropped_after_an_update() {
+        val app = RuntimeEnvironment.getApplication()
+        File(app.filesDir, "last-crash.txt").writeText("Slidemill 0.0.1 on Android 13 (API 33), x y\nThread: main\n\nboom")
+        assertNull(Crash.pending(app))
+        assertTrue(!File(app.filesDir, "last-crash.txt").exists())
+    }
 }
