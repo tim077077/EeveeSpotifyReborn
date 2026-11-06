@@ -109,6 +109,23 @@ object Shapes {
         "image_prompt" to Schema.Str("One sentence for an AI background photo: subject, setting, light. No text or logos in it."),
     )
 
+    val SLIDE_EDIT = Schema.obj(
+        "SlideEdit", setOf("texts", "image_query", "image_prompt", "new_background", "delete", "insert_after"),
+        "slide" to Schema.Integer("Number before this call; insert_after: 0 = first."),
+        "texts" to Schema.Array(Schema.Str(), "New text per text item (styles kept)."),
+        "image_query" to Schema.Str(),
+        "image_prompt" to Schema.Str(),
+        "new_background" to Schema.Bool(),
+        "delete" to Schema.Bool(),
+        "insert_after" to Schema.Bool("Add a new slide after slide."),
+    )
+
+    val CLAIM_CHECK = Schema.obj(
+        "ClaimCheck",
+        "claim" to Schema.Str(),
+        "verdict" to Schema.Str(enum = listOf("true", "unsure", "false")),
+    )
+
     val SLIDESHOW_PLAN = Schema.obj(
         "SlideshowPlan", setOf("text_position"),
         "title" to Schema.Str("Internal name, under 60 chars."),

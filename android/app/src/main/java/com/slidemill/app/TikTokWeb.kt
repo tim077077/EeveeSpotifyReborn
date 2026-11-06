@@ -26,6 +26,7 @@ import java.io.File
 import java.util.UUID
 import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.Executors
+import java.util.concurrent.atomic.AtomicInteger
 
 /**
  * One long-lived tiktok.com WebView per TikTok account, shared by the TikTok tab (where you log in) and
@@ -50,6 +51,54 @@ class TikTokWeb private constructor(val slot: String) {
         private val io = Executors.newCachedThreadPool()
         private val served = ConcurrentHashMap<String, File>()
         private val all = ConcurrentHashMap<String, TikTokWeb>()
+
+        // Battery: a hidden tiktok.com page keeps running TikTok's own scripts (feed, analytics, timers)
+        // nonstop. With the app in the background and nothing asked for IDLE_MS, every page is paused
+        // (and JavaScript timers stopped); the next ask, wake, scrape or visible tab resumes them.
+        private const val IDLE_MS = 90_000L
+        /** Whether the Slidemill screen is showing (set by MainActivity); pages never sleep then. */
+        @Volatile var foreground = false
+        private val busy = AtomicInteger() // off-screen scrapes running (pauseTimers would freeze them too)
+        @Volatile private var asleep = false
+        private val sleepCheck = Runnable { sleepIfIdle() }
+
+        /** Run [block] (a scrape in its own WebView) with JavaScript timers running. Blocking; not the main thread. */
+        fun <T> busyWhile(block: () -> T): T {
+            busy.incrementAndGet()
+            main.post { resumeAll() }
+            try {
+                return block()
+            } finally {
+                busy.decrementAndGet()
+                sleepLater()
+            }
+        }
+
+        /** Resume every page and JavaScript timers if they were put to sleep. Main thread. */
+        fun resumeAll() {
+            main.removeCallbacks(sleepCheck)
+            if (!asleep) return
+            asleep = false
+            val views = all.values.mapNotNull { it.web }
+            views.forEach { it.onResume() }
+            views.firstOrNull()?.resumeTimers() // global: one call resumes them for every WebView
+        }
+
+        /** Check again in IDLE_MS whether the pages can sleep (safe from any thread). */
+        fun sleepLater() {
+            main.removeCallbacks(sleepCheck)
+            main.postDelayed(sleepCheck, IDLE_MS)
+        }
+
+        private fun sleepIfIdle() {
+            if (foreground || asleep) return // the screen's onStop schedules the next check
+            if (busy.get() > 0 || all.values.any { it.pending.isNotEmpty() }) return sleepLater()
+            val views = all.values.mapNotNull { it.web }
+            if (views.isEmpty()) return
+            views.forEach { it.onPause() }
+            views.first().pauseTimers()
+            asleep = true
+        }
 
         /** The account in [slot]'s WebView (created on first use). */
         fun of(slot: String): TikTokWeb = all.getOrPut(slot) { TikTokWeb(slot) }
@@ -123,6 +172,7 @@ class TikTokWeb private constructor(val slot: String) {
         appContext = context.applicationContext
         wrapper = MutableContextWrapper(appContext)
         val view = WebView(wrapper)
+        if (asleep) { view.resumeTimers(); asleep = false; all.values.forEach { it.web?.onResume() } } // timers are global
         useProfile(view, slot)
         view.settings.apply {
             javaScriptEnabled = true
@@ -143,11 +193,13 @@ class TikTokWeb private constructor(val slot: String) {
         view.addJavascriptInterface(Native(), "SlidemillNative")
         view.loadUrl(HOME)
         web = view
+        sleepLater() // loaded in the background: let it sleep if nothing asks for it
         return view
     }
 
     /** Show the WebView inside an activity (it keeps running when detached). */
     fun attach(activity: Context, parent: ViewGroup) {
+        resumeAll()
         val view = get(activity)
         wrapper.baseContext = activity
         (view.parent as? ViewGroup)?.removeView(view)
@@ -179,6 +231,7 @@ class TikTokWeb private constructor(val slot: String) {
 
     /** Make sure the page is running and has the scripts (main thread posted). */
     fun wake(context: Context) = main.post {
+        resumeAll()
         val view = get(context)
         view.onResume()
         view.resumeTimers()
@@ -232,6 +285,7 @@ class TikTokWeb private constructor(val slot: String) {
         val id = "and" + UUID.randomUUID().toString().replace("-", "")
         pending[id] = callback
         main.post {
+            resumeAll()
             val view = web
             if (view == null) {
                 pending.remove(id)?.invoke(null)
@@ -240,7 +294,7 @@ class TikTokWeb private constructor(val slot: String) {
             val js = "window.__slidemillAsk && window.__slidemillAsk(${JSONObject.quote(kind)}, ${JSONObject.quote(id)}, ${JSONObject.quote(payload.toString())})"
             view.evaluateJavascript(js, null)
         }
-        main.postDelayed({ pending.remove(id)?.invoke(null) }, timeoutMs)
+        main.postDelayed({ pending.remove(id)?.invoke(null); sleepLater() }, timeoutMs)
     }
 
     /** Methods the page can call. Only TikTok pages are ever loaded in this WebView. */
@@ -249,6 +303,7 @@ class TikTokWeb private constructor(val slot: String) {
         fun onResult(id: String, json: String) {
             val result = runCatching { if (json == "null") null else JSONObject(json) }.getOrNull()
             pending.remove(id)?.invoke(result)
+            sleepLater()
         }
 
         @JavascriptInterface

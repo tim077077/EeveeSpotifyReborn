@@ -1,6 +1,7 @@
 # Deploys the Claude relay (relay/) to your free Cloudflare account: by itself whenever a change to
 # relay/ is merged into swift, or by hand from the Actions tab (the first time, or to redeploy).
 # Needs two repository secrets: CLOUDFLARE_API_TOKEN ("Edit Cloudflare Workers" template) and CLOUDFLARE_ACCOUNT_ID.
+# Optional: FCM_SERVICE_ACCOUNT (a Firebase service-account key, JSON) lets the relay wake a sleeping phone by push.
 name: Deploy Claude relay
 
 on:
@@ -41,6 +42,7 @@ jobs:
         env:
           CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
           CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+          FCM_SERVICE_ACCOUNT: ${{ secrets.FCM_SERVICE_ACCOUNT }}
         run: |
           set -o pipefail
           if ! npx wrangler deploy 2>&1 | tee deploy.log; then
@@ -48,6 +50,10 @@ jobs:
               echo "::error::Open Workers & Pages in the Cloudflare dashboard once (it sets up your workers.dev address), then run this again."
             fi
             exit 1
+          fi
+          # Wake-up push (optional): the Firebase service-account key, kept as a Cloudflare secret.
+          if [ -n "$FCM_SERVICE_ACCOUNT" ]; then
+            printf '%s' "$FCM_SERVICE_ACCOUNT" | npx wrangler secret put FCM_SERVICE_ACCOUNT
           fi
           url=$(grep -oE 'https://[a-z0-9.-]+\.workers\.dev' deploy.log | head -1)
           {

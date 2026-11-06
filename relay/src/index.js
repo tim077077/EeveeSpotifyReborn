@@ -16,6 +16,11 @@ const ORIGINS = ["https://claude.ai", "https://claude.com"];
 // Tools that change things: while the phone is offline these wait here and run when it's back.
 const QUEUEABLE = ["create_slideshow", "import_slides", "save_draft", "delete_slideshow"];
 const MAX_QUEUE = 20;
+// A sleeping phone: its connection dies silently while the screen is off. Before a call, the relay checks
+// the link with a ping (phones that say hello v2 answer pong) and, when the phone isn't there, wakes it
+// with a Firebase push and waits for it to reconnect.
+const PROBE_MS = 4_000;
+const WAKE_WAIT_MS = 20_000;
 
 const json = (status, body, headers = {}) =>
   new Response(JSON.stringify(body), { status, headers: { "content-type": "application/json", ...headers } });
@@ -49,6 +54,7 @@ export class Relay extends DurableObject {
   constructor(ctx, env) {
     super(ctx, env);
     this.pending = new Map(); // request id -> { parts, done }
+    this.probes = new Set(); // waiting for the phone's pong
   }
 
   async fetch(request) {
@@ -60,8 +66,8 @@ export class Relay extends DurableObject {
     let msg = null;
     try { msg = JSON.parse(body); } catch { return json(400, rpcError(null, -32700, "Parse error")); }
 
-    // The newest open connection (a replaced one can still be closing).
-    const phone = this.ctx.getWebSockets().filter((ws) => ws.readyState === WebSocket.OPEN).at(-1);
+    // The newest open connection (a replaced one can still be closing); woken by push if it's asleep.
+    const phone = await this.livePhone();
     if (!phone) return this.offline(msg, body);
     const reply = await this.ask(phone, body);
     // Connected but no answer (dropped mid-call): don't queue it, the phone may have done it already.
@@ -75,6 +81,57 @@ export class Relay extends DurableObject {
       } catch { /* not cacheable */ }
     }
     return new Response(reply.status === 202 ? null : reply.data, { status: reply.status, headers: { "content-type": reply.type || "application/json" } });
+  }
+
+  openPhone() {
+    return this.ctx.getWebSockets().filter((ws) => ws.readyState === WebSocket.OPEN).at(-1);
+  }
+
+  /** The phone's connection if it's really there; otherwise wake it by push and wait for it. */
+  async livePhone() {
+    let phone = this.openPhone();
+    if (phone && (phone.deserializeAttachment() || {}).v >= 2 && !(await this.probe(phone))) {
+      try { phone.close(4002, "no answer"); } catch { /* already gone */ }
+      phone = null;
+    }
+    if (phone) return phone;
+    if (!(await this.wake())) return null;
+    for (let waited = 0; waited < WAKE_WAIT_MS; waited += 250) {
+      await new Promise((r) => setTimeout(r, 250));
+      const back = this.openPhone();
+      if (back) return back;
+    }
+    return null;
+  }
+
+  /** Ping the phone; true if it answers within PROBE_MS. */
+  probe(phone) {
+    return new Promise((resolve) => {
+      const done = (ok) => { clearTimeout(timer); this.probes.delete(done); resolve(ok); };
+      const timer = setTimeout(() => done(false), PROBE_MS);
+      this.probes.add(done);
+      try { phone.send(JSON.stringify({ t: "ping" })); } catch { done(false); }
+    });
+  }
+
+  /** Send the phone a wake-up push (Firebase Cloud Messaging). False when push isn't set up. */
+  async wake() {
+    const token = await this.ctx.storage.get("push_token");
+    if (!token) return false;
+    if (this.env.FCM_FAKE) return true; // tests: the test plays the woken phone
+    if (!this.env.FCM_SERVICE_ACCOUNT) return false;
+    try {
+      const sa = JSON.parse(this.env.FCM_SERVICE_ACCOUNT);
+      const r = await fetch(`https://fcm.googleapis.com/v1/projects/${sa.project_id}/messages:send`, {
+        method: "POST",
+        headers: { authorization: `Bearer ${await fcmAccessToken(sa)}`, "content-type": "application/json" },
+        body: JSON.stringify({ message: { token, data: { t: "wake" }, android: { priority: "HIGH", ttl: "30s" } } }),
+      });
+      if (r.status === 404) await this.ctx.storage.delete("push_token"); // app uninstalled or token replaced
+      return r.ok;
+    } catch {
+      return false;
+    }
   }
 
   connectPhone() {
@@ -111,6 +168,14 @@ export class Relay extends DurableObject {
     let m;
     try { m = JSON.parse(data); } catch { return; }
     if (m.t === "ack") return this.forget(m.id);
+    if (m.t === "ping") return ws.send(JSON.stringify({ t: "pong" })); // the phone checking the link after a sleep
+    if (m.t === "pong") return [...this.probes].forEach((done) => done(true));
+    if (m.t === "hello") {
+      // v2 phones answer pings; push is the token the relay wakes it with.
+      ws.serializeAttachment({ v: Number(m.v) || 1 });
+      if (typeof m.push === "string") await (m.push ? this.ctx.storage.put("push_token", m.push) : this.ctx.storage.delete("push_token"));
+      return;
+    }
     const p = this.pending.get(m.id);
     if (!p) return;
     if (m.t === "part") p.parts.push(m.data);
@@ -176,4 +241,34 @@ export class Relay extends DurableObject {
         return json(200, rpcError(msg.id, -32603, say));
     }
   }
+}
+
+// ---- Firebase Cloud Messaging auth: a service-account JWT traded for a 1-hour access token ----------
+
+let cachedToken = null; // { token, until }
+
+const b64url = (bytes) => btoa(String.fromCharCode(...new Uint8Array(bytes))).replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/, "");
+const b64urlText = (text) => b64url(new TextEncoder().encode(text));
+
+async function fcmAccessToken(sa) {
+  if (cachedToken && cachedToken.until > Date.now() + 60_000) return cachedToken.token;
+  const now = Math.floor(Date.now() / 1000);
+  const head = b64urlText(JSON.stringify({ alg: "RS256", typ: "JWT" }));
+  const claims = b64urlText(JSON.stringify({
+    iss: sa.client_email, scope: "https://www.googleapis.com/auth/firebase.messaging",
+    aud: "https://oauth2.googleapis.com/token", iat: now, exp: now + 3600,
+  }));
+  const pem = sa.private_key.replace(/-----[^-]+-----/g, "").replace(/\s+/g, "");
+  const der = Uint8Array.from(atob(pem), (c) => c.charCodeAt(0));
+  const key = await crypto.subtle.importKey("pkcs8", der, { name: "RSASSA-PKCS1-v1_5", hash: "SHA-256" }, false, ["sign"]);
+  const sig = await crypto.subtle.sign("RSASSA-PKCS1-v1_5", key, new TextEncoder().encode(`${head}.${claims}`));
+  const r = await fetch("https://oauth2.googleapis.com/token", {
+    method: "POST",
+    headers: { "content-type": "application/x-www-form-urlencoded" },
+    body: `grant_type=urn%3Aietf%3Aparams%3Aoauth%3Agrant-type%3Ajwt-bearer&assertion=${head}.${claims}.${b64url(sig)}`,
+  });
+  const out = await r.json();
+  if (!out.access_token) throw new Error("FCM auth failed");
+  cachedToken = { token: out.access_token, until: Date.now() + (out.expires_in || 3600) * 1000 };
+  return cachedToken.token;
 }

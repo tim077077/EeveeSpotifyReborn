@@ -36,6 +36,7 @@ import com.slidemill.core.AutoReplySettings
 import com.slidemill.core.Engine
 import com.slidemill.core.ReplyRule
 import com.slidemill.core.TikTokTab
+import com.slidemill.core.bool
 import com.slidemill.core.copyObj
 import com.slidemill.core.int
 import com.slidemill.core.long
@@ -146,6 +147,25 @@ class MainActivity : Activity() {
     override fun onResume() {
         super.onResume()
         refreshBattery() // back from the battery dialog or settings
+    }
+
+    // Battery: the drafts list redraws every 3 s and the TikTok pages run only while the screen shows;
+    // in the background both stop (the pages sleep after a minute and a half of no work).
+    override fun onStart() {
+        super.onStart()
+        TikTokWeb.foreground = true
+        TikTokWeb.resumeAll()
+        if (::tabs.isInitialized && current == "Slidemill") {
+            main.removeCallbacks(ticker)
+            main.post(ticker)
+        }
+    }
+
+    override fun onStop() {
+        TikTokWeb.foreground = false
+        main.removeCallbacks(ticker)
+        TikTokWeb.sleepLater()
+        super.onStop()
     }
 
     override fun onDestroy() {
@@ -328,6 +348,34 @@ class MainActivity : Activity() {
                     engine.store.setMany(mapOf("stay_awake" to if (on) "1" else "0"))
                     main.post { EngineService.start(this@MainActivity) } // applies the change
                 }
+            }
+        }, spaced(6))
+
+        // Wake-up push: with the screen off the relay link dies; a push from the relay wakes the phone.
+        val pushSet = engine.store.get(Push.CONFIG_KEY).isNotBlank()
+        col.addView(label(
+            when {
+                Push.ready(this) -> "Wake-up push ✓: Claude can wake the phone when the screen is off."
+                pushSet -> "Wake-up push: set up, waiting for Firebase (needs internet and Google Play services)."
+                else -> "Wake-up push: off. Without it, Claude can't reach the phone while the screen is off. " +
+                    "Set it up once: Firebase project → Android app \"$packageName\" → download google-services.json → paste its text below " +
+                    "(and add the service-account key to the relay; see the user guide)."
+            },
+            13f, if (Push.ready(this)) good else muted,
+        ), spaced(6))
+        val pushField = field(if (pushSet) "google-services.json saved (paste to replace)" else "Paste google-services.json here").apply {
+            isSingleLine = false
+            maxLines = 4
+        }
+        col.addView(pushField, spaced(6))
+        col.addView(button("Save push setup", secondary = true) {
+            val json = pushField.text.toString().trim()
+            val problem = if (json.isEmpty()) null else runCatching { Push.options(json, packageName) }.exceptionOrNull()?.message
+            if (problem != null) return@button toast(problem)
+            io.execute {
+                engine.store.setMany(mapOf(Push.CONFIG_KEY to json))
+                if (json.isNotEmpty()) Push.init(this@MainActivity) else engine.relay.pushToken = ""
+                main.post { toast(if (json.isEmpty()) "Push removed" else "Saved: it turns green in a few seconds"); show("Slidemill") }
             }
         }, spaced(6))
 
@@ -596,7 +644,17 @@ class MainActivity : Activity() {
             p?.str("status") == "posting" -> "posting…"
             p?.str("status") == "failed" -> "✗ not posted: ${p.str("error")} (tap to retry)"
             r.long("suggested_time") > 0 -> "Claude suggests ${whenText(r.long("suggested_time"))}: tap to approve"
-            else -> "Draft: tap to preview and post"
+            else -> "Draft (${reviewTag(r)}): tap to preview and post"
+        }
+    }
+
+    /** Whether Claude's check passed for the slides as they are now (Claude can't schedule until it has). */
+    private fun reviewTag(r: Map<String, Any?>): String {
+        val rev = r.objOrNull("review")
+        return when {
+            rev == null || rev.long("version") != r.long("render_version") -> "not reviewed"
+            rev.bool("passed") -> "reviewed ✓"
+            else -> "review failed"
         }
     }
 

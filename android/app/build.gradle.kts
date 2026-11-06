@@ -11,8 +11,8 @@ android {
         applicationId = "com.slidemill.app"
         minSdk = 26
         targetSdk = 35
-        versionCode = 20
-        versionName = "20.0.0"
+        versionCode = 23
+        versionName = "23.0.0"
     }
 
     // A fixed key checked into the repo, so every build (local or CI) can update the installed app.
@@ -48,6 +48,9 @@ android {
 dependencies {
     implementation(project(":core"))
     implementation("androidx.webkit:webkit:1.12.1")
+    // Wake-up push: the relay wakes a sleeping phone through Firebase Cloud Messaging (set up in the app,
+    // from the pasted google-services.json, so the build needs no Firebase file).
+    implementation("com.google.firebase:firebase-messaging:24.1.2")
     testImplementation("junit:junit:4.13.2")
     testImplementation("org.robolectric:robolectric:4.14.1")
 }

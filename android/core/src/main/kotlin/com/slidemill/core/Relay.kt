@@ -43,7 +43,7 @@ class Relay(private val e: Engine) {
 
     val mcp = Mcp(e)
     private val http = OkHttpClient.Builder()
-        .pingInterval(25, TimeUnit.SECONDS) // also notices a dead connection
+        .pingInterval(60, TimeUnit.SECONDS) // notices a dead connection; rarer pings let the phone's radio rest
         .readTimeout(0, TimeUnit.MILLISECONDS)
         .build()
     private val daemon = java.util.concurrent.ThreadFactory { r -> Thread(r, "relay").apply { isDaemon = true } }
@@ -98,22 +98,47 @@ class Relay(private val e: Engine) {
     val connected: Boolean get() = state == "connected"
 
     /**
-     * Called when the phone wakes up (a Doze-proof alarm, the network coming back): while it slept,
-     * the reconnect timers didn't run and the socket may have died without noticing. Reconnects now
-     * if offline, and replaces a socket that has been quiet longer than [quietMs] (unless a request
-     * is running on it). Returns whether a new connection was started.
+     * The Firebase token the relay wakes this phone with when its link died in its sleep ("" = push not
+     * set up). Sent in the hello on every connection, and right away when it changes.
      */
-    fun ensureConnected(quietMs: Long = 9 * 60_000L): Boolean {
+    @Volatile var pushToken = ""
+        set(value) {
+            field = value
+            synchronized(lock) { socket?.takeIf { state == "connected" } }?.send(hello())
+        }
+
+    // v2: this phone answers the relay's pings, so the relay can tell a live link from a dead one.
+    private fun hello() = Json.write(obj("t" to "hello", "v" to 2, "push" to pushToken))
+
+    /**
+     * Called when the phone wakes up (a Doze-proof alarm, the network coming back): while it slept, the
+     * reconnect timers didn't run and the socket may have died without noticing. Offline: reconnect now.
+     * Connected: send one tiny ping and reconnect only if the relay doesn't answer within [probeMs]
+     * (much cheaper than a fresh connection every time). Blocking; returns whether it reconnected.
+     */
+    fun ensureConnected(probeMs: Long = 8_000L): Boolean {
         if (url.isEmpty()) return false
-        val stale = synchronized(lock) {
+        val ws = synchronized(lock) {
             when (state) {
-                "connected" -> inFlight.get() == 0 && Db.nowMs() - lastHeardMs > quietMs
-                "connecting" -> false
-                else -> true
+                "connected" -> socket
+                "connecting" -> return false
+                else -> null
             }
         }
-        if (stale) start()
-        return stale
+        if (ws != null && inFlight.get() == 0) {
+            val sent = Db.nowMs()
+            if (ws.send(Json.write(obj("t" to "ping")))) {
+                val until = sent + probeMs
+                while (Db.nowMs() < until) {
+                    if (lastHeardMs >= sent) return false // answered: the link is alive
+                    Thread.sleep(200)
+                }
+            }
+        } else if (ws != null) {
+            return false // a request is running on it: it's alive
+        }
+        start()
+        return true
     }
 
     /** Set (or clear, with "") the relay address and (re)connect. */
@@ -212,12 +237,14 @@ class Relay(private val e: Engine) {
             detail = ""
             backoff = 2
             lastHeardMs = Db.nowMs()
+            webSocket.send(hello())
             e.platform.log("relay connected")
         }
 
         override fun onMessage(webSocket: WebSocket, text: String) {
             lastHeardMs = Db.nowMs()
             val msg = runCatching { Json.parseObj(text) }.getOrNull() ?: return
+            if (msg.str("t") == "ping") { webSocket.send(Json.write(obj("t" to "pong"))); return } // the relay checking we're here
             if (msg.str("t") == "queued") return runQueued(webSocket, msg)
             if (msg.str("t") != "req") return
             inFlight.incrementAndGet()

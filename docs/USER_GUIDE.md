@@ -55,7 +55,7 @@ tiktok.com in desktop mode, one profile per account. This is where the session l
 
 ---
 
-## 4. Every tool Claude can call (21)
+## 4. Every tool Claude can call (23)
 
 Claude calls these itself when you ask for something. You never type a tool name. The point of the table is knowing what is possible.
 
@@ -73,6 +73,8 @@ Claude calls these itself when you ask for something. You never type a tool name
 | `save_draft` | Save a slideshow to TikTok **Studio web** drafts now | "put it in my web drafts" |
 | `schedule_slideshow` | Put a slideshow on TikTok Studio's own schedule (15 min to 30 days ahead) | "schedule the best one for tonight" |
 | `view_post` | One of your posted TikToks: numbers, and for a carousel its real slides as posted | "how did my best post look?" |
+| `edit_slideshow` | Fixes a rendered slideshow: slide text, a new background, delete or add slides, caption | "slide 3 has a typo", "swap the background on slide 2" |
+| `review_slideshow` | Claude records its check of the current slides and claims; required before scheduling | (automatic after every render) |
 | `view_slideshow` | One slideshow's details, draft status and rendered slides | "show me that draft again" |
 | `list_slideshows` | Recent slideshows with status, post/schedule and score | "what have you made?" |
 | `delete_slideshow` | Delete a slideshow from the phone (never from TikTok) | "delete the weak one" |
@@ -108,7 +110,7 @@ Claude calls these itself when you ask for something. You never type a tool name
 ### Make a carousel
 1. "Look at my best posts and tell me what's working." (`analytics`)
 2. "Write 3 slideshows about X in that style." (`writing_guide`, `create_slideshow`)
-3. Claude checks the returned slides, fixes what reads badly, deletes the weak ones.
+3. After every render Claude checks each slide (text cut off, typos, readability, faces covered), every factual claim, and every background, fixes problems itself with `edit_slideshow`, and records the check with `review_slideshow`. The app's list shows "reviewed ✓", "review failed" or "not reviewed".
 4. "Score them and schedule the best for tonight." (`predict_virality`, `best_times`, `schedule_slideshow`)
 
 ### Backgrounds from Pinterest
@@ -132,10 +134,23 @@ How matching works: case-, accent- and punctuation-insensitive, whole word, **1 
 
 ---
 
+### Reachable with the screen off (wake-up push, one-time setup)
+With the screen off, the phone's link to the relay dies silently, and Claude gets "phone offline". With wake-up push, the relay sends a free Firebase push when Claude calls. The push wakes the phone, which reconnects within a few seconds and answers. While idle it uses no battery.
+
+1. Go to [console.firebase.google.com](https://console.firebase.google.com) → **Create a project**. Analytics isn't needed, and it's free.
+2. In the project → **Add app** → Android. Package name: `com.slidemill.app`. Register, then **download google-services.json**. Skip the remaining SDK steps.
+3. Open the file on the phone, copy all its text, and paste it into Slidemill → section 4 → **Paste google-services.json** → **Save push setup**. The line turns green ("Wake-up push ✓") within seconds.
+4. In Firebase: ⚙ **Project settings → Service accounts → Generate new private key**. A JSON file downloads. It's a secret: don't share it or commit it.
+5. In GitHub: the repo → **Settings → Secrets and variables → Actions → New repository secret**. Name it `FCM_SERVICE_ACCOUNT` and paste the whole key file's text as the value.
+6. **Actions → Deploy Claude relay → Run workflow.** The relay now holds the key as a Cloudflare secret.
+
+Test it: lock the phone for 10+ minutes, then ask Claude for `phone_status`. It should answer after a few seconds' pause while the phone wakes.
+
 ## 6. Guards and limits (all in the app)
 
 | Guard | Default | Where to change it |
 |---|---|---|
+| Review before posting | Claude can't schedule a slideshow until its current render passed `review_slideshow` (any edit means a new review; 3 failed rounds → Claude asks you) | built in; your own POST button in the app isn't gated |
 | Posts closer together | 2 hours apart, max 4 in 24 h | built in, not configurable |
 | Scheduling window | 15 min to 30 days ahead | TikTok's own limit |
 | Auto-reply rate | 8 an hour, 25 a day | Auto-reply card |
