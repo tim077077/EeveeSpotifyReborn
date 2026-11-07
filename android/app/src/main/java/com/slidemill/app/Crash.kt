@@ -50,7 +50,16 @@ object Crash {
         }
     }
 
-    fun pending(context: Context): String? = file(context).takeIf { it.isFile }?.readText()
+    /** The last crash, unless it happened in an older version: an update replaced that code, so it is dropped. */
+    fun pending(context: Context): String? {
+        val report = file(context).takeIf { it.isFile }?.readText() ?: return null
+        val version = runCatching { context.packageManager.getPackageInfo(context.packageName, 0).versionName }.getOrNull()
+        if (version != null && report.startsWith("Slidemill ") && !report.startsWith("Slidemill $version ")) {
+            clear(context)
+            return null
+        }
+        return report
+    }
 
     fun clear(context: Context) {
         file(context).delete()

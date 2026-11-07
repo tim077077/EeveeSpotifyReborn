@@ -15,6 +15,14 @@ class CoreTest {
         assertTrue("\\u003c" in Json.write("</script>"))
     }
 
+    @Test fun every_setting_the_app_saves_is_known() {
+        // The app's screen saves these; an unknown key throws (and crashed v20-v23 on save).
+        val e = TestKit.engine()
+        e.store.setMany(mapOf("stay_awake" to "1", "push_config" to "{}", "claude_schedules" to "0", "pexels_api_key" to "k"))
+        assertEquals("1", e.store.get("stay_awake"))
+        assertEquals("{}", e.store.get("push_config"))
+    }
+
     @Test fun settings_mask_and_encrypt() {
         val e = TestKit.engine()
         e.store.setMany(mapOf("pexels_api_key" to "abcdefghijklmnopqrst"))
