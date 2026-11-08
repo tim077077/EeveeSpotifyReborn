@@ -102,6 +102,18 @@ class TikTokWeb private constructor(val slot: String) {
             asleep = true
         }
 
+        /** Whether a page is in use: an ask waiting, or a scrape running. */
+        fun inUse(): Boolean = busy.get() > 0 || all.values.any { it.pending.isNotEmpty() }
+
+        /**
+         * Close every tiktok.com page (their renderers are most of the app's background cost). The next
+         * ask loads tiktok.com again, with the same logins. Main thread.
+         */
+        fun closeAll() {
+            if (foreground || inUse()) return
+            all.values.forEach { it.close() }
+        }
+
         /** The account in [slot]'s WebView (created on first use). */
         fun of(slot: String): TikTokWeb = all.getOrPut(slot) { TikTokWeb(slot) }
 
@@ -234,6 +246,21 @@ class TikTokWeb private constructor(val slot: String) {
         val view = web ?: return
         (view.parent as? ViewGroup)?.removeView(view)
         wrapper.baseContext = appContext
+    }
+
+    private fun close() {
+        val view = web ?: return
+        main.removeCallbacks(retry)
+        pageReady = false
+        (view.parent as? ViewGroup)?.removeView(view)
+        view.destroy()
+        web = null
+    }
+
+    /** Load tiktok.com again (a page that came back from a long sleep stuck). */
+    fun reload(context: Context) = main.post {
+        pageReady = false
+        get(context).loadUrl(HOME)
     }
 
     private fun destroy() = main.post {

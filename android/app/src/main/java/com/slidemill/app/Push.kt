@@ -57,6 +57,8 @@ class WakeService : FirebaseMessagingService() {
         if (message.data["t"] != "wake") return
         runCatching { EngineService.start(this) } // a high-priority push may start the foreground service
         Keepalive.check(this)
+        // Start loading tiktok.com now, while the relay link comes back: Claude's call needs the page.
+        TikTokWeb.slots(this).forEach { TikTokWeb.of(it).wake(this) }
     }
 
     override fun onNewToken(token: String) {

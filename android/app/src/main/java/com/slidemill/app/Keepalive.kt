@@ -59,6 +59,16 @@ object Keepalive {
         else am.setAndAllowWhileIdle(AlarmManager.ELAPSED_REALTIME_WAKEUP, at, pi)
     }
 
+    /** Stop the wake-ups (wake-up push replaces them while the app is closed). */
+    fun cancel(context: Context) {
+        val pi = PendingIntent.getBroadcast(
+            context, 0, Intent(context, KeepaliveReceiver::class.java),
+            PendingIntent.FLAG_IMMUTABLE or PendingIntent.FLAG_NO_CREATE,
+        ) ?: return
+        context.getSystemService(AlarmManager::class.java).cancel(pi)
+        pi.cancel()
+    }
+
     /** Check the relay link and reconnect if it's dead, holding the CPU up only until it's back (≤30 s). */
     fun check(context: Context) {
         val app = context.applicationContext

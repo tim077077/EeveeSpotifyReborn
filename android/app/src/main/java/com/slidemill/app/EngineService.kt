@@ -45,6 +45,7 @@ class EngineService : Service() {
         TikTokWeb.slots(this).forEach { TikTokWeb.of(it).get(this) } // load every account's tiktok.com in the background
         network = Keepalive.watchNetwork(this)
         Keepalive.schedule(this)
+        Idle.later(this) // started with nothing to do (a push, boot, the screen left): close again if no call comes
     }
 
     private var network: ConnectivityManager.NetworkCallback? = null

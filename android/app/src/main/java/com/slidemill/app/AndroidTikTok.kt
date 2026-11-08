@@ -21,7 +21,8 @@ class AndroidTikTok(private val context: Context, override val id: String = TikT
     private val web get() = TikTokWeb.of(id)
 
     companion object {
-        private const val READY_MS = 30_000L
+        private const val READY_MS = 90_000L // a fresh tiktok.com load on mobile data, screen off, after a push wake
+        private const val RELOAD_AFTER_MS = 40_000L
         private const val HELLO_MS = 4_000L
         private const val DRAFT_MS = 4 * 60_000L
         private const val LIST_MS = 60_000L
@@ -40,12 +41,18 @@ class AndroidTikTok(private val context: Context, override val id: String = TikT
     }
 
     /**
-     * Wait until the tiktok.com page answers. Never reloads it: a reload while it's still loading starts
-     * the wait over, and repeated calls would keep it from ever getting ready.
+     * Wait until the tiktok.com page answers. Reloads it at most once, after RELOAD_AFTER_MS: a page left
+     * asleep for hours can come back stuck, but a reload while it's still loading starts the wait over.
      */
     private fun hello(): JSONObject {
-        val until = System.currentTimeMillis() + READY_MS
+        val start = System.currentTimeMillis()
+        val until = start + READY_MS
+        var reloaded = false
         while (System.currentTimeMillis() < until) {
+            if (!reloaded && System.currentTimeMillis() - start > RELOAD_AFTER_MS) {
+                reloaded = true
+                web.reload(context)
+            }
             web.wake(context)
             if (web.pageReady) {
                 val hello = ask("hello", JSONObject(), HELLO_MS)
