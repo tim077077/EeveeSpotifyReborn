@@ -12,6 +12,7 @@ import android.view.ViewGroup
 import android.webkit.CookieManager
 import android.webkit.JavascriptInterface
 import android.webkit.RenderProcessGoneDetail
+import android.webkit.WebResourceError
 import android.webkit.WebChromeClient
 import android.webkit.WebResourceRequest
 import android.webkit.WebResourceResponse
@@ -40,6 +41,7 @@ import java.util.concurrent.atomic.AtomicInteger
 class TikTokWeb private constructor(val slot: String) {
     companion object {
         const val HOME = "https://www.tiktok.com/"
+        private val RETRY_MS = longArrayOf(3_000, 10_000, 30_000, 120_000)
         private const val SERVE_PREFIX = "https://www.tiktok.com/__slidemill/"
         // Desktop Chrome: TikTok's web uploader (and the endpoints the poster uses) is the desktop site.
         const val DESKTOP_UA =
@@ -165,6 +167,28 @@ class TikTokWeb private constructor(val slot: String) {
     @Volatile var pageReady = false
         private set
 
+    // A failed tiktok.com load (a network blip, e.g. ERR_HTTP2_PROTOCOL_ERROR on mobile data) left the
+    // page on Chrome's error screen for good. It now reloads by itself after 3 s, 10 s, 30 s and 2 min, and again on the next ask or wake
+    // (no endless retries in the background while offline).
+    private var loadFailures = 0
+    private var failedUrl: String? = null
+    @Volatile private var showingError = false // the current main-frame load failed
+    private val retry = Runnable { web?.let { v -> failedUrl?.let { v.loadUrl(it) } } }
+
+    private fun retryLater(url: String) {
+        failedUrl = url
+        main.removeCallbacks(retry)
+        if (loadFailures < RETRY_MS.size) main.postDelayed(retry, RETRY_MS[loadFailures]) // then the next ask or wake retries
+        loadFailures++
+    }
+
+    /** On the error screen now? Load again right away (an ask or wake needs the page). */
+    private fun reloadIfFailed() {
+        if (!showingError || failedUrl == null) return
+        main.removeCallbacks(retry)
+        retry.run()
+    }
+
     /** Get (creating if needed) this account's WebView. Main thread only. */
     @SuppressLint("SetJavaScriptEnabled")
     fun get(context: Context): WebView {
@@ -220,7 +244,7 @@ class TikTokWeb private constructor(val slot: String) {
 
     /** Run the bridge and tiktok-inject.js in the current page (both skip themselves if already there). */
     private fun inject(view: WebView, url: String?) {
-        if (!isTikTok(Uri.parse(url ?: ""))) return
+        if (!isTikTok(Uri.parse(url ?: "")) || showingError) return
         val assets = view.context.assets
         val bridge = assets.open("android-bridge.js").bufferedReader().use { it.readText() }
         val poster = assets.open("tiktok-inject.js").bufferedReader().use { it.readText() }
@@ -235,12 +259,14 @@ class TikTokWeb private constructor(val slot: String) {
         val view = get(context)
         view.onResume()
         view.resumeTimers()
+        reloadIfFailed()
         inject(view, view.url)
     }
 
     private val client = object : WebViewClient() {
         override fun onPageStarted(view: WebView, url: String?, favicon: Bitmap?) {
             pageReady = false
+            showingError = false
         }
 
         // Inject as soon as the page is visible: a heavy tiktok.com page (video feed) can take a long
@@ -260,7 +286,17 @@ class TikTokWeb private constructor(val slot: String) {
             return true // handled: don't take the whole app down
         }
 
-        override fun onPageFinished(view: WebView, url: String?) = inject(view, url)
+        override fun onPageFinished(view: WebView, url: String?) {
+            if (!showingError) { loadFailures = 0; failedUrl = null; main.removeCallbacks(retry) } // loaded fine
+            inject(view, url)
+        }
+
+        override fun onReceivedError(view: WebView, request: WebResourceRequest, error: WebResourceError) {
+            if (web !== view || !request.isForMainFrame || !isTikTok(request.url)) return
+            pageReady = false
+            showingError = true
+            retryLater(request.url.toString())
+        }
 
         // Keep the logged-in session (and the JS bridge) on TikTok; open anything else in the browser.
         override fun shouldOverrideUrlLoading(view: WebView, request: WebResourceRequest): Boolean {
@@ -286,6 +322,7 @@ class TikTokWeb private constructor(val slot: String) {
         pending[id] = callback
         main.post {
             resumeAll()
+            reloadIfFailed()
             val view = web
             if (view == null) {
                 pending.remove(id)?.invoke(null)
