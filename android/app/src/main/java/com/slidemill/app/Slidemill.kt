@@ -30,9 +30,11 @@ class AndroidPlatform(private val context: Context) : Platform {
     override fun <T> awake(block: () -> T): T {
         val lock = context.getSystemService(PowerManager::class.java)
             .newWakeLock(PowerManager.PARTIAL_WAKE_LOCK, "slidemill:claude").apply { acquire(10 * 60_000L) }
+        Idle.begin(context)
         try {
             return block()
         } finally {
+            Idle.end(context)
             if (lock.isHeld) lock.release()
         }
     }

@@ -154,17 +154,20 @@ class MainActivity : Activity() {
     override fun onStart() {
         super.onStart()
         TikTokWeb.foreground = true
+        Idle.cancel()
         TikTokWeb.resumeAll()
         if (::tabs.isInitialized && current == "Slidemill") {
             main.removeCallbacks(ticker)
             main.post(ticker)
         }
+        if (::tabs.isInitialized && current == "TikTok") show("TikTok") // its page may have been closed while away
     }
 
     override fun onStop() {
         TikTokWeb.foreground = false
         main.removeCallbacks(ticker)
         TikTokWeb.sleepLater()
+        Idle.later(this)
         super.onStop()
     }
 
