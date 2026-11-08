@@ -9,7 +9,7 @@
 (function () {
   if (window.__slidemillAndroid) return;
   window.__slidemillAndroid = true;
-  var RESULTS = ["helloResult", "jobResult", "listMineResult", "listUserResult", "commentsResult", "replyCommentResult", "userPrivateResult"];
+  var RESULTS = ["helloResult", "jobResult", "listMineResult", "listUserResult", "commentsResult", "replyCommentResult", "userPrivateResult", "listScheduledResult", "deletePostResult"];
   window.addEventListener("message", function (ev) {
     if (ev.source !== window) return;
     var d = ev.data;

@@ -510,6 +510,55 @@
     return { items, pages: Math.max(pages, 1), stoppedAtKnown };
   }
 
+  // TikTok Studio's own schedule: the account's posts waiting to go out (status 141, with schedule_time),
+  // from the same list as listMine. TikTok's permissions there: scheduled posts can't be edited, only deleted.
+  async function listScheduled() {
+    const q = new URLSearchParams({ aid: "1988", app_name: "tiktok_creator_center", channel: "tiktok_web", device_platform: "web_pc" });
+    const tz = timeZone();
+    if (tz) q.set("tz_name", tz);
+    const headers = { "content-type": "application/json" };
+    const csrf = await csrfToken();
+    if (csrf) headers["tt-csrf-token"] = csrf;
+    const posts = [];
+    let cursor = 0;
+    for (let page = 0; page < 10; page++) {
+      const r = await fetch(ORIGIN + "/tiktok/creator/manage/item_list/v1/?" + q, {
+        method: "POST", credentials: "include", headers,
+        body: JSON.stringify({ cursor, size: 50, query: { sort_orders: [{ field_name: "post_time", order: 2 }], conditions: [], is_recent_posts: false } }),
+      });
+      const j = await r.json();
+      if (j.status_code !== 0) throw new Error("listing your scheduled posts failed: " + JSON.stringify(j).slice(0, 300));
+      let older = false;
+      for (const it of j.item_list || []) {
+        if (num(it.status) === 141) {
+          posts.push({ id: String(it.item_id || ""), desc: it.desc || "", schedule_time: num(it.schedule_time) || num(it.post_time), slides: (it.photo_list || []).length });
+        } else if (num(it.post_time) && num(it.post_time) < Date.now() / 1000) older = true;
+      }
+      // Newest post_time first: scheduled posts come before everything already published.
+      if (older || !j.has_more) break;
+      cursor = num(j.cursor);
+    }
+    return posts;
+  }
+
+  // Delete one of the account's own posts (a scheduled one, here) by item id. The caller checks with
+  // listScheduled that it's really gone.
+  async function deletePost({ itemId } = {}) {
+    if (!itemId) throw new Error("no itemId");
+    const q = new URLSearchParams({ aweme_id: String(itemId), aid: "1988" });
+    const headers = {};
+    const csrf = await csrfToken();
+    if (csrf) headers["tt-csrf-token"] = csrf;
+    const r = await fetch(ORIGIN + "/api/aweme/delete/?" + q, { method: "POST", credentials: "include", headers });
+    const text = await r.text();
+    let j = null;
+    try { j = JSON.parse(text); } catch (_) { /* not JSON */ }
+    if (!r.ok || !j || (j.status_code !== undefined && j.status_code !== 0)) {
+      throw new Error("TikTok refused the delete (HTTP " + r.status + "): " + text.slice(0, 200));
+    }
+    return { deleted: true };
+  }
+
   async function listMine({ max } = {}) {
     const limit = Math.max(1, Math.min(Number(max) || 100, 500));
     const q = new URLSearchParams({ aid: "1988", app_name: "tiktok_creator_center", channel: "tiktok_web", device_platform: "web_pc" });
@@ -712,7 +761,9 @@
       log(`image ${i + 1}/${images.length}: ${bytes.length} bytes, ${w}×${h} — applying…`);
       const ap = await applyImageUpload(creds, bytes.length);
       // A human's uploader doesn't fire its images back to back; a short, uneven pause between slides.
-      if (i > 0) await new Promise((r) => setTimeout(r, 300 + Math.random() * 900));
+      // Not in a hidden page (the phone's background tab): its timers are throttled, up to a minute per
+      // pause, which made 7-slide posts run past the app's 4-minute wait.
+      if (i > 0 && !document.hidden) await new Promise((r) => setTimeout(r, 300 + Math.random() * 900));
       if (i === 0) firstStoreUri = ap.storeUri;
       if (!storageU) storageU = storageUserIdFromAuth(ap.auth);
       log(`  applied → host ${ap.uploadHost}, storageU ${storageU || "MISSING"} — uploading bytes…`);
@@ -863,6 +914,16 @@
       window.postMessage({ __vbtt: "listMineResult", id: d.id, result }, "*");
       return;
     }
+    if (d.__vbtt === "listScheduled" || d.__vbtt === "deletePost") {
+      let result;
+      try {
+        result = { ok: true, ...(d.__vbtt === "listScheduled" ? { posts: await listScheduled() } : await deletePost({ itemId: d.itemId })) };
+      } catch (e) {
+        result = { ok: false, error: String((e && e.message) || e) };
+      }
+      window.postMessage({ __vbtt: d.__vbtt + "Result", id: d.id, result }, "*");
+      return;
+    }
     if (d.__vbtt === "listUser") {
       let result;
       try {
@@ -924,6 +985,6 @@
     window.postMessage({ __vbtt: "jobResult", id: d.id, result }, "*");
   });
 
-  window.VBTikTok = { post, saveDraft, listMine, listUser, comments, replyToComment, userPrivate, postFromPicker, recommendMusic, _internals: { getCreds, applyImageUpload, commitImageUpload, sigv4, hashtagExtra, crc32Hex } };
+  window.VBTikTok = { post, saveDraft, listMine, listScheduled, deletePost, listUser, comments, replyToComment, userPrivate, postFromPicker, recommendMusic, _internals: { getCreds, applyImageUpload, commitImageUpload, sigv4, hashtagExtra, crc32Hex } };
   log("ready. Call: await VBTikTok.postFromPicker({ title, caption })");
 })();

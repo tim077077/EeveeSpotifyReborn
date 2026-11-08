@@ -77,7 +77,8 @@ Claude calls these itself when you ask for something. You never type a tool name
 | `review_slideshow` | Claude records its check of the current slides and claims; required before scheduling | (automatic after every render) |
 | `view_slideshow` | One slideshow's details, draft status and rendered slides | "show me that draft again" |
 | `list_slideshows` | Recent slideshows with status, post/schedule and score | "what have you made?" |
-| `delete_slideshow` | Delete a slideshow from the phone (never from TikTok) | "delete the weak one" |
+| `delete_slideshow` | Delete a slideshow from the phone, and from TikTok's schedule if it's waiting there (live posts stay) | "delete the weak one" |
+| `tiktok_schedule` | List what TikTok really has scheduled; delete one scheduled post | "what's scheduled on @vintedbot.org?" |
 | `predict_virality` | Two-step score: Claude reads the slides blind, then Slidemill turns that read into a score, attention curve and rank | "score these before I post" |
 | `analytics` | The account's real numbers, what beats its median, and whether the score tracks views | "how am I doing this week?" |
 | `best_times` | Posting times for an audience's country | "when should I post for the UK?" |

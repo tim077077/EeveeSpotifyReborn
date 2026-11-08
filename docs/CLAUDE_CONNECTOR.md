@@ -61,7 +61,8 @@ On the phone:
 | `view_post` | One of your own posted TikToks (post id from `analytics`): its numbers and, for a carousel, its real slides as posted, tiled on one image (downloaded once, then kept). The slide links come from TikTok Studio's list, since TikTok hides photo posts from logged-out visitors; if they expired, `analytics` with `refresh=true` gets fresh ones |
 | `view_slideshow` | Details, draft status and rendered slides of one slideshow |
 | `list_slideshows` | Recent slideshows with their draft status and scores |
-| `delete_slideshow` | Remove a weaker version (doesn't touch TikTok drafts) |
+| `delete_slideshow` | Remove a weaker version. A post waiting in TikTok's schedule is deleted there too (checked); live posts and drafts stay |
+| `tiktok_schedule` | What TikTok Studio really has scheduled for an account; `delete` takes one scheduled post off it (checked) |
 | `predict_virality` | Score a slideshow with Claude as the reader. The first call returns the scoring rules, the slides and real library posts to rank it against blind; Claude sends its read back and Slidemill turns it into the score, attention curve and rank |
 | `analytics` | The account's analytics (and whether `predict_virality`'s score tracks real views), the same report as the app's Analytics tab: followers and their weekly change, totals, the last 7 days against the 7 before, views per week, slideshows against videos, top posts, and every post's views, likes, comments, shares, saves, engagement, views per day and views in the last 24 hours, plus the Slidemill slideshow and score it came from |
 | `best_times` | When to post for an audience in a country |
