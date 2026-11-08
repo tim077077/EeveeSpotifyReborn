@@ -35,7 +35,22 @@ class FakeTikTok(var user: String = "tim", override val id: String = TikTokTab.M
         refuse?.let { throw DraftError("TikTok refused the post: $it") }
         published += Triple(title, caption, slides)
         scheduledAt += at
-        return "75" + published.size.toString().padStart(17, '0')
+        val itemId = "75" + published.size.toString().padStart(17, '0')
+        if (at > 0) onSchedule += obj("id" to itemId, "desc" to caption, "schedule_time" to at, "slides" to slides.size.toLong())
+        return itemId
+    }
+
+    /** TikTok Studio's schedule as this fake has it (status 141 posts). */
+    val onSchedule = CopyOnWriteArrayList<Obj>()
+    /** When true, TikTok answers the delete but keeps the post (to test the check afterwards). */
+    @Volatile var deleteIgnored = false
+    val deleted = CopyOnWriteArrayList<String>()
+
+    override fun listScheduled(): List<Obj>? = onSchedule.map { it.copyObj() }
+
+    override fun deletePost(itemId: String) {
+        deleted += itemId
+        if (!deleteIgnored) onSchedule.removeIf { it.str("id") == itemId }
     }
 
     /** TikTok Studio's content list; null = this tab can't list (falls back to the profile page). */

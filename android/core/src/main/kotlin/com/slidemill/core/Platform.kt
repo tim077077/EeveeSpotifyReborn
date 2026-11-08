@@ -78,6 +78,15 @@ interface TikTokTab {
     fun listMyPosts(max: Int): List<Obj>? = null
 
     /**
+     * TikTok Studio's own schedule for this account: maps with id, desc, schedule_time (unix s), slides.
+     * null when this tab can't list it. TikTok doesn't let scheduled posts be edited, only deleted.
+     */
+    fun listScheduled(): List<Obj>? = null
+
+    /** Delete one of this account's posts (a scheduled one) on TikTok. Throws [DraftError] if TikTok refuses. */
+    fun deletePost(itemId: String): Unit = throw DraftError("This TikTok tab can't delete posts.")
+
+    /**
      * Another account's newest public posts (raw itemStructs), asked by this tab's page with its own
      * fetch, stopping after the page that reaches a post in [known]. null when the page can't, so the
      * caller falls back to scrolling the profile.

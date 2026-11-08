@@ -178,8 +178,9 @@ Save tokens: don't repeat calls whose answer you already have in this conversati
                 "at" to str("When, as ISO 8601: 2026-10-27T18:30:00+01:00, or without an offset for the phone's own time zone."),
                 "sound" to bool("Attach TikTok's top suggested sound (default true)."),
                 "account" to str("TikTok username to post to. Required when several accounts are logged in: confirm it with the user first."),
+                "replaces" to str("Id of a scheduled slideshow this one replaces at the same time: it's deleted from TikTok's schedule (checked) and the phone first. TikTok can't edit a scheduled post's slides."),
             ),
-        ) { a -> schedule(id(a), a.str("at"), a["sound"] as? Boolean ?: true, a.str("account")) },
+        ) { a -> schedule(id(a), a.str("at"), a["sound"] as? Boolean ?: true, a.str("account"), a.str("replaces")) },
 
         "view_post" to Tool(
             "One of the user's own posted TikToks (post_id from analytics): stats, and for a carousel its real slides tiled on one image; slide=N shows one full size.",
@@ -214,9 +215,14 @@ Save tokens: don't repeat calls whose answer you already have in this conversati
         },
 
         "delete_slideshow" to Tool(
-            "Delete a slideshow from the phone (not from TikTok).",
+            "Delete a slideshow from the phone. If it's waiting in TikTok's schedule, it's deleted there too (checked). Live posts stay on TikTok.",
             input(listOf("slideshow_id"), "slideshow_id" to str()),
-        ) { a -> if (e.studio.delete(id(a))) "Deleted." else throw ToolError("Slideshow ${id(a)} not found.") },
+        ) { a -> deleteTool(id(a)) },
+
+        "tiktok_schedule" to Tool(
+            "What TikTok Studio really has scheduled for an account (time, caption, slides, matching slideshow_id). delete: a post id from that list to delete from TikTok's schedule (checked).",
+            input(listOf(), "account" to str(), "delete" to str()),
+        ) { a -> tiktokSchedule(a.str("account"), a.str("delete")) },
 
         "predict_virality" to Tool(
             "Score a slideshow with you as the reader. Step 1 (no read): rules, slides, library posts to rank it against blind, answer_schema. Step 2: call again with read matching answer_schema. Unchanged slideshows return the stored score.",
@@ -570,7 +576,43 @@ Save tokens: don't repeat calls whose answer you already have in this conversati
     private fun localTime(at: Long): String = java.time.Instant.ofEpochSecond(at).atZone(java.time.ZoneId.of(e.platform.defaultTimezone()))
         .format(java.time.format.DateTimeFormatter.ofPattern("EEE d MMM, HH:mm", java.util.Locale.ENGLISH)) + " (phone time, ${e.platform.defaultTimezone()})"
 
-    private fun schedule(id: String, raw: String, sound: Boolean, account: String): String {
+    private fun deleteTool(id: String): String {
+        val s = show(id)
+        val note = try {
+            within { e.studio.unschedule(id, tabOf(s)) } ?: throw ToolError("TikTok is slow to answer: nothing deleted yet. Call delete_slideshow again in a minute.")
+        } catch (x: DraftError) {
+            throw ToolError("Not deleted: ${x.message} Deleting it only on the phone would leave the post scheduled on TikTok.")
+        }
+        e.studio.delete(id)
+        return "Deleted. $note".trim()
+    }
+
+    private fun tiktokSchedule(account: String, delete: String): String {
+        val t = tab(account)
+        var note = ""
+        if (delete.isNotBlank()) {
+            val postId = delete.trim()
+            note = within {
+                val before = t.listScheduled() ?: throw ToolError("Couldn't read TikTok Studio's schedule.")
+                if (before.none { it["id"]?.toString() == postId }) throw ToolError("Post $postId isn't in TikTok Studio's schedule: nothing deleted. Only scheduled posts can be deleted here.")
+                try { t.deletePost(postId) } catch (x: DraftError) { throw ToolError("Not deleted: ${x.message}") }
+                if (t.listScheduled()?.any { it["id"]?.toString() == postId } != false) throw ToolError("TikTok said it deleted post $postId, but it's still scheduled. Delete it in TikTok Studio by hand.")
+                e.db.tx { all("slideshows").filter { it.objOrNull("post")?.str("item_id") == postId }.forEach { it.remove("post") } }
+                "Deleted post $postId from TikTok's schedule (checked).\n"
+            } ?: throw ToolError("TikTok is slow to answer: check again with tiktok_schedule before retrying.")
+        }
+        val listed = within { t.listScheduled() } ?: throw ToolError("${note}TikTok is slow to answer. Try again in a minute.")
+        val byItem = e.db.tx { all("slideshows").filter { it.objOrNull("post")?.str("item_id").orEmpty().isNotEmpty() }.associate { it.objAt("post").str("item_id") to it.str("id") } }
+        val user = e.accounts.cached(t.id).ifEmpty { "this account" }
+        if (listed.isEmpty()) return "${note}Nothing scheduled on TikTok for @$user."
+        return note + "TikTok Studio → Scheduled for @$user (${listed.size}):\n" + listed.sortedBy { (it["schedule_time"] as? Number)?.toLong() ?: 0L }.joinToString("\n") { p ->
+            val at = (p["schedule_time"] as? Number)?.toLong() ?: 0L
+            "- ${localTime(at)} · post ${p["id"]} · ${p["slides"]} slides · \"${p["desc"].toString().take(60)}\"" +
+                (byItem[p["id"].toString()]?.let { " · slideshow $it" } ?: " · no slideshow on the phone")
+        }
+    }
+
+    private fun schedule(id: String, raw: String, sound: Boolean, account: String, replaces: String = ""): String {
         // With several accounts, the account is never a default: Claude names it, after the user confirmed it.
         if (account.isBlank() && e.tabs.size > 1) {
             val names = e.accounts.list().map { it.str("username") }.filter { it.isNotEmpty() }.joinToString { "@$it" }
@@ -586,15 +628,33 @@ Save tokens: don't repeat calls whose answer you already have in this conversati
         val at = parseAt(raw)
         Studio.scheduleProblem(at)?.let { throw ToolError(it) }
         val user = s.str("account").ifEmpty { defaultUser() }
+        var replaced = ""
+        if (replaces.isNotBlank()) {
+            if (replaces == id) throw ToolError("replaces must be another slideshow.")
+            val old = show(replaces)
+            if (!old.str("account").equals(user, ignoreCase = true) && old.str("account").isNotEmpty()) throw ToolError("Slideshow $replaces is on @${old.str("account")}, not @$user.")
+            if (e.store.get("claude_schedules") == "0") throw ToolError("Autopilot is off, so nothing can be replaced on TikTok from here: the user does it in the app.")
+            replaced = try {
+                within { e.studio.unschedule(replaces, tabOf(old)) } ?: throw ToolError("TikTok is slow to answer: nothing replaced yet. Call again in a minute.")
+            } catch (x: DraftError) {
+                throw ToolError("Nothing replaced: ${x.message}")
+            }
+            e.studio.delete(replaces)
+        }
         e.studio.crowding(at, user.ifEmpty { null }, unassigned = user.isEmpty() || user.equals(defaultUser(), ignoreCase = true))?.let { throw ToolError(it) }
         if (e.store.get("claude_schedules") == "0") {
             e.studio.suggest(id, at)
             return "Proposed for ${localTime(at)}. It isn't scheduled yet: the user approves it with one tap (SCHEDULE) on " +
                 "this slideshow in the Slidemill app. Tell them."
         }
-        val record = within { e.studio.publish(id, tabOf(s), sound, at) }
-            ?: return "TikTok is still uploading the slides. Call view_slideshow in a minute: it shows the scheduled time, or why it failed."
-        return "Scheduled on @${record.str("url").substringAfter("/@").substringBefore("/")} for ${localTime(at)} (post id ${record.str("item_id")}). It's in TikTok Studio → Scheduled; TikTok publishes it then, phone on or off."
+        val record = try {
+            within { e.studio.publish(id, tabOf(s), sound, at) }
+        } catch (x: Exception) {
+            if (replaces.isBlank()) throw x
+            throw ToolError("Old slideshow $replaces is deleted ($replaced), but scheduling this one failed: ${x.message} That slot is empty now: call schedule_slideshow again without replaces.")
+        } ?: return "TikTok is still uploading the slides. Call view_slideshow in a minute: it shows the scheduled time, or why it failed." +
+            (if (replaces.isNotBlank()) " Old slideshow $replaces is already deleted ($replaced)." else "")
+        return (if (replaces.isNotBlank()) "Replaced $replaces: $replaced " else "") + "Scheduled on @${record.str("url").substringAfter("/@").substringBefore("/")} for ${localTime(at)} (post id ${record.str("item_id")}). It's in TikTok Studio → Scheduled; TikTok publishes it then, phone on or off."
     }
 
     /** The user's own post as Claude sees it: its numbers, and its slides as posted (downloaded once, then kept). */

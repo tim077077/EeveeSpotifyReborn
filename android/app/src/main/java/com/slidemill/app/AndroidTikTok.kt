@@ -29,6 +29,7 @@ class AndroidTikTok(private val context: Context, override val id: String = TikT
         private const val USER_LIST_MS = 90_000L
         private const val REPLY_MS = 30_000L
         private const val PROFILE_MS = 15_000L
+        private const val VERIFY_MS = 5 * 60_000L // after a timeout: how long to look for the post in TikTok's schedule
 
     }
 
@@ -94,6 +95,40 @@ class AndroidTikTok(private val context: Context, override val id: String = TikT
         return items.filterIsInstance<Map<*, *>>().map { (it as Map<String, Any?>).toMutableMap() }
     }
 
+    override fun listScheduled(): List<Obj>? {
+        hello()
+        val result = ask("listScheduled", JSONObject(), LIST_MS) ?: return null
+        if (!result.optBoolean("ok")) throw DraftError("TikTok didn't list your scheduled posts: ${result.optString("error", "unknown error")}")
+        val posts = Json.parse(result.optJSONArray("posts")?.toString() ?: "[]") as? List<*> ?: return null
+        @Suppress("UNCHECKED_CAST")
+        return posts.filterIsInstance<Map<*, *>>().map { (it as Map<String, Any?>).toMutableMap() }
+    }
+
+    override fun deletePost(itemId: String) {
+        hello()
+        val result = ask("deletePost", JSONObject().put("itemId", itemId), PROFILE_MS)
+            ?: throw DraftError("TikTok didn't answer the delete in time.")
+        if (!result.optBoolean("ok")) throw DraftError(result.optString("error", "TikTok refused the delete."))
+    }
+
+    /**
+     * The scheduled post TikTok really has for this job, if any: same time (TikTok rounds it) and the same
+     * caption start. Looked for until [VERIFY_MS], since a slow upload can still be finishing.
+     */
+    private fun findScheduled(caption: String, at: Long): String? {
+        val until = System.currentTimeMillis() + VERIFY_MS
+        val start = caption.trim().take(30)
+        while (true) {
+            val match = runCatching { listScheduled() }.getOrNull()?.firstOrNull { p ->
+                val t = (p["schedule_time"] as? Number)?.toLong() ?: 0L
+                kotlin.math.abs(t - at) <= 600 && (start.isEmpty() || p["desc"]?.toString().orEmpty().trim().startsWith(start))
+            }
+            if (match != null) return match["id"]?.toString()
+            if (System.currentTimeMillis() > until) return null
+            Thread.sleep(20_000)
+        }
+    }
+
     /** The comments on one of the account's own posts, read by this tab's logged-in page (tiktok-inject.js comments). */
     override fun comments(itemId: String, max: Int): List<Obj>? {
         if (username().isEmpty()) return null
@@ -129,7 +164,14 @@ class AndroidTikTok(private val context: Context, override val id: String = TikT
             .put("images", JSONArray(TikTokWeb.serve(key, slides)))
         try {
             val result = ask("job", JSONObject().put("job", job), DRAFT_MS)
-                ?: throw DraftError("TikTok didn't finish within ${DRAFT_MS / 60_000} minutes. Check $checkWhere before trying again.")
+            // No answer, or the page still busy with an earlier upload: look in TikTok's own schedule
+            // for what really happened before saying anything.
+            val busy = result?.optString("error").orEmpty().contains("still running")
+            if (action == "publish" && at > 0 && (result == null || busy)) {
+                findScheduled(caption, at)?.let { return it }
+                throw DraftError("TikTok didn't finish, and the post isn't in TikTok Studio's schedule after ${(DRAFT_MS + VERIFY_MS) / 60_000} minutes: it wasn't scheduled. Safe to try again.")
+            }
+            if (result == null) throw DraftError("TikTok didn't finish within ${DRAFT_MS / 60_000} minutes. Check $checkWhere before trying again.")
             if (!result.optBoolean("ok")) throw DraftError("TikTok refused the $what: ${result.optString("error", "unknown error")}")
             return result.optString(idKey).ifEmpty {
                 throw DraftError("TikTok answered without an id. Check $checkWhere before trying again.")

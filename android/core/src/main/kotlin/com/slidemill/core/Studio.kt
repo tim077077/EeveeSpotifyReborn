@@ -381,7 +381,8 @@ class Studio(
                 "scheduled_for" to if (at > 0) Db.iso(at * 1000) else "",
             )
         } catch (x: Exception) {
-            obj("status" to "failed", "item_id" to "", "url" to "", "error" to (x.message ?: x.toString()))
+            // The time is kept: a timed-out schedule can still be on TikTok, and unschedule looks for it there.
+            obj("status" to "failed", "item_id" to "", "url" to "", "error" to (x.message ?: x.toString()), "scheduled_for" to if (at > 0) Db.iso(at * 1000) else "")
         }
         record["at"] = Db.iso(Db.nowMs())
         db.tx {
@@ -431,6 +432,40 @@ class Studio(
             if (s.objOrNull("post")?.str("status") in setOf("posted", "scheduled", "posting")) throw DraftError("It's already ${s.objAt("post").str("status")}.")
             s["suggested_time"] = at
         }
+    }
+
+    /**
+     * Take a slideshow's post off TikTok's own schedule, checked against TikTok's list afterwards, and
+     * forget it here (the slideshow can then be scheduled again). A post with no item id (a timed-out
+     * schedule) is found by its time and caption. Returns what happened, for Claude. Live posts are
+     * never touched: once the time has passed, it returns without deleting anything.
+     */
+    fun unschedule(id: String, tab: TikTokTab?): String {
+        val s = db.tx { get("slideshows", id)?.copyObj() } ?: throw PipelineError("Slideshow $id not found.")
+        val p = s.objOrNull("post")
+        if (p == null || p.str("status") !in setOf("scheduled", "failed")) return ""
+        val at = Db.epochS(p.str("scheduled_for")) ?: 0L
+        if (p.str("status") == "scheduled" && at > 0 && at * 1000 <= Db.nowMs()) return "It already went out at ${Db.iso(at * 1000)} UTC: left on TikTok."
+        if (tab == null) throw DraftError("The phone's TikTok tab for this account isn't running, so TikTok's schedule can't be checked.")
+        val listed = tab.listScheduled() ?: throw DraftError("Couldn't read TikTok Studio's schedule.")
+        val caption = s.str("description").trim().take(30)
+        val onTikTok = listed.firstOrNull { it["id"]?.toString() == p.str("item_id") && p.str("item_id").isNotEmpty() }
+            ?: listed.firstOrNull { q ->
+                at > 0 && kotlin.math.abs(((q["schedule_time"] as? Number)?.toLong() ?: 0L) - at) <= 600 &&
+                    (caption.isEmpty() || q["desc"]?.toString().orEmpty().trim().startsWith(caption))
+            }
+        val note = if (onTikTok == null) {
+            "It wasn't in TikTok Studio's schedule."
+        } else {
+            val itemId = onTikTok["id"].toString()
+            tab.deletePost(itemId)
+            if (tab.listScheduled()?.any { it["id"]?.toString() == itemId } != false) {
+                throw DraftError("TikTok said it deleted post $itemId, but it's still in TikTok Studio → Scheduled. Delete it there by hand.")
+            }
+            "Deleted from TikTok Studio's schedule (post $itemId, checked)."
+        }
+        db.tx { get("slideshows", id)?.remove("post") }
+        return note
     }
 
     fun delete(id: String): Boolean {
