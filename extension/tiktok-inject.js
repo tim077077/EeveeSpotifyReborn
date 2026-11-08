@@ -763,7 +763,7 @@
       // A human's uploader doesn't fire its images back to back; a short, uneven pause between slides.
       // Not in a hidden page (the phone's background tab): its timers are throttled, up to a minute per
       // pause, which made 7-slide posts run past the app's 4-minute wait.
-      if (i > 0 && !document.hidden) await new Promise((r) => setTimeout(r, 300 + Math.random() * 900));
+      if (i > 0 && !(typeof document !== "undefined" && document.hidden)) await new Promise((r) => setTimeout(r, 300 + Math.random() * 900));
       if (i === 0) firstStoreUri = ap.storeUri;
       if (!storageU) storageU = storageUserIdFromAuth(ap.auth);
       log(`  applied → host ${ap.uploadHost}, storageU ${storageU || "MISSING"} — uploading bytes…`);
