@@ -43,6 +43,8 @@ class AndroidPlatform(private val context: Context) : Platform {
 
     override fun recentProblems(): List<String> = Diag.recent()
 
+    override fun appVersion(): String = runCatching { context.packageManager.getPackageInfo(context.packageName, 0).versionName }.getOrNull().orEmpty()
+
     override fun defaultTimezone(): String = ZoneId.systemDefault().id
 
     override fun log(message: String) {

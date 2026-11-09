@@ -43,6 +43,9 @@ interface Platform {
     /** The phone's last few problems (TikTok page warnings, failed requests), newest last, for phone_status. */
     fun recentProblems(): List<String> = emptyList()
 
+    /** The installed app's version name, e.g. "35.0.0". */
+    fun appVersion(): String = ""
+
     fun defaultTimezone(): String = ZoneId.systemDefault().id
 
     fun log(message: String) = println("slidemill: $message")
