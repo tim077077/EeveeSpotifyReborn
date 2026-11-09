@@ -40,6 +40,9 @@ interface Platform {
     /** Whether Android lets the app run freely with the screen off (null = not a phone / unknown). */
     fun batteryUnrestricted(): Boolean? = null
 
+    /** The phone's last few problems (TikTok page warnings, failed requests), newest last, for phone_status. */
+    fun recentProblems(): List<String> = emptyList()
+
     fun defaultTimezone(): String = ZoneId.systemDefault().id
 
     fun log(message: String) = println("slidemill: $message")

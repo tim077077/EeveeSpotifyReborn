@@ -192,6 +192,8 @@ class TikTokWeb private constructor(val slot: String) {
         private set
     @Volatile private var lastError = ""
 
+    private fun accountLabel() = if (slot == TikTokTab.MAIN) "main" else slot
+
     /** What the page is doing, in words, for an error message ("ready", "loading for 35 s", …). */
     fun state(): String {
         val view = web ?: return "the tiktok.com page isn't open (it opens on the next call)"
@@ -239,7 +241,16 @@ class TikTokWeb private constructor(val slot: String) {
         cookies(slot).setAcceptThirdPartyCookies(view, true)
         // Detached and invisible, the page's renderer would be first in line when Android frees memory.
         view.setRendererPriorityPolicy(WebView.RENDERER_PRIORITY_IMPORTANT, false)
-        view.webChromeClient = WebChromeClient()
+        view.webChromeClient = object : WebChromeClient() {
+            // The poster's warnings and the page's errors, kept for phone_status's recent_problems.
+            override fun onConsoleMessage(m: android.webkit.ConsoleMessage): Boolean {
+                val level = m.messageLevel()
+                if (level == android.webkit.ConsoleMessage.MessageLevel.ERROR && "[Slidemill]" !in m.message()) return false
+                if (level == android.webkit.ConsoleMessage.MessageLevel.WARNING && "[Slidemill]" in m.message() ||
+                    level == android.webkit.ConsoleMessage.MessageLevel.ERROR) Diag.note("${accountLabel()}: ${m.message().removePrefix("[Slidemill] ")}")
+                return false
+            }
+        }
         view.webViewClient = client
         view.addJavascriptInterface(Native(), "SlidemillNative")
         loadStartedMs = System.currentTimeMillis()
@@ -345,6 +356,7 @@ class TikTokWeb private constructor(val slot: String) {
             pageReady = false
             showingError = true
             lastError = "${error.description}"
+            Diag.note("${accountLabel()}: tiktok.com didn't load (${error.description}), retrying")
             retryLater(request.url.toString())
         }
 

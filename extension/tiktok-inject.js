@@ -41,6 +41,25 @@
   const log = (...a) => console.log("%c[Slidemill]", "color:#fe2c55;font-weight:bold", ...a);
   const warn = (...a) => console.warn("[Slidemill]", ...a);
 
+  // fetch with a deadline, and retries for requests that are safe to repeat. On mobile data a request
+  // can hang for minutes on a dead connection; failing after [ms] and trying again gets a fresh one.
+  async function fetchT(url, opts = {}, ms = 15000, tries = 1) {
+    let last;
+    for (let i = 0; i < tries; i++) {
+      const ctl = typeof AbortController !== "undefined" ? new AbortController() : null;
+      const timer = ctl ? setTimeout(() => ctl.abort(), ms) : null;
+      try {
+        return await fetch(url, ctl ? { ...opts, signal: ctl.signal } : opts);
+      } catch (e) {
+        last = e && e.name === "AbortError" ? new Error("TikTok didn't answer within " + Math.round(ms / 1000) + " s (" + String(url).replace(ORIGIN, "").split("?")[0] + ")") : e;
+        warn("request failed" + (i + 1 < tries ? ", retrying" : "") + ":", last && last.message);
+      } finally {
+        if (timer) clearTimeout(timer);
+      }
+    }
+    throw last;
+  }
+
   // ---- small helpers --------------------------------------------------------
 
   const rand = (n) => {
@@ -189,7 +208,7 @@
   // ---- pipeline steps -------------------------------------------------------
 
   async function getCreds() {
-    const r = await fetch(ORIGIN + "/api/v1/video/upload/auth/", { credentials: "include" });
+    const r = await fetchT(ORIGIN + "/api/v1/video/upload/auth/", { credentials: "include" }, 20000, 3);
     const j = await r.json();
     const b = j.video_token_v5 || j.vframe_token_v5 || j.audio_token_v5;
     if (!b || !b.access_key_id) throw new Error("could not read upload creds from /api/v1/video/upload/auth/ — shape changed; log the response");
@@ -452,9 +471,9 @@
   // TikTok Studio sends a CSRF token with its creator-center POSTs; fetch one the same way (best effort).
   async function csrfToken() {
     try {
-      const r = await fetch(ORIGIN + "/tiktok/creator/manage/item_list/v1/", {
+      const r = await fetchT(ORIGIN + "/tiktok/creator/manage/item_list/v1/", {
         method: "HEAD", credentials: "include", headers: { "x-secsdk-csrf-request": "1", "x-secsdk-csrf-version": "1.2.22" },
-      });
+      }, 8000, 2);
       const h = r.headers.get("x-ware-csrf-token") || "";
       const parts = h.split(",");
       return parts.length > 1 ? parts[1] : "";
@@ -523,10 +542,10 @@
     const seen = {}; // status -> count, so an empty answer can say what TikTok did list
     let cursor = 0;
     for (let page = 0; page < 10; page++) {
-      const r = await fetch(ORIGIN + "/tiktok/creator/manage/item_list/v1/?" + q, {
+      const r = await fetchT(ORIGIN + "/tiktok/creator/manage/item_list/v1/?" + q, {
         method: "POST", credentials: "include", headers,
         body: JSON.stringify({ cursor, size: 50, query: { sort_orders: [{ field_name: "post_time", order: 2 }], conditions: [], is_recent_posts: false } }),
-      });
+      }, 20000, 3);
       const j = await r.json();
       if (j.status_code !== 0) throw new Error("listing your scheduled posts failed: " + JSON.stringify(j).slice(0, 300));
       const nowS = Date.now() / 1000;
@@ -539,8 +558,10 @@
           posts.push({ id: String(it.item_id || ""), desc: it.desc || "", schedule_time: at, slides: (it.photo_list || []).length, status: num(it.status) });
         }
       }
-      // The whole list (an account has a few hundred posts at most): where scheduled ones sort isn't fixed.
-      if (!j.has_more) break;
+      // Newest post_time first, so waiting posts lead; once a page reaches posts already published
+      // in the past, the rest are older still. (Full pages otherwise, up to 10.)
+      const reachedPast = (j.item_list || []).some((it) => num(it.status) === 102 && num(it.post_time) > 0 && num(it.post_time) < nowS);
+      if (reachedPast || !j.has_more) break;
       cursor = num(j.cursor);
     }
     return { posts, seen };
@@ -554,9 +575,9 @@
   async function csrfFor(path) {
     let secsdk = "";
     try {
-      const r = await fetch(ORIGIN + path, {
+      const r = await fetchT(ORIGIN + path, {
         method: "HEAD", credentials: "include", headers: { "x-secsdk-csrf-request": "1", "x-secsdk-csrf-version": "1.2.22" },
-      });
+      }, 8000, 2);
       const parts = (r.headers.get("x-ware-csrf-token") || "").split(",");
       secsdk = parts.length > 1 ? parts[1] : "";
     } catch (_) { /* none */ }
@@ -574,7 +595,7 @@
     let last = "";
     for (let attempt = 0; attempt < 2; attempt++) { // a refused token gets one fresh try
       const headers = await csrfFor(path);
-      const r = await fetch(ORIGIN + path + "?" + q, { method: "POST", credentials: "include", headers });
+      const r = await fetchT(ORIGIN + path + "?" + q, { method: "POST", credentials: "include", headers }, 20000, 2); // deleting twice is harmless
       const text = await r.text();
       let j = null;
       try { j = JSON.parse(text); } catch (_) { /* not JSON */ }
@@ -596,12 +617,12 @@
     const posts = [];
     let cursor = 0;
     for (let page = 0; page < 20 && posts.length < limit; page++) {
-      const r = await fetch(ORIGIN + "/tiktok/creator/manage/item_list/v1/?" + q, {
+      const r = await fetchT(ORIGIN + "/tiktok/creator/manage/item_list/v1/?" + q, {
         method: "POST",
         credentials: "include",
         headers,
         body: JSON.stringify({ cursor, size: 50, query: { sort_orders: [{ field_name: "post_time", order: 2 }], conditions: [], is_recent_posts: false } }),
-      });
+      }, 20000, 3);
       const j = await r.json();
       if (j.status_code !== 0) throw new Error("listing your posts failed: " + JSON.stringify(j).slice(0, 300));
       for (const it of j.item_list || []) {
