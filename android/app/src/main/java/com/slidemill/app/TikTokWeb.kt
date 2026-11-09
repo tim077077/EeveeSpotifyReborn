@@ -188,6 +188,18 @@ class TikTokWeb private constructor(val slot: String) {
     private var loadFailures = 0
     private var failedUrl: String? = null
     @Volatile private var showingError = false // the current main-frame load failed
+    @Volatile var loadStartedMs = 0L // when the current tiktok.com load began (0 = none yet)
+        private set
+    @Volatile private var lastError = ""
+
+    /** What the page is doing, in words, for an error message ("ready", "loading for 35 s", …). */
+    fun state(): String {
+        val view = web ?: return "the tiktok.com page isn't open (it opens on the next call)"
+        if (showingError) return "tiktok.com didn't load: $lastError (retrying by itself)"
+        if (pageReady) return "the tiktok.com page is loaded"
+        val s = if (loadStartedMs > 0) (System.currentTimeMillis() - loadStartedMs) / 1000 else -1
+        return if (s >= 0) "the tiktok.com page has been loading for $s s" else "the tiktok.com page is starting (${view.progress}%)"
+    }
     private val retry = Runnable { web?.let { v -> failedUrl?.let { v.loadUrl(it) } } }
 
     private fun retryLater(url: String) {
@@ -230,6 +242,7 @@ class TikTokWeb private constructor(val slot: String) {
         view.webChromeClient = WebChromeClient()
         view.webViewClient = client
         view.addJavascriptInterface(Native(), "SlidemillNative")
+        loadStartedMs = System.currentTimeMillis()
         view.loadUrl(HOME)
         web = view
         sleepLater() // loaded in the background: let it sleep if nothing asks for it
@@ -260,9 +273,14 @@ class TikTokWeb private constructor(val slot: String) {
         web = null
     }
 
-    /** Load tiktok.com again (a page that came back from a long sleep stuck). */
-    fun reload(context: Context) = main.post {
+    /**
+     * Load tiktok.com again (a page that came back from a long sleep stuck), unless a load began in the
+     * last [minAgeMs]: calls a minute apart each reloading it would restart a slow load forever.
+     */
+    fun reload(context: Context, minAgeMs: Long = 90_000L) = main.post {
+        if (loadStartedMs > 0 && System.currentTimeMillis() - loadStartedMs < minAgeMs) return@post
         pageReady = false
+        loadStartedMs = System.currentTimeMillis()
         get(context).loadUrl(HOME)
     }
 
@@ -297,6 +315,7 @@ class TikTokWeb private constructor(val slot: String) {
         override fun onPageStarted(view: WebView, url: String?, favicon: Bitmap?) {
             pageReady = false
             showingError = false
+            loadStartedMs = System.currentTimeMillis()
         }
 
         // Inject as soon as the page is visible: a heavy tiktok.com page (video feed) can take a long
@@ -325,6 +344,7 @@ class TikTokWeb private constructor(val slot: String) {
             if (web !== view || !request.isForMainFrame || !isTikTok(request.url)) return
             pageReady = false
             showingError = true
+            lastError = "${error.description}"
             retryLater(request.url.toString())
         }
 

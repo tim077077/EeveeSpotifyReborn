@@ -520,6 +520,7 @@
     const csrf = await csrfToken();
     if (csrf) headers["tt-csrf-token"] = csrf;
     const posts = [];
+    const seen = {}; // status -> count, so an empty answer can say what TikTok did list
     let cursor = 0;
     for (let page = 0; page < 10; page++) {
       const r = await fetch(ORIGIN + "/tiktok/creator/manage/item_list/v1/?" + q, {
@@ -528,35 +529,60 @@
       });
       const j = await r.json();
       if (j.status_code !== 0) throw new Error("listing your scheduled posts failed: " + JSON.stringify(j).slice(0, 300));
-      let older = false;
+      const nowS = Date.now() / 1000;
       for (const it of j.item_list || []) {
-        if (num(it.status) === 141) {
-          posts.push({ id: String(it.item_id || ""), desc: it.desc || "", schedule_time: num(it.schedule_time) || num(it.post_time), slides: (it.photo_list || []).length });
-        } else if (num(it.post_time) && num(it.post_time) < Date.now() / 1000) older = true;
+        seen[num(it.status)] = (seen[num(it.status)] || 0) + 1;
+        // Studio's own schedule marks them 141; posts scheduled through the web uploader can carry
+        // another status, so anything not published (102) that goes out in the future counts too.
+        const at = num(it.schedule_time) || num(it.post_time);
+        if (num(it.status) === 141 || (num(it.status) !== 102 && at > nowS) || num(it.schedule_time) > nowS) {
+          posts.push({ id: String(it.item_id || ""), desc: it.desc || "", schedule_time: at, slides: (it.photo_list || []).length, status: num(it.status) });
+        }
       }
-      // Newest post_time first: scheduled posts come before everything already published.
-      if (older || !j.has_more) break;
+      // The whole list (an account has a few hundred posts at most): where scheduled ones sort isn't fixed.
+      if (!j.has_more) break;
       cursor = num(j.cursor);
     }
-    return posts;
+    return { posts, seen };
   }
 
   // Delete one of the account's own posts (a scheduled one, here) by item id. The caller checks with
   // listScheduled that it's really gone.
+  // TikTok's CSRF tokens are per path: the token from a HEAD on the list endpoint is refused on the
+  // delete endpoint (status_code 10402 "invalid csrf token"). Ask for one on the path being posted to,
+  // and send the tt_csrf_token cookie as tiktok.com's own pages do.
+  async function csrfFor(path) {
+    let secsdk = "";
+    try {
+      const r = await fetch(ORIGIN + path, {
+        method: "HEAD", credentials: "include", headers: { "x-secsdk-csrf-request": "1", "x-secsdk-csrf-version": "1.2.22" },
+      });
+      const parts = (r.headers.get("x-ware-csrf-token") || "").split(",");
+      secsdk = parts.length > 1 ? parts[1] : "";
+    } catch (_) { /* none */ }
+    const m = (typeof document !== "undefined" && document.cookie.match(/(?:^|;\s*)tt_csrf_token=([^;]+)/)) || null;
+    const headers = {};
+    if (secsdk) headers["x-secsdk-csrf-token"] = secsdk;
+    if (m) headers["tt-csrf-token"] = decodeURIComponent(m[1]);
+    return headers;
+  }
+
   async function deletePost({ itemId } = {}) {
     if (!itemId) throw new Error("no itemId");
+    const path = "/api/aweme/delete/";
     const q = new URLSearchParams({ aweme_id: String(itemId), aid: "1988" });
-    const headers = {};
-    const csrf = await csrfToken();
-    if (csrf) headers["tt-csrf-token"] = csrf;
-    const r = await fetch(ORIGIN + "/api/aweme/delete/?" + q, { method: "POST", credentials: "include", headers });
-    const text = await r.text();
-    let j = null;
-    try { j = JSON.parse(text); } catch (_) { /* not JSON */ }
-    if (!r.ok || !j || (j.status_code !== undefined && j.status_code !== 0)) {
-      throw new Error("TikTok refused the delete (HTTP " + r.status + "): " + text.slice(0, 200));
+    let last = "";
+    for (let attempt = 0; attempt < 2; attempt++) { // a refused token gets one fresh try
+      const headers = await csrfFor(path);
+      const r = await fetch(ORIGIN + path + "?" + q, { method: "POST", credentials: "include", headers });
+      const text = await r.text();
+      let j = null;
+      try { j = JSON.parse(text); } catch (_) { /* not JSON */ }
+      if (r.ok && j && (j.status_code === undefined || j.status_code === 0)) return { deleted: true };
+      last = "TikTok refused the delete (HTTP " + r.status + "): " + text.slice(0, 200);
+      if (!(j && j.status_code === 10402)) break;
     }
-    return { deleted: true };
+    throw new Error(last);
   }
 
   async function listMine({ max } = {}) {
@@ -934,7 +960,7 @@
     if (d.__vbtt === "listScheduled" || d.__vbtt === "deletePost") {
       let result;
       try {
-        result = { ok: true, ...(d.__vbtt === "listScheduled" ? { posts: await listScheduled() } : await deletePost({ itemId: d.itemId })) };
+        result = { ok: true, ...(d.__vbtt === "listScheduled" ? await listScheduled() : await deletePost({ itemId: d.itemId })) };
       } catch (e) {
         result = { ok: false, error: String((e && e.message) || e) };
       }

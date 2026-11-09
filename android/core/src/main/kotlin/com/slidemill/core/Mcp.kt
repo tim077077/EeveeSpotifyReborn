@@ -599,12 +599,13 @@ Save tokens: don't repeat calls whose answer you already have in this conversati
                 if (t.listScheduled()?.any { it["id"]?.toString() == postId } != false) throw ToolError("TikTok said it deleted post $postId, but it's still scheduled. Delete it in TikTok Studio by hand.")
                 e.db.tx { all("slideshows").filter { it.objOrNull("post")?.str("item_id") == postId }.forEach { it.remove("post") } }
                 "Deleted post $postId from TikTok's schedule (checked).\n"
-            } ?: throw ToolError("TikTok is slow to answer: check again with tiktok_schedule before retrying.")
+            } ?: throw ToolError("No answer from TikTok within ${waitMs / 1000} s (${t.state().ifEmpty { "page state unknown" }}): check again with tiktok_schedule before retrying.")
         }
-        val listed = within { t.listScheduled() } ?: throw ToolError("${note}TikTok is slow to answer. Try again in a minute.")
+        val listed = within { t.listScheduled() } ?: throw ToolError("${note}No answer from TikTok within ${waitMs / 1000} s (${t.state().ifEmpty { "page state unknown" }}). The phone keeps working on it: try again in a minute.")
         val byItem = e.db.tx { all("slideshows").filter { it.objOrNull("post")?.str("item_id").orEmpty().isNotEmpty() }.associate { it.objAt("post").str("item_id") to it.str("id") } }
         val user = e.accounts.cached(t.id).ifEmpty { "this account" }
-        if (listed.isEmpty()) return "${note}Nothing scheduled on TikTok for @$user."
+        if (listed.isEmpty()) return "${note}Nothing scheduled on TikTok for @$user." +
+            t.scheduleNote().takeIf { it.isNotEmpty() }?.let { " (TikTok's list, posts by status: $it; 102 = published.)" }.orEmpty()
         return note + "TikTok Studio → Scheduled for @$user (${listed.size}):\n" + listed.sortedBy { (it["schedule_time"] as? Number)?.toLong() ?: 0L }.joinToString("\n") { p ->
             val at = (p["schedule_time"] as? Number)?.toLong() ?: 0L
             "- ${localTime(at)} · post ${p["id"]} · ${p["slides"]} slides · \"${p["desc"].toString().take(60)}\"" +

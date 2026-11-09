@@ -62,11 +62,13 @@ class AndroidTikTok(private val context: Context, override val id: String = TikT
             Thread.sleep(1_000)
         }
         throw DraftError(
-            "tiktok.com isn't answering in the app. Open Slidemill → TikTok once to check the page loads and you're logged in, then try again.",
+            "tiktok.com isn't answering in the app after ${READY_MS / 1000} s: ${web.state()}. Try again in a minute; if it keeps failing, open Slidemill → TikTok to check the page loads and you're logged in.",
         )
     }
 
     override fun username(): String = hello().optString("username")
+
+    override fun state(): String = web.state()
 
     override fun saveDraft(title: String, caption: String, slides: List<File>): String =
         run("draft", title, caption, slides, sound = false, at = 0, what = "draft", idKey = "draftId", checkWhere = "TikTok Studio drafts")
@@ -99,10 +101,15 @@ class AndroidTikTok(private val context: Context, override val id: String = TikT
         hello()
         val result = ask("listScheduled", JSONObject(), LIST_MS) ?: return null
         if (!result.optBoolean("ok")) throw DraftError("TikTok didn't list your scheduled posts: ${result.optString("error", "unknown error")}")
+        lastNote = result.optJSONObject("seen")?.toString().orEmpty()
         val posts = Json.parse(result.optJSONArray("posts")?.toString() ?: "[]") as? List<*> ?: return null
         @Suppress("UNCHECKED_CAST")
         return posts.filterIsInstance<Map<*, *>>().map { (it as Map<String, Any?>).toMutableMap() }
     }
+
+    @Volatile private var lastNote = ""
+
+    override fun scheduleNote(): String = lastNote
 
     override fun deletePost(itemId: String) {
         hello()
