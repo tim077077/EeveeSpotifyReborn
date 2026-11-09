@@ -364,6 +364,26 @@ Save tokens: don't repeat calls whose answer you already have in this conversati
     /** Run slow work in the background; null if it's still running after [waitMs]. Its exceptions surface. */
     private val exploring = java.util.concurrent.atomic.AtomicBoolean(false)
 
+    // tiktok_schedule: one read of TikTok's schedule per account at a time (a call that times out leaves
+    // its read running and the next call joins it instead of starting another), and the last good list.
+    private val scheduleReads = java.util.concurrent.ConcurrentHashMap<String, java.util.concurrent.Future<List<Obj>?>>()
+    private val scheduleCache = java.util.concurrent.ConcurrentHashMap<String, Pair<Long, List<Obj>>>()
+
+    /** TikTok's schedule for [t] and how old it is (0 = just read); a remembered list if the read is slow; null if none. */
+    private fun readSchedule(t: TikTokTab): Pair<List<Obj>, Long>? {
+        val job = scheduleReads.compute(t.id) { _, running ->
+            if (running != null && !running.isDone) running
+            else e.work.submit<List<Obj>?> { e.platform.awake { t.listScheduled() }?.also { scheduleCache[t.id] = System.currentTimeMillis() to it } }
+        }!!
+        return try {
+            job.get(waitMs, TimeUnit.MILLISECONDS)?.let { it to 0L }
+        } catch (x: TimeoutException) {
+            scheduleCache[t.id]?.let { (at, list) -> list to (System.currentTimeMillis() - at).coerceAtLeast(1) }
+        } catch (x: java.util.concurrent.ExecutionException) {
+            throw x.cause ?: x
+        }
+    }
+
     private fun <T> within(block: () -> T): T? {
         val job = e.work.submit<T> { e.platform.awake(block) }
         return try {
@@ -579,6 +599,7 @@ Save tokens: don't repeat calls whose answer you already have in this conversati
     private fun deleteTool(id: String): String {
         val s = show(id)
         val note = try {
+            scheduleCache.clear()
             within { e.studio.unschedule(id, tabOf(s)) } ?: throw ToolError("TikTok is slow to answer: nothing deleted yet. Call delete_slideshow again in a minute.")
         } catch (x: DraftError) {
             throw ToolError("Not deleted: ${x.message} Deleting it only on the phone would leave the post scheduled on TikTok.")
@@ -601,7 +622,13 @@ Save tokens: don't repeat calls whose answer you already have in this conversati
                 "Deleted post $postId from TikTok's schedule (checked).\n"
             } ?: throw ToolError("No answer from TikTok within ${waitMs / 1000} s (${t.state().ifEmpty { "page state unknown" }}): check again with tiktok_schedule before retrying.")
         }
-        val listed = within { t.listScheduled() } ?: throw ToolError("${note}No answer from TikTok within ${waitMs / 1000} s (${t.state().ifEmpty { "page state unknown" }}). The phone keeps working on it: try again in a minute.")
+        if (note.isNotEmpty()) scheduleCache.remove(t.id)
+        val (listed, ageMs) = readSchedule(t) ?: throw ToolError(
+            "${note}Still reading TikTok's schedule (${t.state().ifEmpty { "page state unknown" }}). The phone keeps going: call tiktok_schedule again in a minute " +
+                "and it picks up this same read (it doesn't start over).",
+        )
+        if (ageMs > 0) note += "TikTok is slow right now, so this is the list from ${ageMs / 60_000} min ${ageMs / 1000 % 60} s ago; the phone is refreshing it. " +
+            "Call again in a minute for the live list (don't use this one to check a change you just made).\n"
         val byItem = e.db.tx { all("slideshows").filter { it.objOrNull("post")?.str("item_id").orEmpty().isNotEmpty() }.associate { it.objAt("post").str("item_id") to it.str("id") } }
         val user = e.accounts.cached(t.id).ifEmpty { "this account" }
         if (listed.isEmpty()) return "${note}Nothing scheduled on TikTok for @$user." +
@@ -615,6 +642,7 @@ Save tokens: don't repeat calls whose answer you already have in this conversati
 
     /** Take [replaces] off TikTok's schedule (checked) and the phone, then schedule [id] at [at]. Blocking. */
     private fun replaceAndSchedule(id: String, replaces: String, old: Obj, s: Obj, user: String, at: Long, sound: Boolean): String {
+        scheduleCache.clear()
         val replaced = try {
             e.studio.unschedule(replaces, tabOf(old))
         } catch (x: DraftError) {
@@ -665,6 +693,7 @@ Save tokens: don't repeat calls whose answer you already have in this conversati
             return "Proposed for ${localTime(at)}. It isn't scheduled yet: the user approves it with one tap (SCHEDULE) on " +
                 "this slideshow in the Slidemill app. Tell them."
         }
+        scheduleCache.clear()
         val record = within { e.studio.publish(id, tabOf(s), sound, at) }
             ?: return "TikTok is still uploading the slides. Call view_slideshow in a minute: it shows the scheduled time, or why it failed."
         return "Scheduled on @${record.str("url").substringAfter("/@").substringBefore("/")} for ${localTime(at)} (post id ${record.str("item_id")}). It's in TikTok Studio → Scheduled; TikTok publishes it then, phone on or off."
@@ -872,6 +901,7 @@ Save tokens: don't repeat calls whose answer you already have in this conversati
         }
         val (profiles, posts) = e.db.tx { all("library_profiles").size to where("library_posts") { it.bool("is_slideshow") }.size }
         return lean(obj(
+            "app" to e.platform.appVersion().ifEmpty { null },
             "tiktok_accounts" to (accounts.ifEmpty { listOf("no TikTok tab (open the Slidemill app)") }).toMutableList<Any?>(),
             "backgrounds" to if (e.images.providers().isNotEmpty()) "stock photos (${e.images.providers().joinToString()}), AI as fallback"
             else "AI only: ${e.imageGen.describe()}. A free Pexels key in the app gives real photos.",
@@ -880,7 +910,7 @@ Save tokens: don't repeat calls whose answer you already have in this conversati
             "connection" to connectionLine(),
             "claude_can_schedule" to if (e.store.get("claude_schedules") != "0") "yes: schedule_slideshow schedules on TikTok directly"
             else "no: schedule_slideshow proposes a time; the user approves it in the app",
-            "recent_problems" to e.platform.recentProblems().takeLast(6).takeIf { it.isNotEmpty() }?.toMutableList<Any?>(),
+            "recent_problems" to (e.platform.recentProblems().takeLast(6).takeIf { it.isNotEmpty() }?.toMutableList<Any?>() ?: "none"),
         ))
     }
 

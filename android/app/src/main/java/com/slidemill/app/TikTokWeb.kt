@@ -241,6 +241,10 @@ class TikTokWeb private constructor(val slot: String) {
         cookies(slot).setAcceptThirdPartyCookies(view, true)
         // Detached and invisible, the page's renderer would be first in line when Android frees memory.
         view.setRendererPriorityPolicy(WebView.RENDERER_PRIORITY_IMPORTANT, false)
+        // Off screen, Android treats the page's renderer process as unimportant: it gets a starved CPU
+        // share and can be frozen outright, so the page stops answering for minutes. Keep it bound as
+        // important even when nothing shows it (it only runs while Slidemill's service runs).
+        view.setRendererPriorityPolicy(WebView.RENDERER_PRIORITY_IMPORTANT, false)
         view.webChromeClient = object : WebChromeClient() {
             // The poster's warnings and the page's errors, kept for phone_status's recent_problems.
             override fun onConsoleMessage(m: android.webkit.ConsoleMessage): Boolean {
