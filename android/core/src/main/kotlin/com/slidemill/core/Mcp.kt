@@ -910,7 +910,7 @@ Save tokens: don't repeat calls whose answer you already have in this conversati
             "connection" to connectionLine(),
             "claude_can_schedule" to if (e.store.get("claude_schedules") != "0") "yes: schedule_slideshow schedules on TikTok directly"
             else "no: schedule_slideshow proposes a time; the user approves it in the app",
-            "recent_problems" to (e.platform.recentProblems().takeLast(6).takeIf { it.isNotEmpty() }?.toMutableList<Any?>() ?: "none"),
+            "recent_problems" to (e.platform.recentProblems().takeLast(15).takeIf { it.isNotEmpty() }?.toMutableList<Any?>() ?: "none"),
         ))
     }
 

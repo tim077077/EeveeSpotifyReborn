@@ -279,6 +279,12 @@ class TikTokWeb private constructor(val slot: String) {
         wrapper.baseContext = appContext
     }
 
+    /** Throw the page away and load tiktok.com in a new one (a page whose scripts stopped answering). */
+    fun restart(context: Context) = main.post {
+        close()
+        get(context)
+    }
+
     private fun close() {
         val view = web ?: return
         main.removeCallbacks(retry)

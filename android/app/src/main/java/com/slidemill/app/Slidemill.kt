@@ -21,6 +21,10 @@ class AndroidPlatform(private val context: Context) : Platform {
     override val name = "android"
     override val imaging: Imaging = AndroidImaging(context.assets)
 
+    init {
+        Diag.attach(java.io.File(context.filesDir, "diag.txt"))
+    }
+
     override fun encryptSecret(plain: String) = Secrets.encrypt(plain)
     override fun decryptSecret(stored: String) = Secrets.decrypt(stored)
 
