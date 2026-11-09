@@ -613,6 +613,25 @@ Save tokens: don't repeat calls whose answer you already have in this conversati
         }
     }
 
+    /** Take [replaces] off TikTok's schedule (checked) and the phone, then schedule [id] at [at]. Blocking. */
+    private fun replaceAndSchedule(id: String, replaces: String, old: Obj, s: Obj, user: String, at: Long, sound: Boolean): String {
+        val replaced = try {
+            e.studio.unschedule(replaces, tabOf(old))
+        } catch (x: DraftError) {
+            throw ToolError("Nothing replaced: ${x.message}")
+        }
+        e.studio.delete(replaces)
+        e.studio.crowding(at, user.ifEmpty { null }, unassigned = user.isEmpty() || user.equals(defaultUser(), ignoreCase = true))?.let {
+            throw ToolError("Old slideshow $replaces is deleted ($replaced), but this one can't go at that time: $it")
+        }
+        val record = try {
+            e.studio.publish(id, tabOf(s), sound, at)
+        } catch (x: Exception) {
+            throw ToolError("Old slideshow $replaces is deleted ($replaced), but scheduling this one failed: ${x.message} That slot is empty now: call schedule_slideshow again without replaces.")
+        }
+        return "Replaced $replaces: $replaced Scheduled on @${record.str("url").substringAfter("/@").substringBefore("/")} for ${localTime(at)} (post id ${record.str("item_id")})."
+    }
+
     private fun schedule(id: String, raw: String, sound: Boolean, account: String, replaces: String = ""): String {
         // With several accounts, the account is never a default: Claude names it, after the user confirmed it.
         if (account.isBlank() && e.tabs.size > 1) {
@@ -629,18 +648,16 @@ Save tokens: don't repeat calls whose answer you already have in this conversati
         val at = parseAt(raw)
         Studio.scheduleProblem(at)?.let { throw ToolError(it) }
         val user = s.str("account").ifEmpty { defaultUser() }
-        var replaced = ""
         if (replaces.isNotBlank()) {
             if (replaces == id) throw ToolError("replaces must be another slideshow.")
             val old = show(replaces)
             if (!old.str("account").equals(user, ignoreCase = true) && old.str("account").isNotEmpty()) throw ToolError("Slideshow $replaces is on @${old.str("account")}, not @$user.")
             if (e.store.get("claude_schedules") == "0") throw ToolError("Autopilot is off, so nothing can be replaced on TikTok from here: the user does it in the app.")
-            replaced = try {
-                within { e.studio.unschedule(replaces, tabOf(old)) } ?: throw ToolError("TikTok is slow to answer: nothing replaced yet. Call again in a minute.")
-            } catch (x: DraftError) {
-                throw ToolError("Nothing replaced: ${x.message}")
-            }
-            e.studio.delete(replaces)
+            // One background job (take the old one off TikTok, then schedule this one), waited on once:
+            // two waits in a row ran past the connector's 60 s limit and left Claude not knowing which half ran.
+            return within { replaceAndSchedule(id, replaces, old, s, user, at, sound) }
+                ?: "Still working on the phone (TikTok is slow). Order: the old one comes off TikTok's schedule first (checked), then this one is scheduled. " +
+                "Don't call again: in 2-3 minutes call tiktok_schedule to see which step is done."
         }
         e.studio.crowding(at, user.ifEmpty { null }, unassigned = user.isEmpty() || user.equals(defaultUser(), ignoreCase = true))?.let { throw ToolError(it) }
         if (e.store.get("claude_schedules") == "0") {
@@ -648,14 +665,9 @@ Save tokens: don't repeat calls whose answer you already have in this conversati
             return "Proposed for ${localTime(at)}. It isn't scheduled yet: the user approves it with one tap (SCHEDULE) on " +
                 "this slideshow in the Slidemill app. Tell them."
         }
-        val record = try {
-            within { e.studio.publish(id, tabOf(s), sound, at) }
-        } catch (x: Exception) {
-            if (replaces.isBlank()) throw x
-            throw ToolError("Old slideshow $replaces is deleted ($replaced), but scheduling this one failed: ${x.message} That slot is empty now: call schedule_slideshow again without replaces.")
-        } ?: return "TikTok is still uploading the slides. Call view_slideshow in a minute: it shows the scheduled time, or why it failed." +
-            (if (replaces.isNotBlank()) " Old slideshow $replaces is already deleted ($replaced)." else "")
-        return (if (replaces.isNotBlank()) "Replaced $replaces: $replaced " else "") + "Scheduled on @${record.str("url").substringAfter("/@").substringBefore("/")} for ${localTime(at)} (post id ${record.str("item_id")}). It's in TikTok Studio → Scheduled; TikTok publishes it then, phone on or off."
+        val record = within { e.studio.publish(id, tabOf(s), sound, at) }
+            ?: return "TikTok is still uploading the slides. Call view_slideshow in a minute: it shows the scheduled time, or why it failed."
+        return "Scheduled on @${record.str("url").substringAfter("/@").substringBefore("/")} for ${localTime(at)} (post id ${record.str("item_id")}). It's in TikTok Studio → Scheduled; TikTok publishes it then, phone on or off."
     }
 
     /** The user's own post as Claude sees it: its numbers, and its slides as posted (downloaded once, then kept). */
@@ -847,7 +859,9 @@ Save tokens: don't repeat calls whose answer you already have in this conversati
     }
 
     private fun status(): String {
-        val tabs = e.accounts.list(fresh = true)
+        // Remembered names: asking each tab fresh opens every tiktok.com page and can take minutes on
+        // mobile data (phone_status timed out after 60 s). A tab never seen logged in is still asked.
+        val tabs = e.accounts.list(fresh = false)
         val default = e.accounts.default()?.id
         val research = if (e.accounts.researchWithoutLogin()) null
         else e.store.get("research_account").takeIf { it.isNotEmpty() }?.let { runCatching { e.accounts.tab(it).id }.getOrNull() } ?: default
@@ -866,6 +880,7 @@ Save tokens: don't repeat calls whose answer you already have in this conversati
             "connection" to connectionLine(),
             "claude_can_schedule" to if (e.store.get("claude_schedules") != "0") "yes: schedule_slideshow schedules on TikTok directly"
             else "no: schedule_slideshow proposes a time; the user approves it in the app",
+            "recent_problems" to e.platform.recentProblems().takeLast(6).takeIf { it.isNotEmpty() }?.toMutableList<Any?>(),
         ))
     }
 
