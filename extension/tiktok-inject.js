@@ -520,6 +520,7 @@
     const csrf = await csrfToken();
     if (csrf) headers["tt-csrf-token"] = csrf;
     const posts = [];
+    const seen = {}; // status -> count, so an empty answer can say what TikTok did list
     let cursor = 0;
     for (let page = 0; page < 10; page++) {
       const r = await fetch(ORIGIN + "/tiktok/creator/manage/item_list/v1/?" + q, {
@@ -528,17 +529,21 @@
       });
       const j = await r.json();
       if (j.status_code !== 0) throw new Error("listing your scheduled posts failed: " + JSON.stringify(j).slice(0, 300));
-      let older = false;
+      const nowS = Date.now() / 1000;
       for (const it of j.item_list || []) {
-        if (num(it.status) === 141) {
-          posts.push({ id: String(it.item_id || ""), desc: it.desc || "", schedule_time: num(it.schedule_time) || num(it.post_time), slides: (it.photo_list || []).length });
-        } else if (num(it.post_time) && num(it.post_time) < Date.now() / 1000) older = true;
+        seen[num(it.status)] = (seen[num(it.status)] || 0) + 1;
+        // Studio's own schedule marks them 141; posts scheduled through the web uploader can carry
+        // another status, so anything not published (102) that goes out in the future counts too.
+        const at = num(it.schedule_time) || num(it.post_time);
+        if (num(it.status) === 141 || (num(it.status) !== 102 && at > nowS) || num(it.schedule_time) > nowS) {
+          posts.push({ id: String(it.item_id || ""), desc: it.desc || "", schedule_time: at, slides: (it.photo_list || []).length, status: num(it.status) });
+        }
       }
-      // Newest post_time first: scheduled posts come before everything already published.
-      if (older || !j.has_more) break;
+      // The whole list (an account has a few hundred posts at most): where scheduled ones sort isn't fixed.
+      if (!j.has_more) break;
       cursor = num(j.cursor);
     }
-    return posts;
+    return { posts, seen };
   }
 
   // Delete one of the account's own posts (a scheduled one, here) by item id. The caller checks with
@@ -934,7 +939,7 @@
     if (d.__vbtt === "listScheduled" || d.__vbtt === "deletePost") {
       let result;
       try {
-        result = { ok: true, ...(d.__vbtt === "listScheduled" ? { posts: await listScheduled() } : await deletePost({ itemId: d.itemId })) };
+        result = { ok: true, ...(d.__vbtt === "listScheduled" ? await listScheduled() : await deletePost({ itemId: d.itemId })) };
       } catch (e) {
         result = { ok: false, error: String((e && e.message) || e) };
       }

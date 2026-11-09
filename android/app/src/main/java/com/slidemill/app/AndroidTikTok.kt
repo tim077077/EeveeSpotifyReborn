@@ -99,10 +99,15 @@ class AndroidTikTok(private val context: Context, override val id: String = TikT
         hello()
         val result = ask("listScheduled", JSONObject(), LIST_MS) ?: return null
         if (!result.optBoolean("ok")) throw DraftError("TikTok didn't list your scheduled posts: ${result.optString("error", "unknown error")}")
+        lastNote = result.optJSONObject("seen")?.toString().orEmpty()
         val posts = Json.parse(result.optJSONArray("posts")?.toString() ?: "[]") as? List<*> ?: return null
         @Suppress("UNCHECKED_CAST")
         return posts.filterIsInstance<Map<*, *>>().map { (it as Map<String, Any?>).toMutableMap() }
     }
+
+    @Volatile private var lastNote = ""
+
+    override fun scheduleNote(): String = lastNote
 
     override fun deletePost(itemId: String) {
         hello()

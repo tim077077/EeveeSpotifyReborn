@@ -83,6 +83,9 @@ interface TikTokTab {
      */
     fun listScheduled(): List<Obj>? = null
 
+    /** What TikTok's list held at the last listScheduled (post counts by status), to explain an empty schedule. */
+    fun scheduleNote(): String = ""
+
     /** Delete one of this account's posts (a scheduled one) on TikTok. Throws [DraftError] if TikTok refuses. */
     fun deletePost(itemId: String): Unit = throw DraftError("This TikTok tab can't delete posts.")
 
