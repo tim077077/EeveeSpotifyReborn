@@ -895,13 +895,30 @@
     } catch (_) { return ""; }
   }
 
+  // Who is logged in right now, asked from TikTok itself (GET /api/v1/user/profile/upload/ answers
+  // { user: { unique_id } } for the session's account). The page's first-load data (currentUsername)
+  // goes stale: a login in this tab without a reload, or a page that didn't carry the user, read as
+  // "not logged in". Remembered for a minute; falls back to the first-load data if TikTok is slow.
+  let liveUser = { name: "", at: 0 };
+  async function loggedInUsername() {
+    if (liveUser.name && Date.now() - liveUser.at < 60000) return liveUser.name;
+    try {
+      const q = new URLSearchParams({ aid: "1988", app_name: "tiktok_creator_center", channel: "tiktok_web", device_platform: "web_pc", user_settings_requests_scene: "2" });
+      const ask = fetch(ORIGIN + "/api/v1/user/profile/upload/?" + q, { credentials: "include" }).then((r) => r.json());
+      const j = await Promise.race([ask, new Promise((r) => setTimeout(() => r(null), 3000))]);
+      const name = (j && j.user && (j.user.unique_id || j.user.uniqueId)) || "";
+      if (name) { liveUser = { name, at: Date.now() }; return name; }
+    } catch (_) { /* fall back below */ }
+    return currentUsername();
+  }
+
   let jobRunning = false;
   window.addEventListener("message", async (ev) => {
     if (ev.source !== window) return;
     const d = ev.data;
     if (!d || !d.__vbtt) return;
     if (d.__vbtt === "hello") {
-      window.postMessage({ __vbtt: "helloResult", id: d.id, result: { ready: true, username: currentUsername(), draft: DRAFT_SUPPORTED } }, "*");
+      window.postMessage({ __vbtt: "helloResult", id: d.id, result: { ready: true, username: await loggedInUsername(), draft: DRAFT_SUPPORTED } }, "*");
       return;
     }
     if (d.__vbtt === "listMine") {

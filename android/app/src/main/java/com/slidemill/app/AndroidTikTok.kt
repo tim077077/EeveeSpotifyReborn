@@ -23,7 +23,7 @@ class AndroidTikTok(private val context: Context, override val id: String = TikT
     companion object {
         private const val READY_MS = 90_000L // a fresh tiktok.com load on mobile data, screen off, after a push wake
         private const val RELOAD_AFTER_MS = 40_000L
-        private const val HELLO_MS = 4_000L
+        private const val HELLO_MS = 6_000L // the page asks TikTok who is logged in (up to 3 s)
         private const val DRAFT_MS = 4 * 60_000L
         private const val LIST_MS = 60_000L
         private const val USER_LIST_MS = 90_000L
