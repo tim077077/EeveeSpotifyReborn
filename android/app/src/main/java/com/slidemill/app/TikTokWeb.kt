@@ -111,6 +111,9 @@ class TikTokWeb private constructor(val slot: String) {
          */
         fun closeAll() {
             if (foreground || inUse()) return
+            // Write every login's latest cookies to disk first: with the service stopped, Android may end
+            // the process before WebView's own periodic save, and TikTok's refreshed session would be lost.
+            all.keys.forEach { slot -> runCatching { cookies(slot).flush() } }
             all.values.forEach { it.close() }
         }
 
