@@ -47,7 +47,9 @@ class Relay(private val e: Engine) {
         .readTimeout(0, TimeUnit.MILLISECONDS)
         .build()
     private val daemon = java.util.concurrent.ThreadFactory { r -> Thread(r, "relay").apply { isDaemon = true } }
-    private val work = Executors.newFixedThreadPool(3, daemon)
+    // Not a fixed few: calls that wait on TikTok (up to 45 s each) filled 3 threads, and the next ones
+    // queued until the relay gave up on them (phone_status timing out after 60 s).
+    private val work = Executors.newCachedThreadPool(daemon)
     private val retry = Executors.newSingleThreadScheduledExecutor(daemon)
     private val lock = Any()
     private var socket: WebSocket? = null

@@ -12,7 +12,7 @@ import java.util.concurrent.atomic.AtomicInteger
  * Claude calls. Without push they stay, since they're then the only way Claude can reach the phone.
  */
 object Idle {
-    private const val CLOSE_MS = 2 * 60_000L
+    private const val CLOSE_MS = 10 * 60_000L // short gaps between Claude's calls (it reads and thinks) mustn't close and reload tiktok.com
     private val main = Handler(Looper.getMainLooper())
     private val calls = AtomicInteger()
     private lateinit var app: Context

@@ -62,11 +62,13 @@ class AndroidTikTok(private val context: Context, override val id: String = TikT
             Thread.sleep(1_000)
         }
         throw DraftError(
-            "tiktok.com isn't answering in the app. Open Slidemill → TikTok once to check the page loads and you're logged in, then try again.",
+            "tiktok.com isn't answering in the app after ${READY_MS / 1000} s: ${web.state()}. Try again in a minute; if it keeps failing, open Slidemill → TikTok to check the page loads and you're logged in.",
         )
     }
 
     override fun username(): String = hello().optString("username")
+
+    override fun state(): String = web.state()
 
     override fun saveDraft(title: String, caption: String, slides: List<File>): String =
         run("draft", title, caption, slides, sound = false, at = 0, what = "draft", idKey = "draftId", checkWhere = "TikTok Studio drafts")
