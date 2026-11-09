@@ -572,38 +572,48 @@
   // TikTok's CSRF tokens are per path: the token from a HEAD on the list endpoint is refused on the
   // delete endpoint (status_code 10402 "invalid csrf token"). Ask for one on the path being posted to,
   // and send the tt_csrf_token cookie as tiktok.com's own pages do.
-  async function csrfFor(path) {
-    let secsdk = "";
+  // csrfFor returns the headers plus `shape`: what the HEAD answered (HTTP status, how many parts,
+  // TikTok's verdict word), never the token itself, so a refusal can say why.
+  async function csrfFor(url, withCookieToken = true) {
+    let secsdk = "", shape = "no HEAD answer";
     try {
-      const r = await fetchT(ORIGIN + path, {
+      const r = await fetchT(url, {
         method: "HEAD", credentials: "include", headers: { "x-secsdk-csrf-request": "1", "x-secsdk-csrf-version": "1.2.22" },
       }, 8000, 2);
-      const parts = (r.headers.get("x-ware-csrf-token") || "").split(",");
+      const ware = r.headers.get("x-ware-csrf-token") || "";
+      const parts = ware ? ware.split(",") : [];
       secsdk = parts.length > 1 ? parts[1] : "";
-    } catch (_) { /* none */ }
-    const m = (typeof document !== "undefined" && document.cookie.match(/(?:^|;\s*)tt_csrf_token=([^;]+)/)) || null;
+      shape = "HEAD " + r.status + ", " + (parts.length ? parts.length + " parts, " + (parts[3] || parts[0] || "?") : "no csrf header");
+    } catch (e) { shape = "HEAD failed: " + (e && e.message || e); }
+    const m = (withCookieToken && typeof document !== "undefined" && document.cookie.match(/(?:^|;\s*)tt_csrf_token=([^;]+)/)) || null;
     const headers = {};
     if (secsdk) headers["x-secsdk-csrf-token"] = secsdk;
     if (m) headers["tt-csrf-token"] = decodeURIComponent(m[1]);
-    return headers;
+    return { headers, shape };
   }
 
+  // Tries the ways tiktok.com's own pages send the token, until one isn't refused as "invalid csrf
+  // token" (10402): a token for the bare path (as the web app's HEAD asks), one for the full URL, and
+  // the bare-path token without the tt-csrf-token header. Each attempt fetches a fresh token.
   async function deletePost({ itemId } = {}) {
     if (!itemId) throw new Error("no itemId");
     const path = "/api/aweme/delete/";
-    const q = new URLSearchParams({ aweme_id: String(itemId), aid: "1988" });
-    let last = "";
-    for (let attempt = 0; attempt < 2; attempt++) { // a refused token gets one fresh try
-      const headers = await csrfFor(path);
-      const r = await fetchT(ORIGIN + path + "?" + q, { method: "POST", credentials: "include", headers }, 20000, 2); // deleting twice is harmless
+    const q = new URLSearchParams({ aweme_id: String(itemId), target: String(itemId), aid: "1988" });
+    const url = ORIGIN + path + "?" + q;
+    const ways = [[ORIGIN + path, true], [url, true], [ORIGIN + path, false]];
+    const tried = [];
+    for (const [headUrl, cookieToken] of ways) {
+      const { headers, shape } = await csrfFor(headUrl, cookieToken);
+      const r = await fetchT(url, { method: "POST", credentials: "include", headers }, 20000, 2); // deleting twice is harmless
       const text = await r.text();
       let j = null;
       try { j = JSON.parse(text); } catch (_) { /* not JSON */ }
       if (r.ok && j && (j.status_code === undefined || j.status_code === 0)) return { deleted: true };
-      last = "TikTok refused the delete (HTTP " + r.status + "): " + text.slice(0, 200);
-      if (!(j && j.status_code === 10402)) break;
+      tried.push("[" + (headUrl === url ? "token for full URL" : "token for path") + (cookieToken ? "" : ", no tt-csrf-token") + "; " + shape +
+        (headers["x-secsdk-csrf-token"] ? "" : "; no secsdk token") + "] HTTP " + r.status + " " + (j ? "status_code " + j.status_code + " " + (j.status_msg || "") : text.slice(0, 80)));
+      if (!(j && j.status_code === 10402)) break; // a refusal for another reason won't change with another token
     }
-    throw new Error(last);
+    throw new Error("TikTok refused the delete: " + tried.join(" | "));
   }
 
   async function listMine({ max } = {}) {

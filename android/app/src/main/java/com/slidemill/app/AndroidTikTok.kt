@@ -29,6 +29,7 @@ class AndroidTikTok(private val context: Context, override val id: String = TikT
         private const val USER_LIST_MS = 90_000L
         private const val REPLY_MS = 30_000L
         private const val PROFILE_MS = 15_000L
+        private const val DELETE_MS = 120_000L // up to three tries, each a fresh token and the delete itself
         private const val VERIFY_MS = 5 * 60_000L // after a timeout: how long to look for the post in TikTok's schedule
 
     }
@@ -38,7 +39,13 @@ class AndroidTikTok(private val context: Context, override val id: String = TikT
         val out = AtomicReference<JSONObject?>()
         web.ask(kind, payload, timeoutMs) { out.set(it); latch.countDown() }
         latch.await(timeoutMs + 2_000, TimeUnit.MILLISECONDS)
-        return out.get()
+        val result = out.get()
+        when {
+            result == null -> if (kind != "hello") Diag.note("${web.slot}: no answer to $kind in ${timeoutMs / 1000} s (${web.state()})")
+            !result.optBoolean("ok", true) -> Diag.note("${web.slot}: $kind failed: ${result.optString("error")}")
+        }
+        if (kind == "deletePost" && result != null && !result.optBoolean("ok")) throw DraftError(result.optString("error", "TikTok refused the delete."))
+        return result
     }
 
     /**
@@ -113,9 +120,8 @@ class AndroidTikTok(private val context: Context, override val id: String = TikT
 
     override fun deletePost(itemId: String) {
         hello()
-        val result = ask("deletePost", JSONObject().put("itemId", itemId), PROFILE_MS)
+        val result = ask("deletePost", JSONObject().put("itemId", itemId), DELETE_MS)
             ?: throw DraftError("TikTok didn't answer the delete in time.")
-        if (!result.optBoolean("ok")) throw DraftError(result.optString("error", "TikTok refused the delete."))
     }
 
     /**
