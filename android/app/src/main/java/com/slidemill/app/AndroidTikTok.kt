@@ -22,7 +22,8 @@ class AndroidTikTok(private val context: Context, override val id: String = TikT
 
     companion object {
         private const val READY_MS = 90_000L // a fresh tiktok.com load on mobile data, screen off, after a push wake
-        private const val RELOAD_AFTER_MS = 40_000L
+        private const val RELOAD_AFTER_MS = 30_000L
+        private const val RESTART_AFTER_MS = 55_000L
         private const val HELLO_MS = 6_000L // the page asks TikTok who is logged in (up to 3 s)
         private const val DRAFT_MS = 4 * 60_000L
         private const val LIST_MS = 60_000L
@@ -37,12 +38,15 @@ class AndroidTikTok(private val context: Context, override val id: String = TikT
     private fun ask(kind: String, payload: JSONObject, timeoutMs: Long): JSONObject? {
         val latch = CountDownLatch(1)
         val out = AtomicReference<JSONObject?>()
+        val began = System.currentTimeMillis()
+        if (kind != "hello") Diag.note("${web.slot}: $kind started")
         web.ask(kind, payload, timeoutMs) { out.set(it); latch.countDown() }
         latch.await(timeoutMs + 2_000, TimeUnit.MILLISECONDS)
         val result = out.get()
         when {
             result == null -> if (kind != "hello") Diag.note("${web.slot}: no answer to $kind in ${timeoutMs / 1000} s (${web.state()})")
             !result.optBoolean("ok", true) -> Diag.note("${web.slot}: $kind failed: ${result.optString("error")}")
+            kind != "hello" -> Diag.note("${web.slot}: $kind answered in ${(System.currentTimeMillis() - began) / 1000} s")
         }
         if (kind == "deletePost" && result != null && !result.optBoolean("ok")) throw DraftError(result.optString("error", "TikTok refused the delete."))
         return result
@@ -56,10 +60,19 @@ class AndroidTikTok(private val context: Context, override val id: String = TikT
         val start = System.currentTimeMillis()
         val until = start + READY_MS
         var reloaded = false
+        var restarted = false
         while (System.currentTimeMillis() < until) {
-            if (!reloaded && System.currentTimeMillis() - start > RELOAD_AFTER_MS) {
+            val waited = System.currentTimeMillis() - start
+            if (!reloaded && waited > RELOAD_AFTER_MS) {
                 reloaded = true
+                Diag.note("${web.slot}: page not answering after ${waited / 1000} s (${web.state()}), reloading")
                 web.reload(context)
+            }
+            // A reload doesn't help a page whose scripts stopped (it stayed dead for 20 min): a new one.
+            if (!restarted && waited > RESTART_AFTER_MS) {
+                restarted = true
+                Diag.note("${web.slot}: still not answering after ${waited / 1000} s (${web.state()}), opening a new page")
+                web.restart(context)
             }
             web.wake(context)
             if (web.pageReady) {
@@ -68,6 +81,7 @@ class AndroidTikTok(private val context: Context, override val id: String = TikT
             }
             Thread.sleep(1_000)
         }
+        Diag.note("${web.slot}: gave up after ${READY_MS / 1000} s (${web.state()})")
         throw DraftError(
             "tiktok.com isn't answering in the app after ${READY_MS / 1000} s: ${web.state()}. Try again in a minute; if it keeps failing, open Slidemill → TikTok to check the page loads and you're logged in.",
         )
