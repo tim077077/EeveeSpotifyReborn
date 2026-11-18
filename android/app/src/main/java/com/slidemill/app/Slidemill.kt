@@ -23,6 +23,7 @@ class AndroidPlatform(private val context: Context) : Platform {
 
     init {
         Diag.attach(java.io.File(context.filesDir, "diag.txt"))
+        Diag.lastExit(context)
     }
 
     override fun encryptSecret(plain: String) = Secrets.encrypt(plain)
