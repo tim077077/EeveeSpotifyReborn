@@ -32,6 +32,18 @@ class TikTokScheduleTest {
 
     private val at = Instant.ofEpochSecond((Db.nowMs() / 1000 + 6 * 3600) / 300 * 300).toString()
 
+    @Test fun your_brand_is_sent_and_remembered_for_the_account() {
+        val first = create("Snap tips #snapchat")
+        val out = text(call("schedule_slideshow", obj("slideshow_id" to first, "at" to at, "your_brand" to true)))
+        assertTrue("Your brand" in out, out)
+        assertEquals(listOf(true), tab.yourBrand.toList())
+        // Later posts on the same account get it without asking again.
+        val later = Instant.ofEpochSecond(Instant.parse(at).epochSecond + 3 * 3600).toString()
+        call("schedule_slideshow", obj("slideshow_id" to create("More snap tips"), "at" to later))
+        assertEquals(listOf(true, true), tab.yourBrand.toList())
+        assertEquals(setOf("vintedbot.org"), e.brandAccounts())
+    }
+
     @Test fun deleting_a_scheduled_slideshow_takes_it_off_tiktok_too() {
         val id = create("Outdoor jackets #vinted")
         assertTrue("Scheduled" in text(call("schedule_slideshow", obj("slideshow_id" to id, "at" to at))))

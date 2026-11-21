@@ -15,6 +15,7 @@ class Store(private val db: Db, private val platform: Platform) {
             "research_account" to listOf(), // TikTok username whose session does research (search, other accounts) ("" = the main tab)
             "auto_reply" to listOf(), // the automatic comment replies: keywords, what to answer, caps (JSON)
             "stay_awake" to listOf(), // "1": the app holds the CPU awake for Claude (a phone on the charger)
+            "your_brand" to listOf(), // TikTok usernames (comma-separated, lowercase) whose posts carry "Your brand" (promotional content)
             "push_config" to listOf(), // the pasted google-services.json: Firebase for the relay's wake-up push
         )
         val SECRET_KEYS = setOf("image_api_key", "pexels_api_key", "unsplash_access_key")

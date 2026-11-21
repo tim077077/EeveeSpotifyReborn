@@ -23,6 +23,8 @@ class Studio(
     private val images: Images,
     private val renderer: Renderer,
     private val pinterest: Pinterest = Pinterest(),
+    /** Whether posts on this TikTok username carry "Your brand" (promotional content). */
+    private val yourBrand: (String) -> Boolean = { false },
 ) {
     val sources = listOf("auto", "stock", "ai", "pinterest")
 
@@ -374,8 +376,10 @@ class Studio(
             if (tab == null) throw DraftError("The phone's TikTok tab isn't running: reopen the Slidemill app.")
             if (slides.isEmpty() || slides.any { !it.isFile }) throw DraftError("The rendered slides are missing on this phone.")
             val user = tab.username()
-            val itemId = tab.publish(title, caption, slides, sound, at)
+            val brand = yourBrand(user)
+            val itemId = tab.publish(title, caption, slides, sound, at, brand)
             obj(
+                "your_brand" to brand,
                 "status" to if (at > 0) "scheduled" else "posted", "item_id" to itemId,
                 "url" to "https://www.tiktok.com/@$user/photo/$itemId", "error" to "",
                 "scheduled_for" to if (at > 0) Db.iso(at * 1000) else "",

@@ -178,9 +178,10 @@ Save tokens: don't repeat calls whose answer you already have in this conversati
                 "at" to str("When, as ISO 8601: 2026-10-27T18:30:00+01:00, or without an offset for the phone's own time zone."),
                 "sound" to bool("Attach TikTok's top suggested sound (default true)."),
                 "account" to str("TikTok username to post to. Required when several accounts are logged in: confirm it with the user first."),
+                "your_brand" to bool("TikTok's \"Disclose post content → Your brand\" (labelled Promotional content). Remembered per account: true once and every later post there has it."),
                 "replaces" to str("Id of a scheduled slideshow this one replaces at the same time: it's deleted from TikTok's schedule (checked) and the phone first. TikTok can't edit a scheduled post's slides."),
             ),
-        ) { a -> schedule(id(a), a.str("at"), a["sound"] as? Boolean ?: true, a.str("account"), a.str("replaces")) },
+        ) { a -> schedule(id(a), a.str("at"), a["sound"] as? Boolean ?: true, a.str("account"), a.str("replaces"), a["your_brand"] as? Boolean) },
 
         "view_post" to Tool(
             "One of the user's own posted TikToks (post_id from analytics): stats, and for a carousel its real slides tiled on one image; slide=N shows one full size.",
@@ -636,6 +637,7 @@ Save tokens: don't repeat calls whose answer you already have in this conversati
         return note + "TikTok Studio → Scheduled for @$user (${listed.size}):\n" + listed.sortedBy { (it["schedule_time"] as? Number)?.toLong() ?: 0L }.joinToString("\n") { p ->
             val at = (p["schedule_time"] as? Number)?.toLong() ?: 0L
             "- ${localTime(at)} · post ${p["id"]} · ${p["slides"]} slides · \"${p["desc"].toString().take(60)}\"" +
+                (when (p["your_brand"]) { true -> " · Your brand"; false -> " · not promotional"; else -> "" }) +
                 (byItem[p["id"].toString()]?.let { " · slideshow $it" } ?: " · no slideshow on the phone")
         }
     }
@@ -657,10 +659,11 @@ Save tokens: don't repeat calls whose answer you already have in this conversati
         } catch (x: Exception) {
             throw ToolError("Old slideshow $replaces is deleted ($replaced), but scheduling this one failed: ${x.message} That slot is empty now: call schedule_slideshow again without replaces.")
         }
-        return "Replaced $replaces: $replaced Scheduled on @${record.str("url").substringAfter("/@").substringBefore("/")} for ${localTime(at)} (post id ${record.str("item_id")})."
+        return "Replaced $replaces: $replaced Scheduled on @${record.str("url").substringAfter("/@").substringBefore("/")} for ${localTime(at)} (post id ${record.str("item_id")})" +
+            (if (record["your_brand"] == true) ", marked Your brand (promotional content)." else ".")
     }
 
-    private fun schedule(id: String, raw: String, sound: Boolean, account: String, replaces: String = ""): String {
+    private fun schedule(id: String, raw: String, sound: Boolean, account: String, replaces: String = "", yourBrand: Boolean? = null): String {
         // With several accounts, the account is never a default: Claude names it, after the user confirmed it.
         if (account.isBlank() && e.tabs.size > 1) {
             val names = e.accounts.list().map { it.str("username") }.filter { it.isNotEmpty() }.joinToString { "@$it" }
@@ -676,6 +679,7 @@ Save tokens: don't repeat calls whose answer you already have in this conversati
         val at = parseAt(raw)
         Studio.scheduleProblem(at)?.let { throw ToolError(it) }
         val user = s.str("account").ifEmpty { defaultUser() }
+        if (yourBrand != null && user.isNotEmpty()) e.setYourBrand(user, yourBrand)
         if (replaces.isNotBlank()) {
             if (replaces == id) throw ToolError("replaces must be another slideshow.")
             val old = show(replaces)
@@ -696,7 +700,8 @@ Save tokens: don't repeat calls whose answer you already have in this conversati
         scheduleCache.clear()
         val record = within { e.studio.publish(id, tabOf(s), sound, at) }
             ?: return "TikTok is still uploading the slides. Call view_slideshow in a minute: it shows the scheduled time, or why it failed."
-        return "Scheduled on @${record.str("url").substringAfter("/@").substringBefore("/")} for ${localTime(at)} (post id ${record.str("item_id")}). It's in TikTok Studio → Scheduled; TikTok publishes it then, phone on or off."
+        return "Scheduled on @${record.str("url").substringAfter("/@").substringBefore("/")} for ${localTime(at)} (post id ${record.str("item_id")})" +
+            (if (record["your_brand"] == true) ", marked Your brand (promotional content)" else "") + ". It's in TikTok Studio → Scheduled; TikTok publishes it then, phone on or off."
     }
 
     /** The user's own post as Claude sees it: its numbers, and its slides as posted (downloaded once, then kept). */
@@ -910,6 +915,7 @@ Save tokens: don't repeat calls whose answer you already have in this conversati
             "connection" to connectionLine(),
             "claude_can_schedule" to if (e.store.get("claude_schedules") != "0") "yes: schedule_slideshow schedules on TikTok directly"
             else "no: schedule_slideshow proposes a time; the user approves it in the app",
+            "promotional_content" to e.brandAccounts().takeIf { it.isNotEmpty() }?.joinToString { "@$it: every post marked Your brand" },
             "recent_problems" to (e.platform.recentProblems().takeLast(15).takeIf { it.isNotEmpty() }?.toMutableList<Any?>() ?: "none"),
         ))
     }

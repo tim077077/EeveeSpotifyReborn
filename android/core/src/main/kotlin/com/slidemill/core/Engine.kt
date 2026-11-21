@@ -17,7 +17,17 @@ class Engine(val platform: Platform, val dataDir: File) {
     val images = Images(db, store, platform, mediaDir)
     val pinterest = Pinterest()
     val renderer = Renderer(platform.imaging, mediaDir)
-    val studio = Studio(db, platform, mediaDir, imageGen, images, renderer, pinterest)
+    val studio = Studio(db, platform, mediaDir, imageGen, images, renderer, pinterest, yourBrand = { user -> user.lowercase() in brandAccounts() })
+
+    /** Accounts whose every post carries TikTok's "Your brand" disclosure (promotional content). */
+    fun brandAccounts(): Set<String> = store.get("your_brand").split(",").map { it.trim().removePrefix("@").lowercase() }.filter { it.isNotEmpty() }.toSet()
+
+    fun setYourBrand(user: String, on: Boolean) {
+        val u = user.trim().removePrefix("@").lowercase()
+        if (u.isEmpty()) return
+        val now = if (on) brandAccounts() + u else brandAccounts() - u
+        store.setMany(mapOf("your_brand" to now.sorted().joinToString(",")))
+    }
     val library = Library(db, images, platform).also { l ->
         l.via = { accounts.researchSlot() }
         l.researchTab = { accounts.researchSlot().let { s -> if (s == Accounts.NO_LOGIN) null else tabs[s.ifEmpty { TikTokTab.MAIN }] } }
