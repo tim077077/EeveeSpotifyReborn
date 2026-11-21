@@ -76,6 +76,10 @@ interface TikTokTab {
      */
     fun publish(title: String, caption: String, slides: List<File>, sound: Boolean, at: Long = 0): String
 
+    /** [publish] with TikTok's "Disclose post content → Your brand" set to [yourBrand] (labelled "Promotional content"). */
+    fun publish(title: String, caption: String, slides: List<File>, sound: Boolean, at: Long, yourBrand: Boolean): String =
+        if (yourBrand) throw DraftError("This TikTok tab can't mark posts as promotional content.") else publish(title, caption, slides, sound, at)
+
     /**
      * The logged-in account's own published posts with their stats, newest first, as TikTok Studio's
      * Content page lists them: maps with id, desc, posted_at (unix s), views, likes, comments, shares,

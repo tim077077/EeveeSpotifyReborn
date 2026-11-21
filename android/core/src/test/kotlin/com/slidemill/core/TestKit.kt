@@ -29,6 +29,13 @@ class FakeTikTok(var user: String = "tim", override val id: String = TikTokTab.M
 
     val scheduledAt = CopyOnWriteArrayList<Long>()
 
+    val yourBrand = CopyOnWriteArrayList<Boolean>()
+
+    override fun publish(title: String, caption: String, slides: List<File>, sound: Boolean, at: Long, yourBrand: Boolean): String {
+        this.yourBrand += yourBrand
+        return publish(title, caption, slides, sound, at)
+    }
+
     override fun publish(title: String, caption: String, slides: List<File>, sound: Boolean, at: Long): String {
         if (user.isEmpty()) throw DraftError("Not logged in to TikTok in the app.")
         Thread.sleep(delayMs)

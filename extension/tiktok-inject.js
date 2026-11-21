@@ -381,6 +381,11 @@
   const MIN_SCHEDULE_S = 15 * 60;
   const SCHEDULE_STEP_S = 5 * 60;
 
+  // TikTok Studio's "Disclose post content" → "Your brand" (labelled "Promotional content"): from Studio's
+  // own upload code, commerce_toggle_info.brand_organic_type = 2001 (BRAND_ORGANIC_TYPE); off = {}.
+  const BRAND_ORGANIC_TYPE = 2001;
+  const tcmParams = (yourBrand) => JSON.stringify({ commerce_toggle_info: yourBrand ? { brand_organic_type: BRAND_ORGANIC_TYPE } : {} });
+
   const timeZone = () => { try { return Intl.DateTimeFormat().resolvedOptions().timeZone || ""; } catch (_) { return ""; } };
 
   async function ackSchedule() {
@@ -389,7 +394,7 @@
     } catch (e) { warn("schedule ack failed (continuing):", e && e.message); }
   }
 
-  async function createPost({ title, caption, uploaded, creation_id, music, schedule }) {
+  async function createPost({ title, caption, uploaded, creation_id, music, schedule, yourBrand }) {
     const images = uploaded.map((u, idx) => ({
       id: "file_" + Date.now() + "_" + idx,
       uri: u.uri,
@@ -419,7 +424,7 @@
           org_game_post_use_store_region: false,
           privacy_setting_info: { allow_comment: 1, allow_duet: 1, allow_stitch: 1, allow_content_reuse: 1, allow_ai_remix: 2, visibility_type: 0 },
           draft_id: "",
-          tcm_params: '{"commerce_toggle_info":{}}',
+          tcm_params: tcmParams(yourBrand),
           anchors: [],
         },
       ],
@@ -529,6 +534,13 @@
     return { items, pages: Math.max(pages, 1), stoppedAtKnown };
   }
 
+  // Whether a listed post carries "Your brand", when the list says (null when it doesn't).
+  function yourBrandOf(it) {
+    const raw = it.tcm_params || (it.web_feature_common_info && it.web_feature_common_info.tcm_params) || (it.feature_common_info && it.feature_common_info.tcm_params);
+    if (!raw) return null;
+    try { const c = (typeof raw === "string" ? JSON.parse(raw) : raw).commerce_toggle_info || {}; return Boolean(c.brand_organic_type); } catch (_) { return null; }
+  }
+
   // TikTok Studio's own schedule: the account's posts waiting to go out (status 141, with schedule_time),
   // from the same list as listMine. TikTok's permissions there: scheduled posts can't be edited, only deleted.
   async function listScheduled() {
@@ -555,7 +567,7 @@
         // another status, so anything not published (102) that goes out in the future counts too.
         const at = num(it.schedule_time) || num(it.post_time);
         if (num(it.status) === 141 || (num(it.status) !== 102 && at > nowS) || num(it.schedule_time) > nowS) {
-          posts.push({ id: String(it.item_id || ""), desc: it.desc || "", schedule_time: at, slides: (it.photo_list || []).length, status: num(it.status) });
+          posts.push({ id: String(it.item_id || ""), desc: it.desc || "", schedule_time: at, slides: (it.photo_list || []).length, status: num(it.status), your_brand: yourBrandOf(it) });
         }
       }
       // Newest post_time first, so waiting posts lead; once a page reaches posts already published
@@ -602,6 +614,20 @@
     const url = ORIGIN + path + "?" + q;
     const ways = [[ORIGIN + path, true], [url, true], [ORIGIN + path, false]];
     const tried = [];
+    // TikTok Studio's own delete (its content page, from Studio's code): DELETE /tiktok/creator/item/delete/v1/?item_id=
+    // with the creator-center query, the same way its item_list call is sent.
+    try {
+      const sp = "/tiktok/creator/item/delete/v1/";
+      const sq = new URLSearchParams({ item_id: String(itemId), aid: "1988", app_name: "tiktok_creator_center", channel: "tiktok_web", device_platform: "web_pc" });
+      const { headers, shape } = await csrfFor(ORIGIN + sp);
+      if (headers["x-secsdk-csrf-token"] && !headers["tt-csrf-token"]) headers["tt-csrf-token"] = headers["x-secsdk-csrf-token"];
+      const r = await fetchT(ORIGIN + sp + "?" + sq, { method: "DELETE", credentials: "include", headers }, 20000, 2);
+      const text = await r.text();
+      let j = null;
+      try { j = JSON.parse(text); } catch (_) { /* not JSON */ }
+      if (r.ok && j && (j.status_code === undefined || j.status_code === 0)) return { deleted: true, via: "studio" };
+      tried.push("[Studio delete; " + shape + "] HTTP " + r.status + " " + (j ? "status_code " + j.status_code + " " + (j.status_msg || "") : text.slice(0, 80)));
+    } catch (e) { tried.push("[Studio delete] " + (e && e.message || e)); }
     for (const [headUrl, cookieToken] of ways) {
       const { headers, shape } = await csrfFor(headUrl, cookieToken);
       const r = await fetchT(url, { method: "POST", credentials: "include", headers }, 20000, 2); // deleting twice is harmless
@@ -838,7 +864,7 @@
   // sound: falsy = silent (default, proven path); true = auto-pick the top
   // recommended web-library sound; a string = use that exact music_id.
   // schedule: unix seconds to publish at (TikTok Studio's Schedule); falsy = publish now.
-  async function post({ title, caption, images, sound, schedule }) {
+  async function post({ title, caption, images, sound, schedule, yourBrand }) {
     if (!images || !images.length) throw new Error("no images");
     if (location.host !== "www.tiktok.com") warn("run this on www.tiktok.com while logged in");
 
@@ -859,7 +885,7 @@
     }
 
     log("creating post…");
-    const res = await createPost({ title, caption, uploaded, creation_id, music, schedule });
+    const res = await createPost({ title, caption, uploaded, creation_id, music, schedule, yourBrand });
     log("%c✓ POSTED", "color:#12b886;font-weight:bold", res);
     if (!music) log("Posted silent. Pass sound:true to auto-attach a web-library sound, or add a viral sound in the app for max reach.");
     return res;
@@ -1048,7 +1074,7 @@
       try {
         const run = job.action === "draft" ? saveDraft : post;
         log(`Slidemill job ${job.id}: ${job.action || "publish"} "${job.title}" (${(job.images || []).length} slides)`);
-        const res = await run({ title: job.title, caption: job.caption, images: job.images, sound: job.sound, schedule: job.schedule });
+        const res = await run({ title: job.title, caption: job.caption, images: job.images, sound: job.sound, schedule: job.schedule, yourBrand: !!job.yourBrand });
         result = { ok: true, itemId: (res && res.itemId) || "", draftId: (res && res.draftId) || "", scheduleTime: (res && res.scheduleTime) || 0, username: currentUsername() };
       } catch (e) {
         result = { ok: false, error: String((e && e.message) || e), unsupported: !!(e && e.unsupported), username: currentUsername() };
